@@ -1,13 +1,54 @@
-.venv/
-.ipynb_checkpoints/
+# --- Python ---
 __pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# --- Testing and tooling caches ---
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Editors and operating systems ---
+.vscode/
+.idea/
+*.swp
+*~
 .DS_Store
+Thumbs.db
 
+# --- Data ---
+# Raw source CSVs are proprietary: keep them local and out of Git.
+# Only the directory documentation is tracked.
 data/raw/*
-data/interim/*
-data/processed/*.parquet
-
+!data/raw/README.md
 !data/raw/.gitkeep
+
+# Generated datasets are reproducible and ignored by default.
+data/interim/*
+!data/interim/README.md
 !data/interim/.gitkeep
+
+data/processed/*
+!data/processed/README.md
 !data/processed/.gitkeep
+
+# --- Generated reports and figures ---
+# Ignored by default; use `git add -f` to deliberately publish a final report.
+reports/*
+!reports/README.md
+!reports/.gitkeep
+!reports/figures/
+reports/figures/*
+!reports/figures/README.md
+!reports/figures/.gitkeep
