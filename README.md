@@ -92,6 +92,17 @@ cars_df = raw.cars                      # pandas.DataFrame
   small synthetic CSVs generated in temporary directories and never read the
   real files.
 
+## Notebooks
+
+Notebooks live in `notebooks/` and run in numeric-prefix order, top to bottom
+from a restarted kernel; `notebooks/README.md` lists the order and rules.
+Committed notebooks must have no outputs. Validate structure and execution
+(against synthetic temporary data) with:
+
+```bash
+python -m pytest tests/test_notebooks.py
+```
+
 ## Data trust
 
 - All scheduled cities represented

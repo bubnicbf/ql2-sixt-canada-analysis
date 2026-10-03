@@ -1,9 +1,52 @@
 # notebooks
 
-Exploratory and presentation notebooks.
+Exploratory and presentation notebooks. Reusable logic belongs in
+`src/ql2_sixt_canada_analysis`; notebooks import it rather than re-implement it.
 
-- Import reusable logic from `ql2_sixt_canada_analysis` (under `src/`) instead
-  of copying production code into cells.
-- Write generated data to `data/interim/` or `data/processed/` and figures to
-  `reports/figures/`; never write to `data/raw/`.
-- Clear large outputs before committing.
+## Execution order
+
+Run notebooks in numeric-prefix order, each one **top to bottom after
+restarting the kernel** (Kernel ▸ Restart Kernel and Run All Cells). No
+notebook may rely on variables, imports or files left behind by an earlier
+interactive session, and none depends on the working directory.
+
+| Order | Notebook | Purpose |
+| --- | --- | --- |
+| 1 | `01_data_ingestion.ipynb` | Load the `jobs` and `cars` raw datasets through the package ingestion API and confirm both loaded. No analysis or transformation. |
+
+Later notebooks will be added with the next prefixes (`02_`, `03_`, ...).
+
+## Rules
+
+- Raw, interim and processed data under `data/` are proprietary and
+  Git-ignored. Never write into `data/raw/`.
+- Real data must not appear in cell outputs, markdown, metadata, test
+  fixtures or reports: no DataFrame previews, columns, row counts, file names
+  or paths.
+- Clear all outputs and execution counts before committing
+  (Edit ▸ Clear Outputs of All Cells). `tests/test_notebooks.py` fails if a
+  committed notebook has outputs, execution counts, widget state or local
+  paths.
+- Do not call `os.chdir`, edit `sys.path`, or install packages from a cell;
+  do not read CSVs directly or name source files.
+
+## Validation
+
+```bash
+python -m pytest tests/test_notebooks.py
+```
+
+The tests check each notebook's structure and then execute a **copy** from a
+clean kernel, top to bottom, against synthetic CSVs generated in a pytest
+temporary directory from the centralized column contracts. The executed copy
+is written only to that temporary directory; the tracked notebook is never
+modified and the proprietary files are never read.
+
+The synthetic directory reaches the notebook through the
+`QL2_SIXT_RAW_DATA_DIR` environment variable, read by
+`ql2_sixt_canada_analysis.paths.resolve_raw_data_dir()` (defined once in that
+module). Developers do not set it: when it is unset the notebook uses the
+centralized default raw directory. The same validator,
+`ql2_sixt_canada_analysis.notebook_validation.execute_notebook_copy`, can be
+used locally against the real files; it reports execution-order problems and
+cell failures by cell index only.

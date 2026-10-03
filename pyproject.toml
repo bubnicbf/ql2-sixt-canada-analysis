@@ -20,12 +20,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Development tools: test runner (packaging is used directly by the tests)
-# and the notebook environment.
+# Development tools: test runner (packaging is used directly by the tests),
+# the notebook environment, and the notebook execution validator
+# (nbformat/nbclient/ipykernel are imported directly by the package and tests).
 dev = [
     "pytest>=8",
     "packaging",
     "jupyterlab",
+    "nbformat>=5",
+    "nbclient>=0.10",
+    "ipykernel>=6",
 ]
 
 [tool.setuptools.packages.find]

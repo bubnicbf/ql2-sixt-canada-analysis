@@ -25,6 +25,11 @@ htmlcov/
 
 # --- Jupyter ---
 .ipynb_checkpoints/
+# Executed/temporary notebook copies and backups (source notebooks are tracked).
+*.nbconvert.ipynb
+*.executed.ipynb
+*.ipynb.bak
+*.ipynb~
 
 # --- Editors and operating systems ---
 .vscode/
