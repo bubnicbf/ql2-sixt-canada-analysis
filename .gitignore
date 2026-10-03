@@ -50,6 +50,22 @@ data/processed/*
 !data/processed/README.md
 !data/processed/.gitkeep
 
+# Defence in depth: never commit derived data exports anywhere in the repo.
+# (JSON is protected by the directory rules above rather than globally,
+# so tracked configuration files remain possible.)
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.zip
+*.gz
+*.bz2
+*.xz
+*.7z
+*.tar
+
 # --- Generated reports and figures ---
 # Ignored by default; use `git add -f` to deliberately publish a final report.
 reports/*

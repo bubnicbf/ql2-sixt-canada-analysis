@@ -29,7 +29,9 @@ RUNTIME_IMPORTS = ["pandas", "numpy", "pyarrow", "matplotlib", "seaborn", "scipy
 DEV_DEPENDENCIES = ["pytest", "jupyterlab"]
 
 PROTECTED_DATA_DIRS = ["data/raw", "data/interim", "data/processed"]
-DATA_EXTENSIONS = ["csv", "parquet", "json", "xlsx", "feather", "pkl", "zip", "csv.gz"]
+DATA_EXTENSIONS = [
+    "csv", "tsv", "parquet", "feather", "json", "xlsx", "pkl", "pickle", "zip", "gz", "csv.gz",
+]
 SAFE_PLACEHOLDER_NAMES = {"README.md", ".gitkeep"}
 
 
@@ -174,6 +176,16 @@ def test_jupyterlab_is_installed() -> None:
 def test_data_files_are_ignored(data_dir: str, extension: str) -> None:
     assert _is_ignored(f"{data_dir}/synthetic_example.{extension}")
     assert _is_ignored(f"{data_dir}/nested/synthetic_example.{extension}")
+
+
+@pytest.mark.usefixtures("require_git")
+@pytest.mark.parametrize("location", ["", "notebooks/", "reports/", "src/", "tests/"])
+@pytest.mark.parametrize(
+    "extension", ["csv", "tsv", "parquet", "feather", "pkl", "pickle", "zip", "gz", "csv.gz"]
+)
+def test_derived_data_formats_are_ignored_outside_data_dirs(location: str, extension: str) -> None:
+    # Defence in depth: derived datasets saved by mistake elsewhere stay out of Git.
+    assert _is_ignored(f"{location}synthetic_export.{extension}")
 
 
 @pytest.mark.usefixtures("require_git")

@@ -50,6 +50,34 @@ Data and environment safety:
 - This configuration installs code and dependencies only; it does not make
   proprietary datasets safe to publish.
 
+## Raw data ingestion
+
+`ql2_sixt_canada_analysis.ingestion` discovers the two locally supplied raw
+CSVs in `data/raw/` and loads them as pandas DataFrames under the logical
+roles `jobs` and `cars`.
+
+```python
+from ql2_sixt_canada_analysis import load_raw_datasets
+
+raw = load_raw_datasets()      # or load_raw_datasets("path/to/raw_dir")
+jobs_df = raw.jobs             # pandas.DataFrame
+cars_df = raw.cars             # pandas.DataFrame
+```
+
+- **Discovery:** only `*.csv` files directly in the directory are considered
+  (case-insensitive, no recursion). A file's role is the last `jobs` or
+  `cars` word in its name, so prefixes, numbers, spaces and download
+  suffixes such as `(1)` are tolerated. Missing or duplicate roles raise an
+  `IngestionError` subclass instead of guessing; `discover_raw_csvs()` returns
+  the paths without loading.
+- **Ingestion only:** each file is read once with `pandas.read_csv` defaults
+  (extra options via `read_csv_options=`). Nothing is cleaned, renamed,
+  coerced, deduplicated or written to disk; transformations belong in later
+  steps.
+- **Confidentiality:** raw inputs are read-only and proprietary. Raw, interim
+  and processed data must never be committed. Tests use small synthetic CSVs
+  created in temporary directories and never read the real files.
+
 ## Data trust
 
 - All scheduled cities represented
