@@ -4,14 +4,21 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.eggs/
+*.egg
+*.whl
+
+# --- Local virtual environments (recreate locally; never commit) ---
 .venv/
 venv/
+env/
 .env
 
 # --- Testing and tooling caches ---
 .pytest_cache/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 .mypy_cache/
 .ruff_cache/

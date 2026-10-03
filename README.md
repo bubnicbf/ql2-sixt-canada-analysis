@@ -21,12 +21,34 @@ docs/              Supporting documentation
 - Notebooks should import and call functions from the source package rather
   than contain duplicated production logic.
 
-Setup and tests (Python 3.11+):
+## Environment setup
+
+Requires Python 3.11 or newer. Run these commands from the repository root.
 
 ```bash
-pip install -e ".[dev]"
-pytest
+python3 --version                      # must report 3.11 or newer
+python3 -m venv .venv                  # create a local virtual environment
+source .venv/bin/activate              # macOS/Linux (Windows: .venv\Scripts\activate)
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"      # package + runtime deps + pytest/JupyterLab
+python -m pytest                       # run the test suite
+jupyter lab                            # optional: start JupyterLab
 ```
+
+Dependencies are declared only in `pyproject.toml`: runtime analysis libraries
+under `[project] dependencies`, and test and notebook tools under the `dev`
+extra. Recreate the environment by deleting `.venv/` and repeating the steps.
+
+Data and environment safety:
+
+- `.venv/` is local to your machine and must never be committed.
+- All QL2 data in `data/raw/`, `data/interim/`, and `data/processed/` is
+  proprietary and must never be committed; Git ignores these directories
+  except for their placeholder/README files.
+- Tests use small synthetic data created inside the tests. Never substitute
+  real QL2 data for committed test fixtures.
+- This configuration installs code and dependencies only; it does not make
+  proprietary datasets safe to publish.
 
 ## Data trust
 

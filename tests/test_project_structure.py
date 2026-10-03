@@ -29,10 +29,6 @@ REQUIRED_DIRECTORIES = [
     "docs",
 ]
 
-RAW_CSV_FILES = [
-    "data/raw/sixt_canada_jobs_153_422_jobs_raw (1).csv",
-    "data/raw/sixt_canada_jobs_153_422_cars_raw (1).csv",
-]
 
 # Hypothetical generated outputs; they need not exist for check-ignore.
 GENERATED_PATHS = [
@@ -114,22 +110,26 @@ def test_package_is_importable_from_src() -> None:
     assert module_path.is_relative_to((PROJECT_ROOT / "src").resolve())
 
 
-@pytest.mark.parametrize("relative_path", RAW_CSV_FILES)
-def test_raw_csv_present_and_not_empty(relative_path: str) -> None:
-    path = PROJECT_ROOT / relative_path
-    if not path.exists():
-        pytest.skip(
-            f"{relative_path} is proprietary and not distributed with the "
-            "repository; place it in data/raw/ to run this check"
-        )
-    assert path.is_file()
-    assert path.stat().st_size > 0, f"raw file is empty: {relative_path}"
+def test_local_raw_files_are_not_empty() -> None:
+    # Raw files are proprietary and supplied locally; check sizes only, never
+    # contents or names, and skip when none are present (e.g. a fresh clone).
+    raw_files = [
+        path for path in (PROJECT_ROOT / "data" / "raw").iterdir()
+        if path.is_file() and path.name not in {"README.md", ".gitkeep"}
+    ]
+    if not raw_files:
+        pytest.skip("no locally supplied raw files in data/raw/")
+    empty = [path for path in raw_files if path.stat().st_size == 0]
+    assert not empty, f"{len(empty)} raw file(s) are empty"
 
 
 @pytest.mark.usefixtures("require_git")
-@pytest.mark.parametrize("relative_path", RAW_CSV_FILES)
-def test_raw_csv_kept_out_of_git(relative_path: str) -> None:
-    # Policy: the supplied raw CSVs are proprietary and must never be committed.
+@pytest.mark.parametrize(
+    "relative_path",
+    ["data/raw/synthetic_source.csv", "data/raw/nested/synthetic_source.csv"],
+)
+def test_raw_files_kept_out_of_git(relative_path: str) -> None:
+    # Policy: supplied raw files are proprietary and must never be committed.
     assert _git_is_ignored(relative_path)
 
 
