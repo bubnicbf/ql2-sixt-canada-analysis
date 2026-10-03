@@ -6,5 +6,20 @@ from ql2_sixt_canada_analysis.ingestion import (
     discover_raw_csvs,
     load_raw_datasets,
 )
+from ql2_sixt_canada_analysis.schemas import (
+    DATASET_DEFINITIONS,
+    DatasetDefinition,
+    DatasetKey,
+    get_dataset_definition,
+)
 
-__all__ = ["RawDatasetPaths", "RawDatasets", "discover_raw_csvs", "load_raw_datasets"]
+__all__ = [
+    "DATASET_DEFINITIONS",
+    "DatasetDefinition",
+    "DatasetKey",
+    "RawDatasetPaths",
+    "RawDatasets",
+    "discover_raw_csvs",
+    "get_dataset_definition",
+    "load_raw_datasets",
+]

@@ -19,6 +19,8 @@ from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 
+from ql2_sixt_canada_analysis import paths
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = PROJECT_ROOT / "pyproject.toml"
 PROJECT_NAME = "ql2-sixt-canada-analysis"
@@ -28,7 +30,10 @@ RUNTIME_DEPENDENCIES = ["pandas", "numpy", "pyarrow", "matplotlib", "seaborn", "
 RUNTIME_IMPORTS = ["pandas", "numpy", "pyarrow", "matplotlib", "seaborn", "scipy"]
 DEV_DEPENDENCIES = ["pytest", "jupyterlab"]
 
-PROTECTED_DATA_DIRS = ["data/raw", "data/interim", "data/processed"]
+PROTECTED_DATA_DIRS = [
+    d.relative_to(paths.PROJECT_ROOT).as_posix()
+    for d in (paths.RAW_DATA_DIR, paths.INTERIM_DATA_DIR, paths.PROCESSED_DATA_DIR)
+]
 DATA_EXTENSIONS = [
     "csv", "tsv", "parquet", "feather", "json", "xlsx", "pkl", "pickle", "zip", "gz", "csv.gz",
 ]

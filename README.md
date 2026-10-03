@@ -52,31 +52,45 @@ Data and environment safety:
 
 ## Raw data ingestion
 
-`ql2_sixt_canada_analysis.ingestion` discovers the two locally supplied raw
-CSVs in `data/raw/` and loads them as pandas DataFrames under the logical
-roles `jobs` and `cars`.
+Configuration lives in exactly one place each:
+
+- `ql2_sixt_canada_analysis.paths`: `PROJECT_ROOT` (derived from the package
+  location, not the working directory), `DATA_DIR`, `RAW_DATA_DIR`,
+  `INTERIM_DATA_DIR` and `PROCESSED_DATA_DIR`.
+- `ql2_sixt_canada_analysis.schemas`: the logical dataset keys
+  (`DatasetKey.JOBS`, `DatasetKey.CARS`) and an immutable `DatasetDefinition`
+  per dataset holding its filename tokens and exact, ordered CSV column
+  contract (`DATASET_DEFINITIONS`, `get_dataset_definition()`).
+- `ql2_sixt_canada_analysis.ingestion` consumes both: it discovers one CSV
+  per dataset, validates each header against its contract, and loads the
+  files as pandas DataFrames.
 
 ```python
 from ql2_sixt_canada_analysis import load_raw_datasets
+from ql2_sixt_canada_analysis.paths import RAW_DATA_DIR
 
-raw = load_raw_datasets()      # or load_raw_datasets("path/to/raw_dir")
-jobs_df = raw.jobs             # pandas.DataFrame
-cars_df = raw.cars             # pandas.DataFrame
+raw = load_raw_datasets(RAW_DATA_DIR)   # the default; pass another directory to override
+jobs_df = raw.jobs                      # pandas.DataFrame
+cars_df = raw.cars                      # pandas.DataFrame
 ```
 
 - **Discovery:** only `*.csv` files directly in the directory are considered
-  (case-insensitive, no recursion). A file's role is the last `jobs` or
-  `cars` word in its name, so prefixes, numbers, spaces and download
-  suffixes such as `(1)` are tolerated. Missing or duplicate roles raise an
-  `IngestionError` subclass instead of guessing; `discover_raw_csvs()` returns
-  the paths without loading.
-- **Ingestion only:** each file is read once with `pandas.read_csv` defaults
-  (extra options via `read_csv_options=`). Nothing is cleaned, renamed,
-  coerced, deduplicated or written to disk; transformations belong in later
-  steps.
+  (case-insensitive, no recursion). A file belongs to the dataset whose
+  filename token appears last in its name, so prefixes, numbers, spaces and
+  download suffixes such as `(1)` are tolerated. Missing or duplicate
+  datasets raise an `IngestionError` subclass instead of guessing.
+- **Header contract:** each header must match its dataset's `columns`
+  exactly, including order; otherwise `SourceSchemaError` reports the
+  missing, unexpected, duplicated or reordered columns. Contracts describe
+  structure only: they imply no types or keys and do not make the data safe
+  to publish.
+- **Ingestion only:** each file is parsed once with `pandas.read_csv`
+  defaults (extra options via `read_csv_options=`). Nothing is cleaned,
+  renamed, coerced, deduplicated or written to disk.
 - **Confidentiality:** raw inputs are read-only and proprietary. Raw, interim
-  and processed data must never be committed. Tests use small synthetic CSVs
-  created in temporary directories and never read the real files.
+  and processed data are Git-ignored and must never be committed. Tests use
+  small synthetic CSVs generated in temporary directories and never read the
+  real files.
 
 ## Data trust
 

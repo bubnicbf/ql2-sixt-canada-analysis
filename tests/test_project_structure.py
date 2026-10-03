@@ -14,13 +14,25 @@ from pathlib import Path
 
 import pytest
 
+from ql2_sixt_canada_analysis import paths
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _rel(directory: Path) -> str:
+    """Repository-relative POSIX path of a directory from the paths module."""
+    return directory.relative_to(paths.PROJECT_ROOT).as_posix()
+
+
+RAW, INTERIM, PROCESSED = (
+    _rel(paths.RAW_DATA_DIR), _rel(paths.INTERIM_DATA_DIR), _rel(paths.PROCESSED_DATA_DIR)
+)
 PACKAGE_NAME = "ql2_sixt_canada_analysis"
 
 REQUIRED_DIRECTORIES = [
-    "data/raw",
-    "data/interim",
-    "data/processed",
+    RAW,
+    INTERIM,
+    PROCESSED,
     "notebooks",
     f"src/{PACKAGE_NAME}",
     "tests",
@@ -32,10 +44,10 @@ REQUIRED_DIRECTORIES = [
 
 # Hypothetical generated outputs; they need not exist for check-ignore.
 GENERATED_PATHS = [
-    "data/interim/example_intermediate.parquet",
-    "data/interim/example_intermediate.csv",
-    "data/processed/example_analysis_ready.parquet",
-    "data/processed/example_analysis_ready.csv",
+    f"{INTERIM}/example_intermediate.parquet",
+    f"{INTERIM}/example_intermediate.csv",
+    f"{PROCESSED}/example_analysis_ready.parquet",
+    f"{PROCESSED}/example_analysis_ready.csv",
     "reports/example_report.html",
     "reports/example_report.md",
     "reports/figures/example_chart.png",
@@ -44,9 +56,9 @@ GENERATED_PATHS = [
 
 # Files that keep intentionally empty or documented directories in Git.
 DIRECTORY_PLACEHOLDERS = [
-    "data/raw/README.md",
-    "data/interim/.gitkeep",
-    "data/processed/.gitkeep",
+    f"{RAW}/README.md",
+    f"{INTERIM}/.gitkeep",
+    f"{PROCESSED}/.gitkeep",
     "notebooks/README.md",
     "reports/.gitkeep",
     "reports/figures/.gitkeep",
@@ -114,11 +126,11 @@ def test_local_raw_files_are_not_empty() -> None:
     # Raw files are proprietary and supplied locally; check sizes only, never
     # contents or names, and skip when none are present (e.g. a fresh clone).
     raw_files = [
-        path for path in (PROJECT_ROOT / "data" / "raw").iterdir()
+        path for path in paths.RAW_DATA_DIR.iterdir()
         if path.is_file() and path.name not in {"README.md", ".gitkeep"}
     ]
     if not raw_files:
-        pytest.skip("no locally supplied raw files in data/raw/")
+        pytest.skip("no locally supplied raw files in the raw-data directory")
     empty = [path for path in raw_files if path.stat().st_size == 0]
     assert not empty, f"{len(empty)} raw file(s) are empty"
 
@@ -126,7 +138,7 @@ def test_local_raw_files_are_not_empty() -> None:
 @pytest.mark.usefixtures("require_git")
 @pytest.mark.parametrize(
     "relative_path",
-    ["data/raw/synthetic_source.csv", "data/raw/nested/synthetic_source.csv"],
+    [f"{RAW}/synthetic_source.csv", f"{RAW}/nested/synthetic_source.csv"],
 )
 def test_raw_files_kept_out_of_git(relative_path: str) -> None:
     # Policy: supplied raw files are proprietary and must never be committed.
