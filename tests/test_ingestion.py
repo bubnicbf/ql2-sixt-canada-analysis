@@ -6,12 +6,16 @@ the centralized column contracts. The proprietary raw files are never read.
 
 from __future__ import annotations
 
+import csv
+import gzip
 import hashlib
 import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pandas as pd
 import pytest
@@ -188,17 +192,166 @@ def test_options_that_change_structure_are_rejected(raw_dir: Path, option: str) 
         load_raw_datasets(raw_dir, read_csv_options={option: 1})
 
 
-def test_each_file_is_parsed_by_pandas_once(raw_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
+def test_unrecognised_options_are_rejected(raw_dir: Path) -> None:
+    with pytest.raises(ValueError, match="Unrecognised read_csv option.*synthetic_unknown"):
+        load_raw_datasets(raw_dir, read_csv_options={"synthetic_unknown": 1})
+
+
+# ------------------------------------------- tokenizer options reach the header
+
+
+def _write_dialect_files(directory: Path, header: str, row: str, **write) -> None:
+    """Write one jobs and one cars file whose text uses a non-default dialect."""
+    encoding = write.get("encoding", "utf-8")
+    for key in DatasetKey:
+        data = (header + row).encode(encoding)
+        if write.get("gzip"):
+            data = gzip.compress(data)
+        (directory / f"dialect_{key}.csv").write_bytes(data)
+
+
+def _patch_contracts(monkeypatch: pytest.MonkeyPatch, columns: tuple[str, ...]) -> None:
+    patched = MappingProxyType(
+        {key: replace(DATASET_DEFINITIONS[key], columns=columns) for key in DatasetKey}
+    )
+    monkeypatch.setattr(ingestion, "DATASET_DEFINITIONS", patched)
+
+
+def test_semicolon_with_initial_spaces_regression(tmp_path: Path) -> None:
+    # Reported case: real contracts, "; "-separated header, read with
+    # sep=";" and skipinitialspace=True.
+    options = {"sep": ";", "skipinitialspace": True}
+    for key in DatasetKey:
+        columns = contract_columns(key)
+        path = tmp_path / f"synthetic_{key}.csv"
+        path.write_text(
+            "; ".join(columns) + "\n" + "; ".join(["synthetic"] * len(columns)) + "\n",
+            encoding="utf-8",
+        )
+        assert tuple(pd.read_csv(path, **options).columns) == columns  # oracle
+    datasets = load_raw_datasets(tmp_path, read_csv_options=options)
+    assert tuple(datasets.jobs.columns) == contract_columns(JOBS)
+    assert tuple(datasets.cars.columns) == contract_columns(CARS)
+
+
+DIALECT_CASES = [
+    pytest.param(
+        {"quotechar": "'"},
+        ("alpha", "beta,gamma"), "'alpha','beta,gamma'\n", "'x','y,z'\n", {},
+        id="quotechar",
+    ),
+    pytest.param(
+        {"escapechar": "\\", "doublequote": False},
+        ('say "hi"', "plain"), '"say \\"hi\\"",plain\n', "x,y\n", {},
+        id="escapechar-no-doublequote",
+    ),
+    pytest.param(
+        {"doublequote": True},
+        ('say "hi"', "plain"), '"say ""hi""",plain\n', "x,y\n", {},
+        id="doublequote",
+    ),
+    pytest.param(
+        {"dialect": "excel-tab"},
+        ("alpha", "beta"), "alpha\tbeta\n", "x\ty\n", {},
+        id="dialect",
+    ),
+    pytest.param(
+        {"quoting": csv.QUOTE_NONE},
+        ('"alpha"', "beta"), '"alpha",beta\n', "x,y\n", {},
+        id="quote-none",
+    ),
+    pytest.param(
+        {"encoding": "utf-16"},
+        ("alpha", "beta"), "alpha,beta\n", "x,y\n", {"encoding": "utf-16"},
+        id="encoding",
+    ),
+    pytest.param(
+        {"compression": "gzip"},
+        ("alpha", "beta"), "alpha,beta\n", "x,y\n", {"gzip": True},
+        id="compression",
+    ),
+    pytest.param(
+        {},
+        ("alpha", "beta"), "\n\nalpha,beta\n", "x,y\n", {},
+        id="leading-blank-lines",
+    ),
+    pytest.param(
+        {"sep": r"\s*\|\s*", "engine": "python"},
+        ("alpha", "beta"), "alpha | beta\n", "x | y\n", {},
+        id="regex-sep",
+    ),
+    pytest.param(
+        {"sep": ";", "engine": "pyarrow"},
+        ("alpha", "beta"), "alpha;beta\n", "x;y\n", {},
+        id="pyarrow-engine",
+    ),
+]
+
+
+@pytest.mark.parametrize(("options", "columns", "header", "row", "write"), DIALECT_CASES)
+def test_tokenizer_options_govern_the_header_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    options: dict, columns: tuple[str, ...], header: str, row: str, write: dict,
+) -> None:
+    _patch_contracts(monkeypatch, columns)
+    _write_dialect_files(tmp_path, header, row, **write)
+    oracle = pd.read_csv(tmp_path / f"dialect_{JOBS}.csv", **options)
+    assert tuple(oracle.columns) == columns, "test case must be valid for pandas alone"
+
+    datasets = load_raw_datasets(tmp_path, read_csv_options=options)
+    assert tuple(datasets.jobs.columns) == columns
+    assert tuple(datasets.cars.columns) == columns
+
+
+def test_tokenizer_options_still_detect_real_mismatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_contracts(monkeypatch, ("alpha", "beta"))
+    _write_dialect_files(tmp_path, "alpha; gamma\n", "x; y\n")
+    with pytest.raises(SourceSchemaError) as info:
+        load_raw_datasets(tmp_path, read_csv_options={"sep": ";", "skipinitialspace": True})
+    assert info.value.missing == ("beta",) and info.value.unexpected == ("gamma",)
+
+
+def test_duplicate_header_detected_with_tokenizer_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_contracts(monkeypatch, ("alpha", "beta"))
+    _write_dialect_files(tmp_path, "'alpha';'beta';'alpha'\n", "x;y;z\n")
+    with pytest.raises(SourceSchemaError) as info:
+        load_raw_datasets(tmp_path, read_csv_options={"sep": ";", "quotechar": "'"})
+    assert info.value.duplicated == ("alpha",)
+
+
+def test_value_options_do_not_affect_header_check(raw_dir: Path) -> None:
+    # dtype/converters/parse_dates name real columns; they must not be applied
+    # to the header-only read, where columns are positional.
+    first = contract_columns(JOBS)[0]
+    datasets = load_raw_datasets(
+        raw_dir, read_csv_options={"dtype": {first: "string"}, "na_values": ["synthetic_r0_c1"]}
+    )
+    assert tuple(datasets.jobs.columns) == contract_columns(JOBS)
+    assert pd.isna(datasets.jobs.iloc[0, 1])
+
+
+def test_each_file_is_parsed_fully_once(raw_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    full_reads: list[str] = []
+    header_reads: list[str] = []
     real = pd.read_csv
 
     def counting(path, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append(Path(path).name)
+        if kwargs.get("header", "infer") is None:
+            assert kwargs.get("nrows") == 1, "header read must stop after one row"
+            header_reads.append(Path(path).name)
+        else:
+            full_reads.append(Path(path).name)
         return real(path, **kwargs)
 
     monkeypatch.setattr(ingestion.pd, "read_csv", counting)
     load_raw_datasets(raw_dir)
-    assert sorted(calls) == sorted([f"synthetic_{CARS}.csv", f"synthetic_{JOBS}.csv"])
+    expected = sorted([f"synthetic_{CARS}.csv", f"synthetic_{JOBS}.csv"])
+    assert sorted(full_reads) == expected
+    assert sorted(header_reads) == expected
 
 
 def test_loading_writes_nothing_and_leaves_sources_unchanged(raw_dir: Path) -> None:
@@ -283,7 +436,14 @@ def test_schema_error_message_contains_no_column_names(tmp_path: Path) -> None:
 def test_header_is_validated_before_full_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _jobs(tmp_path, f"s_{J}.csv", ("synthetic_wrong",))
     _cars(tmp_path, f"s_{C}.csv")
-    monkeypatch.setattr(ingestion.pd, "read_csv", lambda *a, **k: pytest.fail("parsed early"))
+    real = pd.read_csv
+
+    def header_reads_only(path, **kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("header", "infer") is not None:
+            pytest.fail("full parse attempted before header validation")
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(ingestion.pd, "read_csv", header_reads_only)
     with pytest.raises(SourceSchemaError):
         load_raw_datasets(tmp_path)
 

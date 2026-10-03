@@ -87,6 +87,12 @@ cars_df = raw.cars                      # pandas.DataFrame
 - **Ingestion only:** each file is parsed once with `pandas.read_csv`
   defaults (extra options via `read_csv_options=`). Nothing is cleaned,
   renamed, coerced, deduplicated or written to disk.
+- **Read options:** the header check is itself a one-row `pandas.read_csv`,
+  so tokenizer options (`sep`, `quotechar`, `escapechar`, `doublequote`,
+  `skipinitialspace`, `dialect`, `encoding`, `compression`, ...) apply to it
+  exactly as to the full read. Value options (`dtype`, `na_values`, ...) apply
+  to the full read only; options that reshape the header or result, and
+  unrecognised options, raise `ValueError`.
 - **Confidentiality:** raw inputs are read-only and proprietary. Raw, interim
   and processed data are Git-ignored and must never be committed. Tests use
   small synthetic CSVs generated in temporary directories and never read the

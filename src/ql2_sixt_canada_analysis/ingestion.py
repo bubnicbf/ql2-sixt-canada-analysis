@@ -21,14 +21,21 @@ Missing or ambiguous datasets raise an error instead of guessing.
 
 Header validation
 -----------------
-The header row is read with :mod:`csv` (no data rows) so duplicate column
-names are visible before pandas renames them. It must equal the dataset's
-``columns`` exactly, including order.
+The header row is read by :func:`pandas.read_csv` itself (``header=None``,
+``nrows=1``, all values as text) with the caller's tokenizer options, so it is
+split exactly as the full read will split it, while duplicate column names
+stay visible (pandas only renames duplicates when it builds a header). It
+must equal the dataset's ``columns`` exactly, including order.
+
+``read_csv_options`` are classified explicitly: tokenizer options are applied
+to both the header read and the full read, value-interpretation options only
+to the full read, options that reshape the header or result are rejected, and
+any option not listed here is rejected rather than risk the two reads
+disagreeing.
 """
 
 from __future__ import annotations
 
-import csv
 import os
 import re
 from collections.abc import Mapping
@@ -69,6 +76,29 @@ _FORBIDDEN_READ_OPTIONS: Final = frozenset(
     {
         "filepath_or_buffer", "chunksize", "iterator",
         "header", "names", "usecols", "index_col", "skiprows", "comment",
+    }
+)
+# Options that change how text is decoded or split into fields. They are
+# forwarded to the header read as well as the full read so both tokenize the
+# file identically.
+_TOKENIZER_READ_OPTIONS: Final = frozenset(
+    {
+        "sep", "delimiter", "delim_whitespace", "engine", "dialect",
+        "quotechar", "quoting", "doublequote", "escapechar", "skipinitialspace",
+        "lineterminator", "skip_blank_lines", "on_bad_lines",
+        "encoding", "encoding_errors", "compression", "storage_options", "memory_map",
+    }
+)
+# Options that only interpret or limit data values. They cannot affect the
+# header row, so they are applied to the full read only.
+_DATA_READ_OPTIONS: Final = frozenset(
+    {
+        "dtype", "converters", "true_values", "false_values",
+        "na_values", "keep_default_na", "na_filter",
+        "parse_dates", "date_format", "dayfirst", "cache_dates",
+        "keep_date_col", "date_parser", "infer_datetime_format",
+        "thousands", "decimal", "float_precision", "dtype_backend",
+        "low_memory", "nrows", "skipfooter", "verbose",
     }
 )
 
@@ -246,22 +276,25 @@ def load_raw_datasets(
         raw_dir: Directory containing the raw CSVs. Defaults to
             :data:`ql2_sixt_canada_analysis.paths.RAW_DATA_DIR`.
         read_csv_options: Extra keyword arguments for :func:`pandas.read_csv`.
+            Tokenizer options (e.g. ``sep``, ``quotechar``, ``escapechar``,
+            ``doublequote``, ``skipinitialspace``, ``dialect``, ``encoding``,
+            ``compression``) also govern the header check; value options
+            (e.g. ``dtype``, ``na_values``) apply to the full read only.
             Options that change which rows or columns form the header or
             result (``header``, ``names``, ``usecols``, ``index_col``,
             ``skiprows``, ``comment``, ``chunksize``, ``iterator``,
-            ``filepath_or_buffer``) are rejected.
+            ``filepath_or_buffer``) and unrecognised options are rejected.
 
     Raises:
         RawDataDiscoveryError: Discovery failed (see :func:`discover_raw_csvs`).
         SourceSchemaError: A header does not match its column contract.
         RawDataLoadError: A file could not be read; the original exception
             is available as ``__cause__``.
-        ValueError: ``read_csv_options`` contains a rejected option.
+        ValueError: ``read_csv_options`` contains a rejected or unrecognised
+            option.
     """
     options = dict(read_csv_options or {})
-    forbidden = sorted(_FORBIDDEN_READ_OPTIONS.intersection(options))
-    if forbidden:
-        raise ValueError(f"Unsupported read_csv option(s): {', '.join(forbidden)}")
+    _check_read_options(options)
 
     paths = discover_raw_csvs(raw_dir)
     return RawDatasets(
@@ -271,25 +304,40 @@ def load_raw_datasets(
 
 
 def read_csv_header(
-    path: StrPath, key: DatasetKey, *, encoding: str | None = None, sep: str = ","
+    path: StrPath,
+    key: DatasetKey,
+    *,
+    read_csv_options: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
-    """Read only the header row of a CSV, without reading any data rows.
+    """Read only the header row of a CSV, tokenized as pandas will tokenize it.
+
+    Uses :func:`pandas.read_csv` with ``header=None`` and ``nrows=1`` plus the
+    tokenizer subset of ``read_csv_options``, returning the raw header cells
+    as strings (duplicates preserved, no renaming).
 
     Raises:
-        RawDataLoadError: The file cannot be opened or decoded, or is empty.
+        RawDataLoadError: The file cannot be opened, decoded or parsed, or has
+            no header row; the original exception is the cause.
+        ValueError: ``read_csv_options`` contains a rejected or unrecognised
+            option.
     """
     path = Path(path)
-    # pandas strips a UTF-8 byte-order mark by default; match that behaviour.
-    if encoding is None or encoding.lower().replace("_", "-") in {"utf-8", "utf8"}:
-        encoding = "utf-8-sig"
+    options = dict(read_csv_options or {})
+    _check_read_options(options)
+    header_options = {k: v for k, v in options.items() if k in _TOKENIZER_READ_OPTIONS}
+    if header_options.get("engine") == "pyarrow":
+        # The pyarrow engine does not support nrows. Its supported dialect
+        # options are a subset of the C engine's, which tokenizes them alike.
+        header_options["engine"] = "c"
     try:
-        with path.open(newline="", encoding=encoding) as handle:
-            header = next(csv.reader(handle, delimiter=sep), None)
-    except (OSError, ValueError, csv.Error) as exc:  # decode errors are ValueErrors
+        frame = pd.read_csv(
+            path, header=None, nrows=1, dtype=str, na_filter=False, **header_options
+        )
+    except (OSError, ValueError) as exc:  # parser/empty/decode errors are ValueErrors
         raise RawDataLoadError(key, path) from exc
-    if not header:
+    if frame.empty:
         raise RawDataLoadError(key, path, "has no header row")
-    return tuple(header)
+    return tuple(str(cell) for cell in frame.iloc[0].tolist())
 
 
 def validate_header(definition: DatasetDefinition, header: tuple[str, ...]) -> None:
@@ -325,12 +373,23 @@ def _classify(stem: str) -> DatasetKey | None:
     return matches[-1] if matches else None
 
 
+def _check_read_options(options: Mapping[str, Any]) -> None:
+    """Reject options that reshape the result or are not classified above."""
+    forbidden = sorted(_FORBIDDEN_READ_OPTIONS.intersection(options))
+    if forbidden:
+        raise ValueError(f"Unsupported read_csv option(s): {', '.join(forbidden)}")
+    known = _TOKENIZER_READ_OPTIONS | _DATA_READ_OPTIONS
+    unknown = sorted(set(options) - known)
+    if unknown:
+        raise ValueError(
+            f"Unrecognised read_csv option(s): {', '.join(unknown)}; the header "
+            "check cannot guarantee it tokenizes the file like the full read"
+        )
+
+
 def _load(definition: DatasetDefinition, path: Path, options: Mapping[str, Any]) -> pd.DataFrame:
-    """Validate one file's header, then read it once with pandas."""
-    sep = options.get("sep", options.get("delimiter", ","))
-    if not isinstance(sep, str) or len(sep) != 1:
-        raise ValueError("read_csv_options 'sep' must be a single character")
-    header = read_csv_header(path, definition.key, encoding=options.get("encoding"), sep=sep)
+    """Validate one file's header, then read it fully once with pandas."""
+    header = read_csv_header(path, definition.key, read_csv_options=options)
     validate_header(definition, header)
     try:
         frame = pd.read_csv(path, **options)
