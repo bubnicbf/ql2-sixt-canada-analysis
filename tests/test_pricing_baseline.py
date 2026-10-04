@@ -18,6 +18,7 @@ from test_readiness import DISTINCT, GATES, STABLE, scheduled_coverage, schedule
 
 from ql2_sixt_canada_analysis import pricing_baseline as pb
 from ql2_sixt_canada_analysis.pricing_baseline import (
+    LocationRole,
     BaselineInputError,
     ContinuityFinding,
     PlanReadinessGap as G,
@@ -28,11 +29,19 @@ from ql2_sixt_canada_analysis.pricing_baseline import (
     render_baseline_markdown,
 )
 from ql2_sixt_canada_analysis.readiness import PricingBlocker as B, assess_location_policy, assess_pricing_readiness
+from ql2_sixt_canada_analysis.identifiers import is_identifier_dtype
 from ql2_sixt_canada_analysis.schemas import (
+    JOB_DETAIL_RELATIONSHIP as REL,
     EXPECTED_LOCATION_COVERAGE as COV,
     INVESTIGATED_LOCATION_STREAM,
     TEMPORAL_RECONCILIATION,
+    DatasetKey,
     LocationCoverageMode,
+    LocationPolicyAuthority,
+    TemporalAwareness,
+    TemporalFieldDefinition,
+    TemporalKind,
+    TemporalReplicationRule,
 )
 from ql2_sixt_canada_analysis.temporal import assess_temporal_reconciliation
 
@@ -106,10 +115,82 @@ def test_minimum_required_contract_is_a_plan_gap_not_a_pricing_blocker():
     assert G.EXPECTED_STREAMS_NOT_EXHAUSTIVE not in synth_baseline(coverage=exhaustive).plan_gaps
 
 
+AUTHORITY = LocationPolicyAuthority(source="SYNTH-AUTHORITY", reference="SYNTH-DECISION-003")
+
+
+def full_role_map(baseline):  # type: ignore[no-untyped-def]
+    keys = set(baseline.expected_population.keys) | set(baseline.observed_population.keys)
+    return {k: LocationRole.DOWNTOWN for k in sorted(keys)}
+
+
 def test_missing_role_map_is_a_plan_gap():
     assert G.LOCATION_ROLE_MAP_UNAVAILABLE in synth_baseline().plan_gaps
-    assert G.LOCATION_ROLE_MAP_UNAVAILABLE not in synth_baseline(
-        location_role_map={SYNTH_TARGET: "SYNTH-ROLE"}).plan_gaps
+
+
+def test_role_map_gap_closes_only_with_complete_typed_authority_backed_roles():
+    j, c = healthy()
+    # One extra observed (not expected) stream, so expected-only maps are incomplete.
+    c = pd.concat([c, c.iloc[[0]].assign(**{COV.label_column: "SYNTH Airport"})], ignore_index=True).astype(
+        dict(REL.detail_definition.identifier_dtypes))
+    complete = full_role_map(project_baseline(cars=c))
+    assert len(complete) == 4
+    one_key = dict(list(complete.items())[:1])
+
+    def gaps(**kwargs):  # type: ignore[no-untyped-def]
+        pricing = assess_pricing_readiness(location_policy=assess_location_policy(),
+                                           **PROJECT_GATES(project_completeness(j, c)))
+        return build_pricing_baseline(pricing=pricing, cars=c, temporal=None, vehicle_stability=STABLE,
+                                      **kwargs).plan_gaps
+
+    still_open = [
+        dict(location_role_map=complete),                                            # no authority
+        dict(location_role_map=one_key, location_role_authority=AUTHORITY),           # partial map
+        dict(location_role_map={k: "SYNTH-ROLE" for k in complete}, location_role_authority=AUTHORITY),
+        dict(location_role_map={k: "airport" for k in complete}, location_role_authority=AUTHORITY),  # untyped
+        dict(location_role_map={**complete, ("SYNTH",): LocationRole.AIRPORT}, location_role_authority=AUTHORITY),
+        dict(location_role_map={}, location_role_authority=AUTHORITY),
+        dict(location_role_map=complete, location_role_authority="SYNTH-AUTHORITY"),
+    ]
+    for kwargs in still_open:
+        assert G.LOCATION_ROLE_MAP_UNAVAILABLE in gaps(**kwargs), kwargs
+    # A map covering the expected streams only misses observed ones: still a gap.
+    expected_only = {k: LocationRole.DOWNTOWN for k in COV.expected_locations}
+    assert G.LOCATION_ROLE_MAP_UNAVAILABLE in gaps(location_role_map=expected_only, location_role_authority=AUTHORITY)
+    assert G.LOCATION_ROLE_MAP_UNAVAILABLE not in gaps(location_role_map=complete, location_role_authority=AUTHORITY)
+
+
+def _rental_contract(*, date_fields=True, required=True, replications=True):  # type: ignore[no-untyped-def]
+    T = TEMPORAL_RECONCILIATION
+    fields = list(T.fields)
+    reps = list(T.replications)
+    if date_fields:
+        for column in pb.RENTAL_PERIOD_COLUMNS:
+            for dataset in (DatasetKey.JOBS, DatasetKey.CARS):
+                fields.append(TemporalFieldDefinition(dataset, column, TemporalKind.DATE, required,
+                                                      "%Y-%m-%d", TemporalAwareness.NOT_APPLICABLE))
+            if replications:
+                reps.append(TemporalReplicationRule((DatasetKey.JOBS, column), (DatasetKey.CARS, column)))
+    return dataclasses.replace(T, fields=tuple(fields), replications=tuple(reps))
+
+
+def test_rental_date_gap_closes_only_with_validity_agreement_and_authority():
+    def gaps(contract, authority=AUTHORITY):  # type: ignore[no-untyped-def]
+        return project_baseline_with(temporal_contract=contract, rental_period_rule_authority=authority).plan_gaps
+
+    for contract, authority in ((_rental_contract(), None),                         # fields+rules, no authority
+                                (_rental_contract(replications=False), AUTHORITY),  # no parent/detail agreement
+                                (_rental_contract(required=False), AUTHORITY),      # validity not required
+                                (_rental_contract(date_fields=False), AUTHORITY),   # not modeled at all
+                                (TEMPORAL_RECONCILIATION, AUTHORITY)):
+        assert G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE in gaps(contract, authority)
+    assert G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE not in gaps(_rental_contract())
+
+
+def project_baseline_with(**kwargs):  # type: ignore[no-untyped-def]
+    j, c = healthy()
+    pricing = assess_pricing_readiness(location_policy=assess_location_policy(),
+                                       **PROJECT_GATES(project_completeness(j, c)))
+    return build_pricing_baseline(pricing=pricing, cars=c, temporal=None, vehicle_stability=STABLE, **kwargs)
 
 
 # --------------------------------------------------------------- populations
@@ -142,10 +223,16 @@ def test_ordering_is_deterministic_and_deduplicated():
 
 def test_continuity_finding_is_aggregate_only():
     j, c = healthy()
-    j2 = pd.concat([j, j.iloc[[0]].assign(job_id="SYNTH-JOB-009")], ignore_index=True)
+    (parent_key,), (detail_key,) = REL.parent_key_columns, REL.detail_key_columns
+    # Restore the contract identifier dtypes after concatenation (pandas may widen them),
+    # so the reconciliation preconditions hold on every pandas version.
+    j2 = pd.concat([j, j.iloc[[0]].assign(**{parent_key: "SYNTH-JOB-009"})], ignore_index=True).astype(
+        dict(REL.parent_definition.identifier_dtypes))
     # A Calgary capture event that carries another Calgary branch but not the investigated stream.
-    extra = c.iloc[[0]].assign(job_id="SYNTH-JOB-009", **{COV.label_column: "SYNTH Airport"})
-    cars = pd.concat([c, extra], ignore_index=True)
+    extra = c.iloc[[0]].assign(**{detail_key: "SYNTH-JOB-009", COV.label_column: "SYNTH Airport"})
+    cars = pd.concat([c, extra], ignore_index=True).astype(dict(REL.detail_definition.identifier_dtypes))
+    assert all(is_identifier_dtype(j2[col].dtype) for col in REL.parent_key_columns)
+    assert all(is_identifier_dtype(cars[col].dtype) for col in REL.detail_key_columns)
     pricing = assess_pricing_readiness(location_policy=assess_location_policy(),
                                        **(PROJECT_GATES(project_completeness(j2, cars))
                                           | {"scheduled_coverage": scheduled_coverage(schedule=None)}))

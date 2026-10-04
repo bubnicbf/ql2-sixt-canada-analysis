@@ -1061,7 +1061,12 @@ of them a `PricingBlocker`), lists the configured expected and the observed
 stream populations separately (observations establish no authority) and
 reports the investigated stream's continuity in aggregate only. Serialization
 is fail closed: only counts, booleans, snake-case codes and digit-free
-location labels are accepted. The current baseline is
+location labels are accepted. Plan gaps close only on sufficient,
+authority-backed inputs: the role-map gap needs authority provenance
+(`location_role_authority`) and a typed `LocationRole` for every
+expected and observed stream; the rental-period gap needs required `DATE`
+fields and parent/detail agreement rules for both pickup/return columns plus
+`rental_period_rule_authority`. The current baseline is
 `docs/investigations/pricing_readiness_baseline.md`.
 
 ## Vehicle-attribute stability

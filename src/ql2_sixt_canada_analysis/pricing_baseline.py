@@ -54,6 +54,8 @@ from ql2_sixt_canada_analysis.coverage import location_pair_evidence
 from ql2_sixt_canada_analysis.readiness import PricingReadinessReport
 from ql2_sixt_canada_analysis.schemas import (
     EXPECTED_LOCATION_COVERAGE,
+    LocationPolicyAuthority,
+    TemporalKind,
     INVESTIGATED_LOCATION_STREAM,
     JOB_DETAIL_RELATIONSHIP,
     TEMPORAL_RECONCILIATION,
@@ -67,6 +69,7 @@ from ql2_sixt_canada_analysis.streams import _match
 from ql2_sixt_canada_analysis.temporal import TemporalReconciliationReport
 
 __all__ = [
+    "LocationRole",
     "BaselineInputError",
     "ContinuityFinding",
     "PlanReadinessGap",
@@ -92,6 +95,13 @@ class BaselineInputError(ValueError):
 
 class UnsafeBaselineValueError(ValueError):
     """A value outside the sanitized vocabulary would be serialized (message holds no value)."""
+
+
+class LocationRole(StrEnum):
+    """The only roles a location-role map may assign (an allowlist)."""
+
+    AIRPORT = "airport"
+    DOWNTOWN = "downtown"
 
 
 class PlanReadinessGap(StrEnum):
@@ -172,9 +182,23 @@ def build_pricing_baseline(
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
     temporal_contract: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
     investigated_stream: tuple[str, ...] = INVESTIGATED_LOCATION_STREAM,
-    location_role_map: Mapping[tuple[str, ...], str] | None = None,
+    location_role_map: Mapping[tuple[str, ...], LocationRole] | None = None,
+    location_role_authority: LocationPolicyAuthority | None = None,
+    rental_period_rule_authority: LocationPolicyAuthority | None = None,
 ) -> PricingReadinessBaseline:
     """Assemble the sanitized baseline from existing assessment results (inputs are not modified).
+
+    Plan gaps close only on sufficient, authority-backed evidence (fail closed):
+
+    * the role-map gap closes only with ``location_role_authority`` and a map
+      assigning a typed :class:`LocationRole` to **every** configured expected
+      and observed stream (partial maps, untyped roles or malformed keys keep
+      it open);
+    * the rental-period gap closes only when both pickup/return columns are
+      required ``DATE`` fields of the temporal contract, each has a
+      parent/detail agreement (replication) rule from the parent dataset,
+      and ``rental_period_rule_authority`` vouches for the rental-period
+      rule itself (no typed pickup/return ordering rule exists yet).
 
     Raises:
         BaselineInputError: A required report is missing or of the wrong type,
@@ -201,7 +225,8 @@ def build_pricing_baseline(
         pricing_blockers=tuple(dict.fromkeys(b.value for b in pricing.blocking_reasons)),
         subordinate_blockers=subordinate,
         statuses=statuses,
-        plan_gaps=_plan_gaps(coverage, temporal_contract, location_role_map, cars),
+        plan_gaps=_plan_gaps(coverage, temporal_contract, cars, location_role_map, location_role_authority,
+                             rental_period_rule_authority),
         expected_population=StreamPopulation(
             population="configured_expected",
             authority=("authoritative_exhaustive" if coverage.mode is LocationCoverageMode.EXHAUSTIVE
@@ -259,17 +284,45 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
 
 
 def _plan_gaps(coverage: LocationCoverageDefinition, temporal_contract: TemporalReconciliationDefinition,
-               role_map: Mapping | None, cars: pd.DataFrame) -> tuple[PlanReadinessGap, ...]:
+               cars: pd.DataFrame, role_map: object, role_authority: object,
+               rental_authority: object) -> tuple[PlanReadinessGap, ...]:
     G = PlanReadinessGap
     gaps = []
     if coverage.mode is not LocationCoverageMode.EXHAUSTIVE:
         gaps.append(G.EXPECTED_STREAMS_NOT_EXHAUSTIVE)
-    if not role_map:
+    required_keys = {tuple(k) for k in coverage.expected_locations} | set(_observed_keys(cars, coverage))
+    if not _role_map_sufficient(role_map, role_authority, required_keys, len(coverage.location_columns)):
         gaps.append(G.LOCATION_ROLE_MAP_UNAVAILABLE)
-    modeled = {f.column for f in temporal_contract.fields if f.dataset == coverage.dataset}
-    if any(c not in modeled for c in RENTAL_PERIOD_COLUMNS):
+    if not _rental_rules_sufficient(temporal_contract, coverage, rental_authority):
         gaps.append(G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE)
     return tuple(g for g in G if g in gaps)
+
+
+def _role_map_sufficient(role_map: object, authority: object, required: set, width: int) -> bool:
+    """Authority-backed, typed roles for every expected and observed stream; anything less is a gap."""
+    if not isinstance(authority, LocationPolicyAuthority) or not isinstance(role_map, Mapping) or not role_map:
+        return False
+    for key, role in role_map.items():
+        if not (isinstance(key, tuple) and len(key) == width and all(isinstance(v, str) and v for v in key)):
+            return False
+        if not isinstance(role, LocationRole):
+            return False
+    return required <= set(role_map)
+
+
+def _rental_rules_sufficient(contract: TemporalReconciliationDefinition, coverage: LocationCoverageDefinition,
+                             authority: object) -> bool:
+    """Validity, parent/detail agreement and an authority-backed period rule for both columns."""
+    if not isinstance(contract, TemporalReconciliationDefinition) or not isinstance(authority, LocationPolicyAuthority):
+        return False
+    parent = contract.relationship.parent
+    for column in RENTAL_PERIOD_COLUMNS:
+        field = next((f for f in contract.fields if f.ref == (coverage.dataset, column)), None)
+        if field is None or field.kind is not TemporalKind.DATE or field.required is not True:
+            return False                                                  # validity not modeled
+        if not any(rule.source == (parent, column) for rule in contract.replications):
+            return False                                                  # no parent/detail agreement
+    return True
 
 
 def _observed_keys(cars: pd.DataFrame, coverage: LocationCoverageDefinition) -> tuple[tuple[str, ...], ...]:
