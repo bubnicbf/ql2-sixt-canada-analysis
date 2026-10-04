@@ -12,7 +12,7 @@ interactive session, and none depends on the working directory.
 
 | Order | Notebook | Purpose |
 | --- | --- | --- |
-| 1 | `01_data_ingestion.ipynb` | Load the `jobs` and `cars` raw datasets through the package ingestion API (blank physical lines kept as rows) and confirm both loaded; then apply quality step 1, `remove_blank_rows_from_raw_datasets`, which removes only completely blank rows and keeps the per-dataset and total counts in memory (`blank_rows`). Subsequent variables (`jobs_df`, `cars_df`) are the cleaned frames. No analysis or other transformation; counts are never displayed. |
+| 1 | `01_data_ingestion.ipynb` | Load the `jobs` and `cars` raw datasets through the package ingestion API (blank physical lines kept as rows; centrally defined identifier fields read as nullable strings) and confirm both loaded; then apply quality step 1, `remove_blank_rows_from_raw_datasets`, which removes only completely blank rows and keeps the per-dataset and total counts in memory (`blank_rows`); finally `validate_raw_dataset_identifier_dtypes` checks identifier types on the cleaned frames. Subsequent variables (`jobs_df`, `cars_df`) are the cleaned, identifier-typed frames. No analysis or other transformation; counts, identifier values and type summaries are never displayed. |
 
 Later notebooks will be added with the next prefixes (`02_`, `03_`, ...).
 

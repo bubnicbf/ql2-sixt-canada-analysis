@@ -160,7 +160,7 @@ def test_loaded_values_match_synthetic_input(raw_dir: Path) -> None:
     expected = pd.DataFrame(
         [[f"synthetic_r{r}_c{c}" for c in range(len(columns))] for r in range(2)],
         columns=list(columns),
-    )
+    ).astype(dict(DATASET_DEFINITIONS[JOBS].identifier_dtypes))
     pd.testing.assert_frame_equal(jobs, expected)
 
 
@@ -211,8 +211,13 @@ def _write_dialect_files(directory: Path, header: str, row: str, **write) -> Non
 
 
 def _patch_contracts(monkeypatch: pytest.MonkeyPatch, columns: tuple[str, ...]) -> None:
+    # The first synthetic column doubles as the identifier, so the dialect
+    # cases also exercise the identifier dtype mapping.
     patched = MappingProxyType(
-        {key: replace(DATASET_DEFINITIONS[key], columns=columns) for key in DatasetKey}
+        {
+            key: replace(DATASET_DEFINITIONS[key], columns=columns, identifier_columns=columns[:1])
+            for key in DatasetKey
+        }
     )
     monkeypatch.setattr(ingestion, "DATASET_DEFINITIONS", patched)
 
@@ -279,11 +284,6 @@ DIALECT_CASES = [
         {"sep": r"\s*\|\s*", "engine": "python"},
         ("alpha", "beta"), "alpha | beta\n", "x | y\n", {},
         id="regex-sep",
-    ),
-    pytest.param(
-        {"sep": ";", "engine": "pyarrow"},
-        ("alpha", "beta"), "alpha;beta\n", "x;y\n", {},
-        id="pyarrow-engine",
     ),
 ]
 
@@ -375,6 +375,21 @@ def test_blank_lines_before_the_header_are_rejected(tmp_path: Path, monkeypatch:
         load_raw_datasets(tmp_path)
     # The documented opt-out restores pandas' default tolerance.
     assert tuple(load_raw_datasets(tmp_path, preserve_blank_lines=False).jobs.columns) == ("alpha", "beta")
+
+
+def test_pyarrow_engine_header_check_for_datasets_without_identifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pyarrow engine is only allowed when a dataset has no identifiers
+    # (see the identifier tests); its header check still works then.
+    patched = MappingProxyType(
+        {key: replace(DATASET_DEFINITIONS[key], columns=("alpha", "beta"), identifier_columns=())
+         for key in DatasetKey}
+    )
+    monkeypatch.setattr(ingestion, "DATASET_DEFINITIONS", patched)
+    _write_dialect_files(tmp_path, "alpha;beta\n", "x;y\n")
+    datasets = load_raw_datasets(tmp_path, read_csv_options={"sep": ";", "engine": "pyarrow"})
+    assert tuple(datasets.jobs.columns) == ("alpha", "beta")
 
 
 def test_tokenizer_options_still_detect_real_mismatches(

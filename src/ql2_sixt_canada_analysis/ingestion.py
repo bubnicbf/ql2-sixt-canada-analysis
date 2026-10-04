@@ -31,6 +31,36 @@ The policy lives here only. ``read_csv_options`` may not contain
 ``preserve_blank_lines=False`` on :func:`load_raw_datasets` /
 :func:`read_csv_header`, after which blank-row counts are not meaningful.
 
+Identifier columns
+------------------
+Each dataset's ``identifier_columns`` (from its :class:`DatasetDefinition`)
+are read with ``dtype=IDENTIFIER_DTYPE`` (pandas nullable string) in the same
+single :func:`pandas.read_csv` call, so they are never parsed as numbers:
+leading zeros, long digit strings and ``"0"`` survive exactly, and empty
+fields stay ``pd.NA``. Other columns keep normal pandas inference. After the
+read, :func:`~ql2_sixt_canada_analysis.identifiers.validate_identifier_dtypes`
+confirms the guarantee held.
+
+Caller options are merged per dataset, without mutating the caller's objects:
+
+* ``dtype`` mapping: entries for non-identifier columns are kept; an entry for
+  an identifier column is accepted only if it is a nullable string dtype (it
+  is replaced by the project dtype); anything else raises
+  :class:`~ql2_sixt_canada_analysis.identifiers.IdentifierTypeConflictError`.
+* ``dtype`` scalar: a string-like scalar (``str``, ``object``, ``"string"``)
+  is an explicit request to read every column as text; it is applied to the
+  non-identifier columns and identifiers still get the project dtype. A
+  non-string scalar (e.g. ``int``) would retype identifiers and is rejected.
+* ``converters`` or ``parse_dates`` naming an identifier column (by name or
+  position) are rejected; for other columns they pass through unchanged.
+* ``engine="pyarrow"`` is rejected for datasets with identifiers: that engine
+  infers types first and casts to the requested dtype afterwards, which
+  silently drops leading zeros even though the result is a string column.
+  The default C engine and the python engine honour the mapping while
+  parsing. (``dtype_backend="pyarrow"`` with those engines is fine.)
+
+Conflicts are detected for both datasets before any file is read.
+
 Filename discovery
 ------------------
 Only regular ``*.csv`` files directly inside the raw-data directory are
@@ -68,6 +98,11 @@ from typing import Any, Final
 
 import pandas as pd
 
+from ql2_sixt_canada_analysis.identifiers import (
+    IdentifierTypeConflictError,
+    is_identifier_dtype,
+    validate_identifier_dtypes,
+)
 from ql2_sixt_canada_analysis.paths import RAW_DATA_DIR
 from ql2_sixt_canada_analysis.schemas import (
     DATASET_DEFINITIONS,
@@ -243,7 +278,11 @@ class RawDatasetPaths:
 
 @dataclass(frozen=True, slots=True)
 class RawDatasets:
-    """Raw DataFrames for each logical dataset, exactly as read by pandas."""
+    """Raw DataFrames for each logical dataset, exactly as read by pandas.
+
+    Identifier columns are nullable strings (see the module docstring); all
+    other columns are as pandas inferred them.
+    """
 
     jobs: pd.DataFrame
     cars: pd.DataFrame
@@ -306,6 +345,8 @@ def load_raw_datasets(
     ``dtype=str`` or ``low_memory=False``). No cleaning or type coercion is
     applied and nothing is written to disk; completely blank rows are removed
     and counted later by :mod:`ql2_sixt_canada_analysis.quality`.
+    Each dataset's identifier columns are read as the nullable string dtype
+    (see "Identifier columns" in the module docstring for the merge rules).
 
     Args:
         raw_dir: Directory containing the raw CSVs. Defaults to
@@ -330,15 +371,23 @@ def load_raw_datasets(
         SourceSchemaError: A header does not match its column contract.
         RawDataLoadError: A file could not be read; the original exception
             is available as ``__cause__``.
+        IdentifierTypeConflictError: ``read_csv_options`` would parse an
+            identifier column unsafely (a ``ValueError`` subclass).
+        IdentifierDtypeError: An identifier column was not read as the
+            nullable string dtype (e.g. an engine ignored the mapping).
         ValueError: ``read_csv_options`` contains a rejected, policy-governed
             or unrecognised option.
     """
     options = _resolve_read_options(read_csv_options, preserve_blank_lines)
+    per_dataset = {
+        key: _with_identifier_dtypes(definition, options)
+        for key, definition in DATASET_DEFINITIONS.items()
+    }
 
     paths = discover_raw_csvs(raw_dir)
     return RawDatasets(
-        jobs=_load(DATASET_DEFINITIONS[DatasetKey.JOBS], paths.jobs, options),
-        cars=_load(DATASET_DEFINITIONS[DatasetKey.CARS], paths.cars, options),
+        jobs=_load(DATASET_DEFINITIONS[DatasetKey.JOBS], paths.jobs, per_dataset[DatasetKey.JOBS]),
+        cars=_load(DATASET_DEFINITIONS[DatasetKey.CARS], paths.cars, per_dataset[DatasetKey.CARS]),
     )
 
 
@@ -435,6 +484,77 @@ def _resolve_read_options(
     return options
 
 
+def _with_identifier_dtypes(
+    definition: DatasetDefinition, options: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return a new options dict whose ``dtype`` reads identifiers as nullable strings.
+
+    Implements the conflict policy in the module docstring. Neither
+    ``options`` nor any mapping inside it is modified.
+    """
+    identifiers = definition.identifier_columns
+    merged = dict(options)
+    if identifiers and options.get("engine") == "pyarrow":
+        raise IdentifierTypeConflictError(definition.key, "engine", identifiers)
+
+    def column_of(key: object) -> object:
+        """Resolve a positional key to its contract column name."""
+        if isinstance(key, int) and not isinstance(key, bool) and 0 <= key < len(definition.columns):
+            return definition.columns[key]
+        return key
+
+    for option in ("converters", "parse_dates"):
+        value = options.get(option)
+        if isinstance(value, Mapping):
+            keys = [column_of(k) for k in value]
+            keys += [column_of(v) for vs in value.values() if isinstance(vs, (list, tuple)) for v in vs]
+        elif isinstance(value, (list, tuple)):
+            keys = [column_of(v) for item in value
+                    for v in (item if isinstance(item, (list, tuple)) else [item])]
+        else:
+            keys = []
+        clashing = [c for c in identifiers if c in keys]
+        if clashing:
+            raise IdentifierTypeConflictError(definition.key, option, clashing)
+
+    caller_dtype = options.get("dtype")
+    if caller_dtype is None:
+        dtype: dict[Any, Any] = {}
+    elif isinstance(caller_dtype, Mapping):
+        dtype = {}
+        clashing = []
+        for key, value in caller_dtype.items():
+            column = column_of(key)
+            if column in identifiers:
+                if not _is_nullable_string(value):
+                    clashing.append(column)
+                continue  # replaced by the project dtype below
+            dtype[key] = value
+        if clashing:
+            raise IdentifierTypeConflictError(definition.key, "dtype", clashing)
+    else:
+        if identifiers and not _is_text_dtype(caller_dtype):
+            raise IdentifierTypeConflictError(definition.key, "dtype", identifiers)
+        dtype = {c: caller_dtype for c in definition.columns if c not in identifiers}
+    dtype.update(definition.identifier_dtypes)
+    merged["dtype"] = dtype
+    return merged
+
+
+def _is_nullable_string(value: object) -> bool:
+    try:
+        return is_identifier_dtype(pd.api.types.pandas_dtype(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_text_dtype(value: object) -> bool:
+    try:
+        return pd.api.types.is_string_dtype(pd.api.types.pandas_dtype(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def _check_read_options(options: Mapping[str, Any]) -> None:
     """Reject options that reshape the result or are not classified above."""
     forbidden = sorted(_FORBIDDEN_READ_OPTIONS.intersection(options))
@@ -471,4 +591,5 @@ def _load(definition: DatasetDefinition, path: Path, options: Mapping[str, Any])
     except (OSError, ValueError) as exc:  # pandas parser/empty/decode errors are ValueErrors
         raise RawDataLoadError(definition.key, path) from exc
     validate_header(definition, tuple(frame.columns))
+    validate_identifier_dtypes(frame, definition)
     return frame

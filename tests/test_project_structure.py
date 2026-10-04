@@ -167,6 +167,12 @@ QUALITY_OUTPUT_PATHS = [
     "build/lib/x.py",
     f"src/{PACKAGE_NAME}/__pycache__/x.cpython-312.pyc",
     ".pytest_cache/v/cache/nodeids",
+    "reports/synthetic_type_validation.json",
+    "synthetic_dtype_report.md",
+    "synthetic_identifier_values.txt",
+    "notebooks/synthetic_identifier_extract.csv",
+    "synthetic_diagnostics.json",
+    "synthetic_run.log",
 ]
 
 

@@ -109,6 +109,53 @@ cars_df = raw.cars                      # pandas.DataFrame
   small synthetic CSVs generated in temporary directories and never read the
   real files.
 
+## Identifier fields
+
+Identifier fields are labels (e.g. the scrape-job identity shared by `jobs`
+and `cars`), not measurements. Their names are defined once per logical
+dataset in `ql2_sixt_canada_analysis.schemas`
+(`DatasetDefinition.identifier_columns`, `.identifier_dtypes`,
+`SHARED_IDENTIFIER_COLUMNS`); the source code is the authority, so they are
+not repeated here.
+
+- **Read-time typing.** `load_raw_datasets` passes the identifier dtype
+  mapping to `pandas.read_csv`, so identifiers are read as pandas' nullable
+  string dtype (`IDENTIFIER_DTYPE`, `"string"`) and never parsed as numbers.
+  This prevents leading-zero loss, rounding of long integers, scientific
+  notation and `.0` artefacts. Shared identifiers get the same dtype in both
+  datasets. After the read the loader validates the guarantee.
+- **Missing stays missing.** Empty identifier fields are `pd.NA`, never the
+  text `"nan"`, `"None"` or `"<NA>"`, so completely blank rows are still
+  detected and removed by the blank-row step.
+- **No normalisation.** Only the type changes. Identifier text is not
+  stripped, re-cased, padded, parsed or validated against any business
+  format; reconciling different textual forms is a separate, later step.
+- **Other columns** keep normal pandas inference unless a caller configures
+  them.
+- **Caller options.** `read_csv_options` may add `dtype` rules for other
+  columns. A `dtype` entry for an identifier is accepted only if it is a
+  nullable string dtype; any other identifier `dtype`, a non-text scalar
+  `dtype` (e.g. `int`), or a `converters`/`parse_dates` entry for an
+  identifier raises `IdentifierTypeConflictError` before any file is read. A
+  text scalar `dtype` (e.g. `str`) applies to the other columns only.
+  `engine="pyarrow"` is rejected because it infers types before casting and
+  would drop leading zeros. Caller dictionaries are never mutated.
+- **Post-load helpers** for frames built elsewhere:
+  `cast_identifier_fields(frame, definition)` and
+  `cast_identifiers_for_raw_datasets(raw)` return new frames with only the
+  identifier columns cast (order, index and other columns unchanged;
+  idempotent). They **cannot recover** leading zeros or digits already lost
+  if a frame was parsed numerically before reaching them, which is why the
+  loader types identifiers at read time.
+- **Validation:** `validate_identifier_dtypes(frame, definition)` and
+  `validate_raw_dataset_identifier_dtypes(raw)` are silent on success and
+  raise `IdentifierDtypeError` / `MissingIdentifierColumnError` with the
+  dataset key and a count (column names on attributes, never values).
+- Tests use fabricated identifiers only (e.g. `000123`, `SYNTHETIC-ID-001`).
+  Raw, interim and processed data remain proprietary and Git-ignored;
+  identifier values, extracts and type profiles from real data must never be
+  committed.
+
 ## Data quality: completely blank rows
 
 `ql2_sixt_canada_analysis.quality` holds the first data-quality step and the

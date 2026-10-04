@@ -93,6 +93,18 @@ data/processed/*
 *quality_metrics*.html
 *_audit.json
 *_audit.txt
+# Identifier extracts, type/dtype profiles and diagnostics from real data.
+*identifier_values*
+*identifier_extract*
+*dtype_report*
+*type_report*
+*type_validation*.json
+*type_validation*.txt
+*type_validation*.html
+*diagnostics*.json
+*diagnostics*.txt
+*diagnostics*.html
+*.log
 
 # --- Generated reports and figures ---
 # Ignored by default; use `git add -f` to deliberately publish a final report.

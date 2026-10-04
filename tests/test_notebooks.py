@@ -210,6 +210,59 @@ def test_ingestion_notebook_quality_step_runs_with_synthetic_blank_rows(tmp_path
     assert not list(directory.parent.glob("**/*blank*")), "notebook wrote a blank-row artifact"
 
 
+# ---------------------------------------------------------- identifier typing
+
+
+def test_ingestion_notebook_has_no_identifier_lists_or_manual_casts() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    code = _code_source(notebook)
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    identifiers = {c for d in DATASET_DEFINITIONS.values() for c in d.identifier_columns}
+    assert not any(re.search(rf"\b{re.escape(c)}\b", text) for c in identifiers), \
+        "identifier names belong in the schema module only"
+    assert ".astype(" not in code, "no manual casts; the loader types identifiers"
+    assert "dtype=" not in code and "identifier_columns" not in code
+
+
+def test_ingestion_notebook_validates_identifier_dtypes_after_cleaning() -> None:
+    cells = _code_cells(read_notebook(INGESTION_NOTEBOOK))
+    sources = [c.source for c in cells]
+    load = next(i for i, s in enumerate(sources) if "load_raw_datasets(" in s)
+    clean = next(i for i, s in enumerate(sources) if "remove_blank_rows_from_raw_datasets(" in s)
+    validate = next(i for i, s in enumerate(sources) if "validate_raw_dataset_identifier_dtypes(" in s)
+    assert load < clean < validate
+    assert re.search(r"validate_raw_dataset_identifier_dtypes\(\s*cleaned\s*\)", sources[validate])
+    code = "\n".join(sources)
+    assert re.search(
+        r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bvalidate_raw_dataset_identifier_dtypes\b",
+        code, re.S,
+    )
+    assert not re.search(r"\.(dtypes|info|value_counts|nunique|isna)\b", code), "no type/null/distinct summaries"
+
+
+def test_ingestion_notebook_runs_with_risky_synthetic_identifiers(tmp_path: Path) -> None:
+    risky = ["000123", "123456789012345678901234567890", "SYNTHETIC-ID-001", "A-001-B", "0", ""]
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    for key in DatasetKey:
+        definition = DATASET_DEFINITIONS[key]
+        lines = [",".join(v if c in definition.identifier_columns else f"synthetic_{i}"
+                          for i, c in enumerate(definition.columns)) for v in risky]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(definition.columns) + "\n" + "\n".join(lines) + "\n\n").encode("utf-8")
+        )
+    before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
+    result = execute_notebook_copy(
+        INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
+    )
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "nullable string" in outputs
+    assert not any(v in outputs for v in risky if v and v != "0")
+    assert not re.search(r"\b[0-9]+\b", outputs)
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before, \
+        "notebook wrote files"
+
+
 # ----------------------------------------------------------------- execution
 
 
