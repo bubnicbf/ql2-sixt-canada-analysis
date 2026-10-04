@@ -384,6 +384,54 @@ def test_ingestion_notebook_reconciliation_runs_on_synthetic_mismatches(tmp_path
     assert _snapshot(PROJECT_ROOT) == repo_before
 
 
+# ------------------------------------------------- one-to-many relationship
+
+
+def test_ingestion_notebook_validates_relationship_before_trusted_join() -> None:
+    sources = [c.source for c in _code_cells(read_notebook(INGESTION_NOTEBOOK))]
+    code = "\n".join(sources)
+    for name in ("assess_one_to_many_join", "join_jobs_to_details", "JOB_DETAIL_RELATIONSHIP"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    assert reconcile < relate
+    cell = sources[relate]
+    assert re.search(r"relationship_report\s*=\s*assess_one_to_many_join\(\s*jobs_df\s*,\s*cars_df\s*,"
+                     r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", cell)
+    # The join only runs when the contract passes; otherwise no joined frame.
+    assert re.search(r"join_jobs_to_details\([^)]*\)\.joined\s*if\s+one_to_many_contract_valid\s+else\s+None", cell, re.S)
+    assert not re.search(r"(pd\.merge|\.merge\(|\.join\(\s*(jobs|cars))", code), "no unvalidated direct merge"
+    keys = {*JOB_DETAIL_RELATIONSHIP.parent_key_columns, *JOB_DETAIL_RELATIONSHIP.detail_key_columns}
+    assert not any(re.search(rf"\b{re.escape(k)}\b", code) for k in keys)
+    assert not re.search(r"print\([^\n]*(relationship_report|jobs_with_details|_count\b|_valid\b|is_valid)", code)
+
+
+def test_ingestion_notebook_relationship_step_runs_on_synthetic_inputs(tmp_path: Path) -> None:
+    rel = JOB_DETAIL_RELATIONSHIP
+    for case, cars_keys in (("valid", ["SYNTH-JOB-001", "SYNTH-JOB-001"]),
+                            ("orphan", ["SYNTH-JOB-001", "SYNTH-JOB-404", ""])):
+        directory = tmp_path / case
+        directory.mkdir()
+        rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "2"},
+                                  {rel.parent_key_columns[0]: "000001", rel.expected_detail_count_column: "0"}],
+                DatasetKey.CARS: [{rel.detail_key_columns[0]: k} for k in cars_keys]}
+        for key, key_rows in rows.items():
+            columns = DATASET_DEFINITIONS[key].columns
+            lines = [",".join(r.get(c, f"synthetic_{i}_{n}") for i, c in enumerate(columns))
+                     for n, r in enumerate(key_rows)]
+            (directory / f"synthetic_{key}.csv").write_bytes(
+                (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+        workdir = tmp_path / f"kernel_{case}"
+        workdir.mkdir()
+        repo_before = _snapshot(PROJECT_ROOT)
+        result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                       env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+        outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+        assert "One-to-many relationship validation step completed." in outputs
+        assert "SYNTH" not in outputs and not re.search(r"\b[0-9]+\b", outputs)
+        assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
 # ----------------------------------------------------------------- execution
 
 

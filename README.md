@@ -305,6 +305,53 @@ validate_job_detail_reconciliation(jobs_df, cars_df)          # raises JobDetail
 - Tests use fabricated identifiers and counts. Real reconciliation reports,
   mismatch, orphan or missing-link extracts must never be committed.
 
+## One-to-many relationship and trusted join
+
+Jobs are the **one** side and cars the **many** side of the centrally defined
+relationship (`JOB_DETAIL_RELATIONSHIP`). This control answers whether jobs
+can be joined to cars safely; it is separate from unique-key validation (each
+dataset's own key) and count reconciliation (declared vs observed counts),
+and reuses their definitions and helpers.
+
+```python
+from ql2_sixt_canada_analysis import assess_one_to_many_join, join_jobs_to_details, validate_one_to_many_join
+
+report = assess_one_to_many_join(jobs_df, cars_df)   # aggregate report, in memory
+report.is_valid, report.violations
+validate_one_to_many_join(jobs_df, cars_df)          # raises OneToManyRelationshipError
+result = join_jobs_to_details(jobs_df, cars_df)      # ValidatedJoinResult(joined, report) or raises
+```
+
+- **Contract:** parent keys must be complete and unique (otherwise
+  `RelationshipPreconditionError`; duplicate parents are never collapsed or
+  chosen arbitrarily). Detail foreign keys may repeat - many cars per job is
+  expected - but every detail row must link to exactly one job. Missing-link
+  details (a key component missing) and orphan details (complete key absent
+  from jobs) are counted separately, and every detail row falls into exactly
+  one of linked, missing-link or orphan.
+- **Cardinality and conservation:** a parent-left merge with pandas
+  `validate="one_to_many"` must succeed, and the left join must have exactly
+  `linked detail rows + parents without details` rows, with every linked
+  detail once and every detail-less parent once. Equal input totals are never
+  accepted as proof.
+- **Trusted join:** `join_jobs_to_details` strictly validates first, merges
+  with `how="left"`, `validate="one_to_many"`, `sort=False`, re-checks the row
+  count and raises `OneToManyRelationshipError` / `ValidatedJoinError` (pandas
+  `MergeError` as the cause) instead of returning a partially trusted frame.
+  Parent order and, within a parent, detail order are preserved; the result
+  has a fresh `RangeIndex`. It never repairs, drops or deduplicates
+  violations, and the joined frame stays in memory.
+- **Column collisions:** same-named key columns appear once; differently
+  named keys are both kept. Same-named non-key columns get stable suffixes
+  `_job` (parent) and `_detail` (detail) from the relationship definition;
+  other columns keep their names. Source frames are never renamed.
+- **Empty data:** empty jobs and cars are vacuously valid (presence/volume is
+  separate); empty jobs with any detail rows fail; jobs with no detail rows
+  are valid and each appears once in the left join (count reconciliation may
+  still fail if they declared non-zero counts).
+- Tests use fabricated identifiers. Joined proprietary data and relationship
+  reports must never be written to tracked locations or committed.
+
 ## Notebooks
 
 Notebooks live in `notebooks/` and run in numeric-prefix order, top to bottom

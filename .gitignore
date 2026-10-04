@@ -127,8 +127,25 @@ data/processed/*
 *key_profile*.txt
 *key_profile*.html
 *key_profile*.md
-# Job/detail reconciliation outputs: mismatch, orphan and missing-link
-# extracts and reconciliation reports.
+# Job/detail reconciliation and one-to-many join outputs: mismatch, orphan
+# and missing-link extracts, reconciliation/relationship reports, cardinality
+# diagnostics and joined datasets.
+*relationship_report*.json
+*relationship_report*.txt
+*relationship_report*.html
+*relationship_report*.md
+*cardinality*.json
+*cardinality*.txt
+*cardinality*.html
+*cardinality*.md
+*joined*.json
+*joined*.txt
+*joined*.html
+*joined*.md
+*jobs_with_details*.json
+*jobs_with_details*.txt
+*jobs_with_details*.html
+*jobs_with_details*.md
 *reconciliation_report*.json
 *reconciliation_report*.txt
 *reconciliation_report*.html

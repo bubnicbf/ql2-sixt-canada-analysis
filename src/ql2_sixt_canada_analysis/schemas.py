@@ -39,7 +39,9 @@ Job-to-detail relationship
 key), the matching detail foreign-key components in the same order, and the
 parent column that declares how many detail rows the job should have.
 :mod:`ql2_sixt_canada_analysis.reconciliation` reconciles that declaration
-against the detail rows actually present.
+against the detail rows actually present, and
+:mod:`ql2_sixt_canada_analysis.relationships` validates the one-to-many
+cardinality (jobs = one side, cars = many side) before any join is trusted.
 """
 
 from __future__ import annotations
@@ -287,6 +289,9 @@ class JobDetailRelationshipDefinition:
             matching ``parent_key_columns``.
         expected_detail_count_column: Parent column declaring how many detail
             rows the parent should have.
+        parent_suffix, detail_suffix: Stable suffixes a validated join adds
+            to same-named non-key columns from each side (never to columns
+            whose names do not collide).
         definitions: Registry the columns are validated against (the project
             registry by default; tests may pass a synthetic one).
     """
@@ -296,6 +301,8 @@ class JobDetailRelationshipDefinition:
     parent_key_columns: tuple[str, ...]
     detail_key_columns: tuple[str, ...]
     expected_detail_count_column: str
+    parent_suffix: str = "_job"
+    detail_suffix: str = "_detail"
     definitions: Mapping[DatasetKey, DatasetDefinition] = dataclass_field(
         default=None, compare=False, repr=False  # type: ignore[arg-type]
     )
@@ -335,6 +342,9 @@ class JobDetailRelationshipDefinition:
             raise RelationshipConfigurationError(
                 f"parent key must equal the '{parent.key}' unique key", self.parent_key_columns
             )
+        suffixes = (self.parent_suffix, self.detail_suffix)
+        if not all(isinstance(x, str) and x for x in suffixes) or len(set(suffixes)) != 2:
+            raise RelationshipConfigurationError("join suffixes must be distinct non-empty strings")
         count = self.expected_detail_count_column
         if not isinstance(count, str) or count not in parent.columns:
             raise RelationshipConfigurationError(

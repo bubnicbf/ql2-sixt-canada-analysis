@@ -65,15 +65,16 @@ from dataclasses import dataclass, fields
 import numpy as np
 import pandas as pd
 
-from ql2_sixt_canada_analysis.identifiers import is_identifier_dtype
-from ql2_sixt_canada_analysis.quality import completely_blank_row_mask
+from ql2_sixt_canada_analysis.relationships import (
+    RelationshipPreconditionError,
+    _check_relationship_inputs,
+    _link_detail_rows,
+)
 from ql2_sixt_canada_analysis.schemas import (
     JOB_DETAIL_RELATIONSHIP,
-    DatasetKey,
     JobDetailRelationshipDefinition,
     RelationshipConfigurationError,
 )
-from ql2_sixt_canada_analysis.unique_keys import UniqueKeyReport, assess_unique_key
 
 __all__ = [
     "JobDetailReconciliationError",
@@ -198,23 +199,15 @@ class JobDetailReconciliationReport:
 # ------------------------------------------------------------------- exceptions
 
 
-class ReconciliationPreconditionError(Exception):
+class ReconciliationPreconditionError(RelationshipPreconditionError):
     """Reconciliation would be ambiguous: a structural precondition failed.
 
-    Attributes:
-        reason: ``"identifier_dtype"``, ``"parent_key_missing"``,
-            ``"parent_key_duplicate"`` or ``"blank_rows_present"``.
-        role: The dataset concerned.
-        unique_key_report: The parent :class:`UniqueKeyReport` (counts only)
-            for parent-key failures, else ``None``.
+    Same attributes as
+    :class:`~ql2_sixt_canada_analysis.relationships.RelationshipPreconditionError`
+    (``reason``, ``role``, ``unique_key_report``).
     """
 
-    def __init__(self, reason: str, role: DatasetKey,
-                 unique_key_report: UniqueKeyReport | None = None) -> None:
-        super().__init__(f"Job-to-detail reconciliation precondition failed for '{role}': {reason}.")
-        self.reason = reason
-        self.role = role
-        self.unique_key_report = unique_key_report
+    control = "Job-to-detail reconciliation"
 
 
 class JobDetailReconciliationError(Exception):
@@ -247,25 +240,18 @@ def assess_job_detail_reconciliation(
         RelationshipConfigurationError: A configured column is absent.
         ReconciliationPreconditionError: See the module docstring.
     """
-    parent_keys, detail_keys = _check_inputs(jobs, cars, relationship)
+    _check_relationship_inputs(jobs, cars, relationship, ReconciliationPreconditionError,
+                               require_expected_count=True)
     count_column = relationship.expected_detail_count_column
 
     # --- expected counts (temporary arrays; source untouched)
     category, expected = _classify_expected_counts(jobs[count_column])
     valid = category == _VALID
 
-    # --- observed counts per complete detail key tuple
-    detail = cars.loc[:, list(detail_keys)]
-    complete = detail.notna().all(axis=1).to_numpy()
-    counts = detail.loc[complete].value_counts(sort=False, dropna=False)  # tuple-keyed, no concatenation
-    counts.index = counts.index.set_names(list(parent_keys))
-    parent_index = pd.MultiIndex.from_frame(jobs.loc[:, list(parent_keys)])
-    known = counts.index.isin(parent_index)
-    observed = counts.reindex(parent_index, fill_value=0).to_numpy(dtype=np.int64)  # left: every job
-
+    # --- observed counts per job and detail-row categories (shared, tuple-keyed)
+    linkage = _link_detail_rows(jobs, cars, relationship)
+    observed = linkage.observed_per_parent  # left from jobs: every job, zero when none
     difference = observed[valid] - expected[valid]
-    linked = int(counts.to_numpy()[known].sum())
-    assert linked == int(observed.sum())  # each detail key matches at most one (unique) job
 
     return JobDetailReconciliationReport(
         job_count=len(jobs),
@@ -281,10 +267,10 @@ def assess_job_detail_reconciliation(
         over_counted_job_count=int((difference > 0).sum()),
         jobs_without_linked_details_count=int((observed == 0).sum()),
         valid_expected_detail_total=int(expected[valid].sum()),
-        linked_detail_row_count=linked,
-        missing_link_detail_row_count=int((~complete).sum()),
-        orphan_detail_row_count=int(counts.to_numpy()[~known].sum()),
-        distinct_orphan_key_count=int((~known).sum()),
+        linked_detail_row_count=linkage.linked,
+        missing_link_detail_row_count=linkage.missing_link,
+        orphan_detail_row_count=linkage.orphan,
+        distinct_orphan_key_count=linkage.distinct_orphan_keys,
         absolute_discrepancy_total=int(np.abs(difference).sum()),
         net_discrepancy=int(difference.sum()),
     )
@@ -303,38 +289,6 @@ def validate_job_detail_reconciliation(
 
 
 # ---------------------------------------------------------------------- helpers
-
-
-def _check_inputs(
-    jobs: object, cars: object, relationship: object
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    if not isinstance(jobs, pd.DataFrame) or not isinstance(cars, pd.DataFrame):
-        raise TypeError("jobs and cars must be pandas DataFrames")
-    if not isinstance(relationship, JobDetailRelationshipDefinition):
-        raise TypeError(f"expected a JobDetailRelationshipDefinition, got {type(relationship).__name__}")
-    parent_keys, detail_keys = relationship.parent_key_columns, relationship.detail_key_columns
-    for frame, columns, role in (
-        (jobs, (*parent_keys, relationship.expected_detail_count_column), relationship.parent),
-        (cars, detail_keys, relationship.detail),
-    ):
-        absent = tuple(c for c in columns if c not in frame.columns)
-        if absent:
-            raise RelationshipConfigurationError(
-                f"The '{role}' frame lacks {len(absent)} relationship column(s).", absent
-            )
-    for frame, columns, role in ((jobs, parent_keys, relationship.parent),
-                                 (cars, detail_keys, relationship.detail)):
-        if not all(is_identifier_dtype(frame[c].dtype) for c in columns):
-            raise ReconciliationPreconditionError("identifier_dtype", role)
-    key_report = assess_unique_key(jobs, relationship.parent_definition)
-    if not key_report.is_complete:
-        raise ReconciliationPreconditionError("parent_key_missing", relationship.parent, key_report)
-    if not key_report.is_unique:
-        raise ReconciliationPreconditionError("parent_key_duplicate", relationship.parent, key_report)
-    for frame, role in ((jobs, relationship.parent), (cars, relationship.detail)):
-        if bool(completely_blank_row_mask(frame).any()):
-            raise ReconciliationPreconditionError("blank_rows_present", role)
-    return parent_keys, detail_keys
 
 
 def _classify_expected_counts(series: pd.Series) -> tuple[np.ndarray, np.ndarray]:
