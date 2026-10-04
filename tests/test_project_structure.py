@@ -151,6 +151,118 @@ def test_generated_outputs_are_ignored(relative_path: str) -> None:
     assert _git_is_ignored(relative_path)
 
 
+QUALITY_OUTPUT_PATHS = [
+    f"{INTERIM}/synthetic_blank_rows.csv",
+    f"{PROCESSED}/synthetic_cleaned.parquet",
+    "reports/synthetic_quality_report.json",
+    "notebooks/synthetic_blank_rows_audit.json",
+    "synthetic_removed_rows.txt",
+    "synthetic_rejected_rows.json",
+    "synthetic_quality_metrics.json",
+    "notebooks/01_data_ingestion.executed.ipynb",
+    "notebooks/01_data_ingestion.nbconvert.ipynb",
+    "notebooks/.ipynb_checkpoints/01_data_ingestion-checkpoint.ipynb",
+    "synthetic_extract.tmp.csv",
+    ".venv/lib/python3.12/site-packages/x.py",
+    "build/lib/x.py",
+    f"src/{PACKAGE_NAME}/__pycache__/x.cpython-312.pyc",
+    ".pytest_cache/v/cache/nodeids",
+    "reports/synthetic_type_validation.json",
+    "synthetic_dtype_report.md",
+    "synthetic_identifier_values.txt",
+    "notebooks/synthetic_identifier_extract.csv",
+    "synthetic_diagnostics.json",
+    "synthetic_run.log",
+    f"{INTERIM}/synthetic_duplicate_keys.csv",
+    "reports/synthetic_key_report.json",
+    "synthetic_missing_key_rows.txt",
+    "notebooks/synthetic_duplicate_key_extract.json",
+    "synthetic_key_profile.md",
+    "reports/synthetic_reconciliation_report.json",
+    "synthetic_mismatch_jobs.txt",
+    "notebooks/synthetic_orphan_details.json",
+    "synthetic_missing_link_rows.md",
+    f"{PROCESSED}/synthetic_orphans.parquet",
+    f"{PROCESSED}/synthetic_jobs_with_details.parquet",
+    "reports/synthetic_relationship_report.json",
+    "synthetic_cardinality_diagnostics.txt",
+    "notebooks/synthetic_joined_preview.md",
+    "reports/synthetic_coverage_report.json",
+    "synthetic_missing_locations.txt",
+    "notebooks/synthetic_unexpected_locations.md",
+    "synthetic_location_profile.html",
+    f"{INTERIM}/synthetic_observed_locations.csv",
+    "reports/synthetic_stream_profile.json",
+    "synthetic_investigation_export.md",
+    "notebooks/synthetic_stream_diagnostics.txt",
+    "synthetic_location_extract.csv",
+    "reports/synthetic_temporal_mismatch.json",
+    "synthetic_invalid_dates.csv",
+    "notebooks/synthetic_timeline_profile.md",
+    f"{PROCESSED}/synthetic_derived_timestamps.parquet",
+    "synthetic_temporal_report.txt",
+    "reports/synthetic_stream_comparison.json",
+    f"{INTERIM}/synthetic_stream_comparison_table.csv",
+    "synthetic_offer_fingerprints.parquet",
+    "notebooks/synthetic_offer_multiset.md",
+    "synthetic_paired_capture_table.csv",
+    "synthetic_temporal_pairing.xlsx",
+    "reports/synthetic_price_comparison_export.csv",
+    "synthetic_location_profile.csv",
+    "synthetic_comparison_diagnostics.txt",
+    "notebooks/synthetic_investigation_diagnostic.html",
+    "reports/synthetic_vehicle_stability_profile.json",
+    "synthetic_stability_report.md",
+    f"{INTERIM}/synthetic_attribute_changes.csv",
+    "notebooks/synthetic_change_extract.parquet",
+    "synthetic_change_history.xlsx",
+    "synthetic_unstable_records.csv",
+    "synthetic_entity_fingerprints.parquet",
+    "synthetic_vehicle_profile.html",
+    "reports/synthetic_missingness_report.json",
+    "synthetic_diagnostic_export.txt",
+    f"{RAW}/synthetic_cars.csv",
+]
+
+
+@pytest.mark.usefixtures("require_git")
+@pytest.mark.parametrize("relative_path", QUALITY_OUTPUT_PATHS)
+def test_quality_outputs_and_tooling_artifacts_are_ignored(relative_path: str) -> None:
+    assert _git_is_ignored(relative_path)
+
+
+@pytest.mark.usefixtures("require_git")
+@pytest.mark.parametrize(
+    "relative_path",
+    [f"src/{PACKAGE_NAME}/quality.py", "tests/test_quality.py", "notebooks/01_data_ingestion.ipynb",
+     "tests/test_removed_rows_synthetic.py", "docs/quality_notes.md",
+     f"src/{PACKAGE_NAME}/unique_keys.py", "tests/test_unique_keys.py", "tests/test_missing_key_rows.py",
+     f"src/{PACKAGE_NAME}/reconciliation.py", "tests/test_reconciliation.py", "tests/test_orphan_details.py",
+     f"src/{PACKAGE_NAME}/relationships.py", "tests/test_relationships.py", "tests/test_joined_rows.py",
+     f"src/{PACKAGE_NAME}/coverage.py", "tests/test_coverage.py", "tests/test_missing_locations.py",
+     f"src/{PACKAGE_NAME}/streams.py", "tests/test_streams.py",
+     "docs/investigations/missing_expected_location_stream.md",
+     f"src/{PACKAGE_NAME}/temporal.py", "tests/test_temporal.py",
+     f"src/{PACKAGE_NAME}/comparison.py", "tests/test_comparison.py",
+     "docs/investigations/location_stream_comparison.md",
+     f"src/{PACKAGE_NAME}/stability.py", "tests/test_vehicle_stability.py"],
+)
+def test_quality_source_tests_and_docs_are_not_ignored(relative_path: str) -> None:
+    assert not _git_is_ignored(relative_path)
+
+
+@pytest.mark.usefixtures("require_git")
+def test_no_proprietary_data_file_is_tracked_or_staged() -> None:
+    # Only placeholder/README files may be tracked or staged under the data
+    # directories; file names are checked, never opened.
+    for args in (["git", "ls-files", "--", RAW, INTERIM, PROCESSED],
+                 ["git", "diff", "--cached", "--name-only", "--", RAW, INTERIM, PROCESSED]):
+        listed = subprocess.run(args, cwd=PROJECT_ROOT, capture_output=True, text=True, check=True)
+        offending = [line for line in listed.stdout.splitlines()
+                     if line and Path(line).name not in {"README.md", ".gitkeep"}]
+        assert not offending, f"{len(offending)} data file(s) tracked or staged"
+
+
 @pytest.mark.parametrize("relative_path", DIRECTORY_PLACEHOLDERS)
 def test_directory_placeholder_exists(relative_path: str) -> None:
     assert (PROJECT_ROOT / relative_path).is_file()

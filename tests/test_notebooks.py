@@ -27,7 +27,14 @@ from ql2_sixt_canada_analysis.notebook_validation import (
     execute_notebook_copy,
     read_notebook,
 )
-from ql2_sixt_canada_analysis.schemas import DATASET_DEFINITIONS, DatasetKey
+from ql2_sixt_canada_analysis.schemas import (
+    DATASET_DEFINITIONS,
+    EXPECTED_LOCATION_COVERAGE,
+    INVESTIGATED_LOCATION_STREAM,
+    JOB_DETAIL_RELATIONSHIP,
+    TEMPORAL_RECONCILIATION,
+    DatasetKey,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOKS_DIR = PROJECT_ROOT / "notebooks"
@@ -43,8 +50,37 @@ def _code_cells(notebook: nbformat.NotebookNode) -> list[nbformat.NotebookNode]:
     return [c for c in notebook.cells if c.cell_type == "code"]
 
 
+def _step_output(result: object, marker: str) -> str:
+    """Printed output of the one executed code cell whose source contains ``marker``."""
+    cells = [c for c in _code_cells(result.executed) if marker in c.source]  # type: ignore[attr-defined]
+    assert len(cells) == 1, marker
+    return "\n".join(o.get("text", "") for o in cells[0].outputs)
+
+
 def _code_source(notebook: nbformat.NotebookNode) -> str:
     return "\n".join(c.source for c in _code_cells(notebook))
+
+
+# Cells that are required to report categorical gate results and aggregate
+# counts (never values or identifiers); the per-step "stay quiet" checks
+# exclude them and each has its own focused tests.
+REPORTING_STEPS = ("assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+                   "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
+                   "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
+                   "investigate_location_stream(", "assess_completeness(")
+
+
+def _is_reporting(cell: nbformat.NotebookNode) -> bool:
+    return any(marker in cell.source for marker in REPORTING_STEPS)
+
+
+def _quiet_code(notebook: nbformat.NotebookNode) -> str:
+    return "\n".join(c.source for c in _code_cells(notebook) if not _is_reporting(c))
+
+
+def _quiet_outputs(result: object) -> str:
+    return "\n".join(o.get("text", "") for c in _code_cells(result.executed)  # type: ignore[attr-defined]
+                      if not _is_reporting(c) for o in c.outputs)
 
 
 def _snapshot(root: Path) -> dict[str, str]:
@@ -145,10 +181,1136 @@ def test_notebook_uses_package_apis_not_direct_reads(notebook_path: Path) -> Non
 
 def test_ingestion_notebook_imports_centralized_apis() -> None:
     code = _code_source(read_notebook(INGESTION_NOTEBOOK))
-    assert re.search(r"from ql2_sixt_canada_analysis(\.ingestion)? import .*load_raw_datasets", code)
+    assert re.search(r"from ql2_sixt_canada_analysis(\.ingestion)? import\s*\(?[^)]*?\bload_raw_datasets\b", code, re.S)
     assert re.search(r"from ql2_sixt_canada_analysis\.paths import .*resolve_raw_data_dir", code)
     assert "resolve_raw_data_dir(" in code
     assert "load_raw_datasets(" in code
+
+
+# ---------------------------------------------------- blank-row quality step
+
+
+def test_ingestion_notebook_imports_reusable_quality_api() -> None:
+    code = _code_source(read_notebook(INGESTION_NOTEBOOK))
+    assert re.search(
+        r"from ql2_sixt_canada_analysis(\.quality)? import\s*\(?[^)]*?\bremove_blank_rows_from_raw_datasets\b",
+        code, re.S,
+    )
+    assert "remove_blank_rows_from_raw_datasets(" in code
+
+
+def test_ingestion_notebook_applies_quality_step_after_loading() -> None:
+    cells = _code_cells(read_notebook(INGESTION_NOTEBOOK))
+    load_index = next(i for i, c in enumerate(cells) if "load_raw_datasets(" in c.source)
+    quality_index = next(i for i, c in enumerate(cells) if "remove_blank_rows_from_raw_datasets(" in c.source)
+    assert quality_index > load_index
+    later = "\n".join(c.source for c in cells[quality_index:])
+    # Per-dataset and total counts are kept in named in-memory objects and the
+    # cleaned frames feed subsequent variables.
+    assert re.search(r"\bblank_rows\s*=\s*remove_blank_rows_from_raw_datasets\(", later)
+    assert "total_removed_blank_row_count" in later
+    assert re.search(r"\bjobs_df\s*=.*\.cleaned", later) and re.search(r"\bcars_df\s*=.*\.cleaned", later)
+
+
+def test_ingestion_notebook_does_not_reimplement_blank_row_detection() -> None:
+    code = _code_source(read_notebook(INGESTION_NOTEBOOK))
+    for pattern in (r"\.dropna\(", r"\.isna\(\)\.all\(", r"\.isnull\(", r"\.str\.strip\(", r"\.strip\(\)\s*==", r"\.replace\("):
+        assert not re.search(pattern, code), f"notebook reimplements blank-row logic: {pattern}"
+
+
+def test_ingestion_notebook_never_displays_counts_or_frames() -> None:
+    code = _code_source(read_notebook(INGESTION_NOTEBOOK))
+    assert not re.search(r"print\([^\n]*(row_count|len\(|\.shape|_df\b|\.cleaned\b)", code)
+    assert not re.search(r"(?m)^\s*(raw|cleaned|jobs_df|cars_df|blank_rows|\w+\.cleaned)\s*$", code), "bare expression would display"
+    assert not re.search(r"\.(head|tail|sample|describe|info|to_string|to_markdown)\(", code)
+
+
+def test_ingestion_notebook_quality_step_runs_with_synthetic_blank_rows(tmp_path: Path) -> None:
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    for key in DatasetKey:
+        columns = contract_columns(key)
+        record = ",".join(f"synthetic_{c}" for c in range(len(columns)))
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(columns) + f"\n{record}\n\n{record}\n").encode("utf-8")
+        )
+    result = execute_notebook_copy(
+        INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
+    )
+    outputs = _quiet_outputs(result)
+    assert "blank" in outputs.lower()
+    assert not re.search(r"\b[0-9]+\b", outputs), "cell output shows a number"
+    assert "synthetic_0" not in outputs
+    assert not any(o.get("output_type") in {"execute_result", "display_data"}
+                   for c in _code_cells(result.executed) for o in c.outputs)
+    assert not list(directory.parent.glob("**/*blank*")), "notebook wrote a blank-row artifact"
+
+
+# ---------------------------------------------------------- identifier typing
+
+
+def test_ingestion_notebook_has_no_identifier_lists_or_manual_casts() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    code = _code_source(notebook)
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    identifiers = {c for d in DATASET_DEFINITIONS.values() for c in d.identifier_columns}
+    assert not any(re.search(rf"\b{re.escape(c)}\b", text) for c in identifiers), \
+        "identifier names belong in the schema module only"
+    assert ".astype(" not in code, "no manual casts; the loader types identifiers"
+    assert "dtype=" not in code and "identifier_columns" not in code
+
+
+def test_ingestion_notebook_validates_identifier_dtypes_after_cleaning() -> None:
+    cells = _code_cells(read_notebook(INGESTION_NOTEBOOK))
+    sources = [c.source for c in cells]
+    load = next(i for i, s in enumerate(sources) if "load_raw_datasets(" in s)
+    clean = next(i for i, s in enumerate(sources) if "remove_blank_rows_from_raw_datasets(" in s)
+    validate = next(i for i, s in enumerate(sources) if "validate_raw_dataset_identifier_dtypes(" in s)
+    assert load < clean < validate
+    assert re.search(r"validate_raw_dataset_identifier_dtypes\(\s*cleaned\s*\)", sources[validate])
+    code = "\n".join(sources)
+    assert re.search(
+        r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bvalidate_raw_dataset_identifier_dtypes\b",
+        code, re.S,
+    )
+    assert not re.search(r"\.(dtypes|info|value_counts|nunique|isna)\b", code), "no type/null/distinct summaries"
+
+
+def test_ingestion_notebook_runs_with_risky_synthetic_identifiers(tmp_path: Path) -> None:
+    risky = ["000123", "123456789012345678901234567890", "SYNTHETIC-ID-001", "A-001-B", "0", ""]
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    for key in DatasetKey:
+        definition = DATASET_DEFINITIONS[key]
+        lines = [",".join(v if c in definition.identifier_columns else f"synthetic_{i}"
+                          for i, c in enumerate(definition.columns)) for v in risky]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(definition.columns) + "\n" + "\n".join(lines) + "\n\n").encode("utf-8")
+        )
+    before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
+    result = execute_notebook_copy(
+        INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
+    )
+    outputs = _quiet_outputs(result)
+    assert "nullable string" in outputs
+    assert not any(v in outputs for v in risky if v and v != "0")
+    assert not re.search(r"\b[0-9]+\b", outputs)
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before, \
+        "notebook wrote files"
+
+
+# ------------------------------------------------------------------ unique keys
+
+
+def test_ingestion_notebook_assesses_unique_keys_with_reusable_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    cells = _code_cells(notebook)
+    sources = [c.source for c in cells]
+    code = "\n".join(sources)
+    assert re.search(
+        r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bassess_raw_dataset_unique_keys\b", code, re.S
+    )
+    clean = next(i for i, s in enumerate(sources) if "remove_blank_rows_from_raw_datasets(" in s)
+    dtypes = next(i for i, s in enumerate(sources) if "validate_raw_dataset_identifier_dtypes(" in s)
+    assess = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
+    assert clean < dtypes < assess
+    assert re.search(r"\bkey_reports\s*=\s*assess_raw_dataset_unique_keys\(\s*cleaned\s*\)", sources[assess])
+    # Assessment, not strict validation, so real violations cannot stop the workflow.
+    assert "validate_raw_dataset_unique_keys" not in code and "validate_unique_key" not in code
+
+
+def test_ingestion_notebook_has_no_key_lists_or_own_key_algorithm() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    code = _code_source(notebook)
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    keys = {c for d in DATASET_DEFINITIONS.values() for c in d.unique_key_columns}
+    assert not any(re.search(rf"\b{re.escape(c)}\b", text) for c in keys), "key names live in schemas only"
+    for pattern in (r"\.duplicated\(", r"\.groupby\(", r"\.drop_duplicates\(", r"\.nunique\(",
+                    r"\.value_counts\(", r"unique_key_columns", r"\.notna\(", r"\.isna\("):
+        assert not re.search(pattern, code), f"notebook reimplements key logic: {pattern}"
+    for attribute in ("row_count", "is_valid", "all_valid", "violations"):
+        assert not re.search(rf"print\([^\n]*{attribute}", _quiet_code(notebook)), "key results must not be displayed"
+
+
+def test_ingestion_notebook_key_step_runs_on_synthetic_violations(tmp_path: Path) -> None:
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    for key in DatasetKey:
+        definition = DATASET_DEFINITIONS[key]
+        def line(job: str) -> str:
+            return ",".join(
+                job if c in definition.identifier_columns
+                else ("1" if c in definition.unique_key_columns else f"synthetic_{i}")
+                for i, c in enumerate(definition.columns)
+            )
+        # duplicate key, missing key and a blank line: the notebook must not stop.
+        lines = [line("SYNTH-JOB-001"), line("SYNTH-JOB-001"), line(""), "", line("000001")]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(definition.columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8")
+        )
+    before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(
+        INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
+    )
+    outputs = _step_output(result, "assess_raw_dataset_unique_keys(")  # this step's own cell only
+    assert "Unique-key assessment completed" in outputs
+    assert "SYNTH-JOB-001" not in outputs and "000001" not in outputs
+    assert not re.search(r"\b[0-9]+\b", outputs)
+    assert not re.search(r"\b(True|False|valid|invalid|duplicate)\b", outputs, re.I)
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before
+    assert _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ---------------------------------------------------- job-detail reconciliation
+
+
+def test_ingestion_notebook_reconciles_with_reusable_api_after_key_assessment() -> None:
+    sources = [c.source for c in _code_cells(read_notebook(INGESTION_NOTEBOOK))]
+    code = "\n".join(sources)
+    for name in ("assess_job_detail_reconciliation", "JOB_DETAIL_RELATIONSHIP"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    keys = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
+    reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
+    assert keys < reconcile
+    assert re.search(
+        r"reconciliation_report\s*=\s*assess_job_detail_reconciliation\(\s*jobs_df\s*,\s*cars_df\s*,"
+        r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", sources[reconcile])
+    assert "validate_job_detail_reconciliation" not in code  # assessment keeps the workflow running
+
+
+def test_ingestion_notebook_has_no_relationship_fields_or_own_reconciliation() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    code = _code_source(notebook)
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    rel = JOB_DETAIL_RELATIONSHIP
+    fields = {*rel.parent_key_columns, *rel.detail_key_columns, rel.expected_detail_count_column}
+    assert not any(re.search(rf"\b{re.escape(f)}\b", text) for f in fields), "fields live in schemas only"
+    for pattern in (r"\.merge\(", r"(_df|\.jobs|\.cars)\.join\(", r"\.groupby\(", r"\.value_counts\(", r"\.size\(\)",
+                    r"\.reindex\(", r"\.isin\(", r"\.sum\(", r"parent_key_columns", r"detail_key_columns",
+                    r"expected_detail_count_column"):
+        assert not re.search(pattern, code), f"notebook reimplements reconciliation: {pattern}"
+    # Reporting cells print aggregate results only; the quiet steps print none.
+    assert not re.search(r"print\([^\n]*(reconciliation_report|_count|discrepancy|reconciled)",
+                         _quiet_code(notebook))
+
+
+def test_ingestion_notebook_reconciliation_runs_on_synthetic_mismatches(tmp_path: Path) -> None:
+    rel = JOB_DETAIL_RELATIONSHIP
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    jobs_rows = [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "2"},
+                 {rel.parent_key_columns[0]: "000001", rel.expected_detail_count_column: "1"}]
+    cars_rows = [{rel.detail_key_columns[0]: "SYNTH-JOB-001"}, {rel.detail_key_columns[0]: "SYNTH-JOB-404"},
+                 {rel.detail_key_columns[0]: ""}]
+    for key, rows in ((DatasetKey.JOBS, jobs_rows), (DatasetKey.CARS, cars_rows)):
+        columns = DATASET_DEFINITIONS[key].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in rows]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n\n").encode("utf-8"))
+    before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(
+        INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
+    )
+    outputs = _step_output(result, "assess_job_detail_reconciliation(")  # this step's own cell only
+    assert "reconciliation step completed" in outputs
+    assert "SYNTH-JOB" not in outputs and "000001" not in outputs        # no identifiers, aggregates only
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    for column in rel.expected_detail_count_columns:
+        assert lines[f"Declared {column.replace('_', ' ')} reconciled"].split("|")[0].strip() == "False"
+    assert lines["Combined reconciliation passed"].split("|")[0].strip() == "False"
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before
+    assert _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------- one-to-many relationship
+
+
+def test_ingestion_notebook_validates_relationship_before_trusted_join() -> None:
+    sources = [c.source for c in _code_cells(read_notebook(INGESTION_NOTEBOOK))]
+    code = "\n".join(sources)
+    for name in ("assess_one_to_many_join", "assess_job_detail_join_readiness", "JOB_DETAIL_RELATIONSHIP"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    assert reconcile < relate
+    cell = sources[relate]
+    assert re.search(r"relationship_report\s*=\s*assess_one_to_many_join\(\s*jobs_df\s*,\s*cars_df\s*,"
+                     r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", cell)
+    # The relationship alone never yields a joined frame: the notebook does not
+    # call the relationship-checked join directly (the join gate does).
+    assert "join_jobs_to_details" not in code and not re.search(r"^jobs_with_details\s*=", code, re.M)
+    assert not re.search(r"(pd\.merge|\.merge\(|\.join\(\s*(jobs|cars))", code), "no unvalidated direct merge"
+    keys = {*JOB_DETAIL_RELATIONSHIP.parent_key_columns, *JOB_DETAIL_RELATIONSHIP.detail_key_columns}
+    assert not any(re.search(rf"\b{re.escape(k)}\b", code) for k in keys)
+    assert not re.search(r"print\([^\n]*(relationship_report|jobs_with_details|_count\b|_valid\b|is_valid)", cell)
+
+
+def test_ingestion_notebook_relationship_step_runs_on_synthetic_inputs(tmp_path: Path) -> None:
+    rel = JOB_DETAIL_RELATIONSHIP
+    for case, cars_keys in (("valid", ["SYNTH-JOB-001", "SYNTH-JOB-001"]),
+                            ("orphan", ["SYNTH-JOB-001", "SYNTH-JOB-404", ""])):
+        directory = tmp_path / case
+        directory.mkdir()
+        rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "2"},
+                                  {rel.parent_key_columns[0]: "000001", rel.expected_detail_count_column: "0"}],
+                DatasetKey.CARS: [{rel.detail_key_columns[0]: k} for k in cars_keys]}
+        for key, key_rows in rows.items():
+            columns = DATASET_DEFINITIONS[key].columns
+            lines = [",".join(r.get(c, f"synthetic_{i}_{n}") for i, c in enumerate(columns))
+                     for n, r in enumerate(key_rows)]
+            (directory / f"synthetic_{key}.csv").write_bytes(
+                (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+        workdir = tmp_path / f"kernel_{case}"
+        workdir.mkdir()
+        repo_before = _snapshot(PROJECT_ROOT)
+        result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                       env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+        outputs = _quiet_outputs(result)
+        assert "One-to-many relationship validation step completed." in outputs
+        assert "SYNTH" not in outputs and not re.search(r"\b[0-9]+\b", outputs)
+        assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ---------------------------------------------------- trusted job-detail join
+
+
+def test_ingestion_notebook_gates_the_trusted_join_through_the_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    gate = next(i for i, s in enumerate(sources) if "assess_job_detail_join_readiness(" in s)
+    assert relate < gate
+    cell = sources[gate]
+    assert re.search(r"job_detail_join\s*=\s*assess_job_detail_join_readiness\(\s*jobs_df\s*,\s*cars_df\s*,"
+                     r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", cell)
+    assert re.search(r"^trusted_jobs_with_details\s*=\s*job_detail_join\.trusted_jobs_with_details", cell, re.M)
+    assert re.search(r"^job_detail_join_ready\s*=\s*job_detail_join\.join_ready", cell, re.M)
+    # The trust decision lives in production code, not in notebook boolean logic.
+    assert not re.search(r"trusted_jobs_with_details\s*=.*\bif\b", cell)
+    for later in sources[gate + 1:]:
+        assert "diagnostic_jobs_with_details" not in later, "diagnostic join consumed downstream"
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert "trusted_jobs_with_details" in guidance and "job_detail_join_ready" in guidance
+    assert "only when it is not `None`" not in guidance and "not proof" in guidance
+
+
+def test_ingestion_notebook_reports_blocked_join_on_duplicate_detail_keys(tmp_path: Path) -> None:
+    from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    position, = rel.detail_definition.non_identifier_key_columns
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    (parent_city, detail_city), = rel.scope_agreement_columns              # linked rows share their job's city
+    rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", parent_city: "SYNTH-CITY-1",
+                               **{c: "2" for c in rel.expected_detail_count_columns}}],
+            DatasetKey.CARS: [{rel.detail_key_columns[0]: "SYNTH-JOB-001", position: "0",
+                               detail_city: "SYNTH-CITY-1"}] * 2}  # duplicate key
+    for key, key_rows in rows.items():
+        columns = DATASET_DEFINITIONS[key].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}_{n}") for i, c in enumerate(columns))
+                 for n, r in enumerate(key_rows)]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    outputs = _step_output(result, "assess_job_detail_join_readiness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Relationship contract passed"].strip() == "True"      # the original defect's trigger
+    assert lines["Detail business-key contract passed"].strip() == "False"
+    assert lines["Jobs business-key contract passed"].strip() == "True"
+    assert lines["Declared counts reconciled"].strip() == "True"
+    assert lines["Trusted join ready"].strip() == "False"
+    assert JobDetailJoinBlocker.DETAILS_KEY_CONTRACT_FAILED.value in lines["Trusted join blocked by"]
+    assert lines["Joined frame held"].strip().startswith("diagnostic only - UNTRUSTED")
+    assert "SYNTH" not in outputs and "synthetic_" not in outputs and not re.search(r"\d", outputs)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ---------------------------------------------------- expected location coverage
+
+
+def test_ingestion_notebook_checks_coverage_on_cleaned_frames_before_join() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("assess_dataset_location_coverage", "EXPECTED_LOCATION_COVERAGE"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    keys = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
+    cover = next(i for i, s in enumerate(sources) if "assess_dataset_location_coverage(" in s)
+    reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
+    join = next(i for i, s in enumerate(sources) if "assess_job_detail_join_readiness(" in s)
+    assert keys < cover < reconcile < join
+    assert re.search(r"location_coverage_report\s*=\s*assess_dataset_location_coverage\(\s*cleaned\s*,"
+                     r"\s*EXPECTED_LOCATION_COVERAGE\s*\)", sources[cover])
+    assert "validate_expected_location_coverage" not in code
+    # No location column literals or own distinct/set logic. (Column names
+    # may coincide with ordinary words, so only quoted literals are checked.)
+    assert not any(re.search(rf"[\"']{re.escape(c)}[\"']", code)
+                   for c in (*EXPECTED_LOCATION_COVERAGE.location_columns,
+                             *EXPECTED_LOCATION_COVERAGE.stream_scope_columns))
+    for pattern in (r"\.unique\(", r"\.nunique\(", r"\.drop_duplicates\(", r"\bset\(", r"\.difference\(",
+                    r"\.isin\(", r"expected_locations", r"location_columns", r"\.str\.strip"):
+        assert not re.search(pattern, code), f"notebook reimplements coverage: {pattern}"
+    assert not re.search(r"print\([^\n]*(location_coverage_report|_ratio|_count\b|_passed)", _quiet_code(notebook))
+
+
+def test_ingestion_notebook_coverage_step_fails_closed_on_synthetic_inputs(
+    synthetic_raw_dir: Path, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = _step_output(result, "assess_dataset_location_coverage(")  # this step's own cell only
+    assert "Expected-coverage step completed." in outputs
+    assert "synthetic_r" not in outputs                                   # observed values never shown
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Observed pair values"].strip() == "withheld (confidential)"
+    assert lines["Coverage contract passed"].strip() == "False"
+    assert lines["Missing expected pairs"].strip() != "none"           # configured pairs, not source values
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ---------------------------------------------- expected stream investigation
+
+
+def test_ingestion_notebook_investigates_stream_via_central_target() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("investigate_location_stream", "resolve_expected_location", "INVESTIGATED_LOCATION_STREAM"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    investigate = next(i for i, s in enumerate(sources) if "investigate_location_stream(" in s)
+    assert relate < investigate
+    cell = sources[investigate]
+    assert re.search(r"stream_target\s*=\s*resolve_expected_location\(\s*INVESTIGATED_LOCATION_STREAM\b", cell)
+    assert re.search(r"location_stream_report\s*=\s*investigate_location_stream\(", cell)
+    # The target literal lives only in the central contract.
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    assert INVESTIGATED_LOCATION_STREAM[-1] not in text   # branch label (the city is a common word)
+    for pattern in (r"\.query\(", r"\.loc\[", r"\.merge\(", r"\.groupby\(", r"==\s*stream_target",
+                    r"\.isin\(", r"\.str\.", r"validate_location_stream"):
+        assert not re.search(pattern, code), f"one-off stream logic in notebook: {pattern}"
+    quiet = "\n".join(s for s in sources if not any(m in s for m in REPORTING_STEPS))
+    assert not re.search(r"print\([^\n]*(location_stream_report|stream_target|_healthy|status)", quiet)
+
+
+def test_ingestion_notebook_stream_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = _step_output(result, "investigate_location_stream(")  # this step's own cell only
+    assert "Expected-stream investigation step completed." in outputs
+    assert INVESTIGATED_LOCATION_STREAM[-1] not in outputs
+    assert "Stream continuity:" in outputs and "synthetic_r" not in outputs
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------ temporal reconciliation
+
+
+def test_ingestion_notebook_reconciles_temporal_fields_through_the_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("assess_temporal_reconciliation", "TEMPORAL_RECONCILIATION"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
+    assert relate < temporal
+    assert re.search(r"temporal_report\s*=\s*assess_temporal_reconciliation\(\s*jobs_df\s*,\s*cars_df\s*,"
+                     r"\s*TEMPORAL_RECONCILIATION\s*\)", sources[temporal])
+    assert re.search(r"temporal_fields_trusted\s*=", sources[temporal])
+    # No duplicated field lists, parsing rules or repairs in the notebook.
+    fields = {f.column for f in TEMPORAL_RECONCILIATION.fields}
+    assert not any(re.search(rf"[\"']{re.escape(f)}[\"']", code) for f in fields)
+    for pattern in (r"to_datetime", r"tz_localize", r"tz_convert", r"strptime", r"\.dt\.", r"fillna",
+                    r"validate_temporal_reconciliation", r"parse_temporal_field"):
+        assert not re.search(pattern, code), f"notebook duplicates temporal logic: {pattern}"
+    assert not re.search(r"print\([^\n]*(temporal_report|_trusted|_count)", sources[temporal])
+
+
+def test_ingestion_notebook_temporal_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = _step_output(result, "assess_temporal_reconciliation(")  # this step's own cell only
+    assert "Temporal reconciliation step completed." in outputs
+    assert not re.search(r"\b(\d{4}-\d{2}-\d{2}|unavailable|invalid|True|False)\b", outputs)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ---------------------------------------------------- related stream comparison
+
+
+def test_ingestion_notebook_compares_related_streams_through_the_api() -> None:
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, LOCATION_STREAM_COMPARISON
+
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("compare_location_streams", "LOCATION_STREAM_COMPARISON"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
+    compare = next(i for i, s in enumerate(sources) if "compare_location_streams(" in s)
+    assert temporal < compare
+    assert re.search(r"location_comparison_report\s*=\s*compare_location_streams\(\s*jobs_df\s*,\s*cars_df\s*,"
+                     r"\s*LOCATION_STREAM_COMPARISON\s*\)", sources[compare])
+    # The ambiguous boolean handoff is gone: identity comes from the policy gate.
+    assert "location_alias_confirmed" not in code and "alias_authority_sufficient" not in code
+    # Pair, columns and aliasing live in the central definition only.
+    names = [key[-1] for key in COMPARED_LOCATION_STREAMS]   # branch labels
+    full = "\n".join(c.source for c in notebook.cells)
+    assert not any(n in full for n in names)
+    columns = {*LOCATION_STREAM_COMPARISON.product_columns, *LOCATION_STREAM_COMPARISON.price_columns}
+    assert not any(re.search(rf"[\"']{re.escape(c)}[\"']", code) for c in columns)
+    for pattern in (r"canonical_location_keys", r"validate_confirmed_location_alias", r"drop_duplicates",
+                    r"\.replace\(", r"\.merge\(", r"to_csv", r"to_parquet", r"Counter"):
+        assert not re.search(pattern, code), f"notebook duplicates or merges streams: {pattern}"
+    quiet = "\n".join(s for s in sources if not any(m in s for m in REPORTING_STEPS))
+    assert not re.search(r"print\([^\n]*(location_comparison_report|_confirmed|status)", quiet)
+
+
+def test_ingestion_notebook_comparison_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS
+
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = _step_output(result, "compare_location_streams(")  # this step's own cell only
+    assert "Related-stream comparison step completed." in outputs
+    assert not any(key[-1] in outputs for key in COMPARED_LOCATION_STREAMS)
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Behavioural comparison result"].strip() == "both_streams_absent"
+    assert lines["Duplicate inference blocked by"].strip().startswith("no_paired_captures")
+    assert "not authoritative alias confirmation" in outputs
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+def test_ingestion_notebook_reports_inconclusive_single_pair_partial_overlap(tmp_path: Path) -> None:
+    # Regression: one identical shared capture plus an unpaired capture and no baseline
+    # was reported as likely_duplicate_streams.
+    from ql2_sixt_canada_analysis.comparison import DuplicateInferenceBlocker as DB
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, LOCATION_STREAM_COMPARISON as D
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    loc = D.coverage.label_column
+    scope, = D.coverage.stream_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city, first), (_, second) = COMPARED_LOCATION_STREAMS
+    same = ({c: f"SYNTH-{c.upper()}" for c in (*D.product_columns, *D.price_columns)}
+            | {c: "10.00" for c in D.numeric_columns} | {scope: city})   # valid offers
+    cars = [same | {rel.detail_key_columns[0]: "SYNTH-JOB-001", loc: first, position: "0"},
+            same | {rel.detail_key_columns[0]: "SYNTH-JOB-001", loc: second, position: "1"},
+            same | {rel.detail_key_columns[0]: "SYNTH-JOB-002", loc: first, position: "0"}]   # unpaired
+    jobs = [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "2"},
+            {rel.parent_key_columns[0]: "SYNTH-JOB-002", rel.expected_detail_count_column: "1"}]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    outputs = _step_output(result, "compare_location_streams(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Behavioural comparison result"].strip() == "comparison_inconclusive"
+    assert lines["Paired captures"].strip() == "1 | minimum required: 2"
+    assert lines["Unpaired captures - first stream"].strip() == "1 | second stream: 0"
+    assert lines["Matching paired captures"].strip() == "1 | differing: 0"
+    assert lines["Eligible paired captures (valid offers on both sides)"].strip() == "1 | invalid: 0"
+    assert lines["Target evidence threshold passed"].strip() == "False"
+    assert lines["Duplicate-stream inference permitted"].strip() == "False"
+    assert lines["Temporal overlap"].strip() == "partial" and lines["Scope baseline"].strip() == "unavailable"
+    assert lines["Duplicate inference blocked by"].strip() == ", ".join(
+        b.value for b in (DB.INSUFFICIENT_PAIRED_CAPTURES, DB.INCOMPLETE_TEMPORAL_OVERLAP, DB.BASELINE_UNAVAILABLE))
+    assert first not in outputs and second not in outputs and "SYNTH" not in outputs
+    policy = _step_output(result, "assess_pricing_readiness(")
+    assert "Vancouver identity policy state: unresolved" in policy and "Pricing analysis ready: False" in policy
+
+
+def test_ingestion_notebook_reports_missing_prices_as_invalid_not_duplicate(tmp_path: Path) -> None:
+    # Regression: two fully paired captures with missing prices compared equal and,
+    # with one weak comparator capture, were reported as likely_duplicate_streams.
+    from ql2_sixt_canada_analysis.comparison import DuplicateInferenceBlocker as DB
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, LOCATION_STREAM_COMPARISON as D
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    loc = D.coverage.label_column
+    scope, = D.coverage.stream_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city, first), (_, second) = COMPARED_LOCATION_STREAMS
+    no_price = ({c: f"SYNTH-{c.upper()}" for c in D.product_columns} | {c: "" for c in D.price_columns}
+                | {scope: city})
+    cars = [no_price | {rel.detail_key_columns[0]: job, loc: label, position: str(i)}
+            for job in ("SYNTH-JOB-001", "SYNTH-JOB-002") for i, label in enumerate((first, second))]
+    jobs = [{rel.parent_key_columns[0]: job, rel.expected_detail_count_column: "2"}
+            for job in ("SYNTH-JOB-001", "SYNTH-JOB-002")]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    outputs = _step_output(result, "compare_location_streams(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Behavioural comparison result"].strip() == "comparison_unassessable"
+    assert lines["Paired captures"].strip() == "2 | minimum required: 2"
+    assert lines["Eligible paired captures (valid offers on both sides)"].strip() == "0 | invalid: 2"
+    assert lines["Invalid offers found in"].strip() == "first_target_stream, second_target_stream"
+    assert lines["Invalid offer reasons"].strip() == "missing_value"
+    assert lines["Offer validity sufficient"].strip() == "False"
+    assert lines["Target evidence threshold passed"].strip() == "False"
+    assert lines["Baseline evidence threshold passed"].strip() == "False"
+    assert lines["Duplicate-stream inference permitted"].strip() == "False"
+    assert DB.INVALID_OFFER_EVIDENCE.value in lines["Duplicate inference blocked by"]
+    assert first not in outputs and second not in outputs and "SYNTH" not in outputs
+    assert "Pricing analysis ready: False" in _step_output(result, "assess_pricing_readiness(")
+    assert list(workdir.iterdir()) == []
+
+
+# ---------------------------------------------------- vehicle-attribute stability
+
+
+def test_ingestion_notebook_assesses_vehicle_stability_through_the_api() -> None:
+    from ql2_sixt_canada_analysis.schemas import VEHICLE_ATTRIBUTE_STABILITY as V
+
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("assess_vehicle_attribute_stability", "VEHICLE_ATTRIBUTE_STABILITY"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
+    stability = next(i for i, s in enumerate(sources) if "assess_vehicle_attribute_stability(" in s)
+    assert relate < temporal < stability
+    assert re.search(r"vehicle_stability_report\s*=\s*assess_vehicle_attribute_stability\(\s*cars_df\s*,"
+                     r"\s*VEHICLE_ATTRIBUTE_STABILITY\s*\)", sources[stability])
+    assert re.search(r"vehicle_attributes_stable\s*=", sources[stability])
+    # No duplicated field lists or stability logic in the notebook.
+    fields = {*V.entity_key_columns, *V.context_columns, *V.attribute_columns}
+    assert not any(re.search(rf"[\"']{re.escape(f)}[\"']", code) for f in fields)
+    for pattern in (r"groupby", r"nunique", r"drop_duplicates", r"\.shift\(", r"fillna", r"factorize",
+                    r"hash", r"\.unique\(", r"value_counts", r"to_csv", r"to_parquet", r"to_json",
+                    r"validate_vehicle_attribute_stability"):
+        assert not re.search(pattern, code), f"notebook duplicates stability logic: {pattern}"
+    # The full-population result is reported (aggregates only); identifiers are never displayed.
+    cell = sources[stability]
+    for field in ("status", "is_valid", "distinct_entities", "sufficient_history_entities",
+                  "insufficient_history_entities", "violations", "blocking_reasons"):
+        assert re.search(rf"print\([^\n]*vehicle_stability_report\.{field}\b", cell), field
+    assert "classify_vehicle_entities" not in code and "withheld" in cell
+    # The gate is the report's own validity, not an empty violations list.
+    assert re.search(r"vehicle_attributes_stable\s*=\s*vehicle_stability_report is not None and "
+                     r"vehicle_stability_report\.is_valid", cell)
+    assert not re.search(r"vehicle_attributes_stable\s*=.*violations", code)
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert '"No violations" is not "stable"' in guidance and "pricing analysis must not proceed" in guidance
+
+
+def test_ingestion_notebook_stability_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    code_cells = _code_cells(result.executed)
+    assert not any(o.get("output_type") == "error" for c in code_cells for o in c.outputs)
+    outputs = _step_output(result, "assess_vehicle_attribute_stability(")  # this step's own cell only
+    assert "Vehicle-attribute stability step completed." in outputs
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Full product population valid"].strip() == "False"
+    total, sufficient, insufficient = (int(lines[k]) for k in (
+        "In-scope entities", "Sufficient-history entities", "Insufficient-history entities"))
+    assert sufficient + insufficient <= total
+    assert lines["Insufficient-history entity identifiers"].strip() == "withheld (confidential)"
+    assert "SYNTH" not in outputs and "synthetic_" not in outputs
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+def test_ingestion_notebook_reports_partially_assessable_product_history(tmp_path: Path) -> None:
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+    from ql2_sixt_canada_analysis.schemas import VEHICLE_ATTRIBUTE_STABILITY as V
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    key, = V.entity_key_columns
+    scope, = V.context_columns
+    capture = V.temporal.field(V.observation_time_field).column
+    category, transmission, seats, bags = V.attribute_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    base = {scope: "SYNTH-LOCATION-001", category: "SYNTH-CLASS-A", transmission: "SYNTH-AUTOMATIC",
+            seats: "5", bags: "2", rel.detail_key_columns[0]: "SYNTH-JOB-001"}
+    cars = [base | {key: "SYNTH-VEHICLE-001", capture: "2025-01-15 05:00:00 MST", position: "0"},
+            base | {key: "SYNTH-VEHICLE-001", capture: "2025-01-15 06:00:00 MST", position: "1"},
+            base | {key: "SYNTH-VEHICLE-002", capture: "2025-01-15 05:00:00 MST", position: "2"}]
+    rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "3"}],
+            DatasetKey.CARS: cars}
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in rows.items():
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}_{n}") for i, c in enumerate(columns))
+                 for n, r in enumerate(dataset_rows)]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    stability = dict(line.split(":", 1) for line in
+                     _step_output(result, "assess_vehicle_attribute_stability(").splitlines() if ":" in line)
+    assert stability["Overall stability result"].strip() == "partially_assessable"   # formerly "passed"
+    assert stability["Full product population valid"].strip() == "False"
+    assert [int(stability[k]) for k in ("In-scope entities", "Sufficient-history entities",
+                                        "Insufficient-history entities")] == [2, 1, 1]
+    assert stability["Violations"].split("|")[0].strip() == "none observed"
+    assert stability["Stability blocked by"].strip() == "insufficient_history"
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    assert "Pricing analysis ready: False" in pricing
+    assert PricingBlocker.VEHICLE_HISTORY_INSUFFICIENT.value in pricing
+    assert PricingBlocker.VEHICLE_ATTRIBUTES_UNSTABLE.value not in pricing
+    outputs = _step_output(result, "assess_vehicle_attribute_stability(") + pricing
+    assert "SYNTH" not in outputs and "synthetic_" not in outputs
+
+
+# ------------------------------------------ Vancouver policy and pricing readiness
+
+
+def test_ingestion_notebook_gates_pricing_on_the_vancouver_policy() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("VANCOUVER_LOCATION_POLICY", "assess_location_policy", "assess_pricing_readiness",
+                 "apply_location_policy"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    order = [next(i for i, s in enumerate(sources) if call in s) for call in (
+        "assess_temporal_reconciliation(", "compare_location_streams(", "assess_vehicle_attribute_stability(",
+        "assess_location_policy(", "assess_pricing_readiness(")]
+    assert order == sorted(order)
+    cell = sources[order[-1]]
+    for name in ("vancouver_location_policy_state", "vancouver_location_policy_resolved",
+                 "vancouver_location_policy_authority_sufficient", "vancouver_locations_are_aliases",
+                 "vancouver_policy_scope", "vancouver_policy_scope_valid", "vancouver_canonicalization_permitted", "vancouver_locations_comparable_independently",
+                 "pricing_readiness", "pricing_analysis_ready"):
+        assert re.search(rf"^{name}\s*=", cell, re.M), name
+    # The single-stream health and separate completeness booleans no longer gate pricing:
+    # one stream could pass while another expected stream failed.
+    assert "location_stream_healthy" not in cell and "expected_location_coverage_passed" not in cell
+    assert re.search(r"completeness=completeness\b", cell)
+    for gate in ("all_key_contracts_valid", "one_to_many_contract_valid", "temporal_fields_trusted",
+                 "vehicle_stability_report"):
+        assert gate in cell, f"pricing readiness ignores {gate}"
+    # No policy decision may be derived from comparison evidence in the notebook.
+    assert not re.search(r"(LIKELY_DUPLICATE|likely_duplicate|\.status\s*(==|is))", code)
+    assert not re.search(r"LocationPolicyState\.|CONFIRMED_(ALIAS|DISTINCT)", code)
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert "pricing_analysis_ready" in guidance and "unresolved" in guidance
+    assert "No Vancouver pricing" in guidance and "airport-versus-downtown" in guidance
+
+
+def test_ingestion_notebook_gates_pricing_on_schedule_coverage_and_trusted_join() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("COLLECTION_SCHEDULE", "assess_collection_schedule", "assess_scheduled_time_coverage"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    streams = next(s for s in sources if "assess_expected_location_streams(" in s)
+    assert "schedule=COLLECTION_SCHEDULE" in streams
+    coverage = next(s for s in sources if "assess_scheduled_time_coverage(" in s)
+    assert "assess_collection_schedule(COLLECTION_SCHEDULE)" in coverage
+    assert "expected_streams_report" in coverage                       # every expected stream, not one
+    pricing = next(s for s in sources if "assess_pricing_readiness(" in s)
+    assert "scheduled_coverage=scheduled_coverage_report" in pricing
+    assert "job_detail_join=job_detail_join" in pricing
+    assert "trusted_jobs_with_details" not in pricing and "location_stream_healthy" not in pricing
+    # The decision is the central API's: no readiness is computed in the notebook itself.
+    assert re.search(r"^pricing_analysis_ready = pricing_readiness\.ready$", pricing, re.M)
+    assert len(re.findall(r"pricing_analysis_ready\s*=", code)) == 1
+    order = [sources.index(s) for s in (streams, coverage, pricing)]
+    assert order == sorted(order)
+
+
+def test_ingestion_notebook_reports_missing_schedule_as_a_pricing_blocker(
+    synthetic_raw_dir: Path, tmp_path: Path
+) -> None:
+    # With the committed configuration (no schedule) the truthful result is not ready.
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    coverage = _step_output(result, "assess_scheduled_time_coverage(")
+    lines = dict(line.split(":", 1) for line in coverage.splitlines() if ":" in line)
+    assert lines["Collection schedule"].strip() == "unavailable"
+    assert lines["Collection schedule available and valid"].strip() == "False"
+    assert len([k for k in lines if k.startswith("Expected stream ")]) == len(EXPECTED_LOCATION_COVERAGE.expected_locations)
+    assert all(v.strip() in ("not_assessed", "no single report") for k, v in lines.items()
+               if k.startswith("Expected stream "))
+    assert lines["All expected streams complete against the schedule"].strip() == "False"
+    assert "collection_schedule_unavailable" in lines["Scheduled coverage blocked by"]
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    plines = dict(line.split(":", 1) for line in pricing.splitlines() if ":" in line)
+    assert plines["Authoritative schedule available"].strip() == "False"
+    assert plines["Scheduled coverage complete for every expected stream"].strip() == "False"
+    assert plines["Trusted join ready"].strip() == "False"
+    assert plines["Pricing analysis ready"].strip() == "False"
+    for blocker in (PricingBlocker.COLLECTION_SCHEDULE_UNAVAILABLE, PricingBlocker.TRUSTED_JOIN_NOT_READY):
+        assert blocker.value in plines["Pricing blocked by"]
+    assert "SYNTH" not in coverage + pricing and list(workdir.iterdir()) == []
+
+
+def test_ingestion_notebook_reports_unresolved_policy_and_blocked_pricing(
+    synthetic_raw_dir: Path, tmp_path: Path
+) -> None:
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = _step_output(result, "assess_pricing_readiness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Vancouver identity policy state"].strip() == "unresolved"
+    assert lines["Policy authority-backed and resolved"].strip() == "False"
+    assert lines["Canonical scope validation passed"].strip() == "True"
+    assert lines["Supplied canonical key"].strip() == "none"
+    assert lines["Canonicalization permitted"].strip() == "False"
+    assert lines["Identity evidence conflicts with policy"].strip() == "False"
+    assert lines["Policy authority sufficient for analysis"].strip() == "False"
+    assert lines["Vancouver labels confirmed aliases"].strip() == "False"
+    assert lines["Vancouver labels comparable independently"].strip() == "False"
+    assert lines["Canonicalization required"].strip() == "False | applied: False"
+    assert lines["Pricing analysis ready"].strip() == "False"
+    assert PricingBlocker.LOCATION_POLICY_UNRESOLVED.value in lines["Pricing blocked by"]
+    assert "SYNTH" not in outputs and "synthetic_r" not in outputs and not re.search(r"\d", outputs)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+_POLICY_OVERRIDE = """\
+# Test-only kernel configuration (synthetic authority, never a real decision):
+# resolve the policy and give the comparison an authoritative identity column.
+import dataclasses
+
+import ql2_sixt_canada_analysis as package
+from ql2_sixt_canada_analysis.schemas import LocationPolicyAuthority, LocationPolicyState
+
+state = LocationPolicyState({state!r})
+package.VANCOUVER_LOCATION_POLICY = dataclasses.replace(
+    package.VANCOUVER_LOCATION_POLICY, state=state,
+    authority=LocationPolicyAuthority(source="SYNTH-AUTHORITY"),
+    canonical_location={canonical!r} if state is LocationPolicyState.CONFIRMED_ALIAS else None)
+package.LOCATION_STREAM_COMPARISON = dataclasses.replace(
+    package.LOCATION_STREAM_COMPARISON, identity_columns=({identity!r},))
+"""
+
+
+_SCOPE_OVERRIDE = """\
+# Test-only kernel configuration (synthetic authority, never a real decision):
+# a confirmed alias for the governed Vancouver keys whose canonical key is another city's stream.
+import dataclasses
+
+import ql2_sixt_canada_analysis as package
+from ql2_sixt_canada_analysis.schemas import LocationPolicyAuthority, LocationPolicyState
+
+package.VANCOUVER_LOCATION_POLICY = dataclasses.replace(
+    package.VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.CONFIRMED_ALIAS,
+    authority=LocationPolicyAuthority(source="SYNTH-AUTHORITY"), canonical_location={canonical!r})
+"""
+
+
+def test_ingestion_notebook_blocks_alias_canonicalised_into_another_city(
+    synthetic_raw_dir: Path, tmp_path: Path
+) -> None:
+    # Regression: a confirmed Vancouver alias with the Calgary stream as canonical key was
+    # authority-sufficient and its mapping rewrote both Vancouver labels to Calgary.
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(
+        _SCOPE_OVERRIDE.format(canonical=INVESTIGATED_LOCATION_STREAM), encoding="utf-8")
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    pythonpath = os.pathsep.join(p for p in (str(site), os.environ.get("PYTHONPATH", "")) if p)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir), "PYTHONPATH": pythonpath})
+    outputs = _step_output(result, "assess_pricing_readiness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Vancouver identity policy state"].strip() == "confirmed_alias"   # recorded for audit
+    assert lines["Policy authority-backed and resolved"].strip() == "True"
+    assert lines["Canonical scope validation passed"].strip() == "False"
+    assert lines["Supplied canonical key"].strip() == " / ".join(INVESTIGATED_LOCATION_STREAM)
+    assert "canonical_key_crosses_governed_scope" in lines["Policy scope blocked by"]
+    assert lines["Policy authority sufficient for analysis"].strip() == "False"
+    assert lines["Canonicalization permitted"].strip() == "False"
+    assert lines["Vancouver labels confirmed aliases"].strip() == "False"
+    assert lines["Canonicalization required"].strip() == "True | applied: False"
+    assert lines["Pricing analysis ready"].strip() == "False"
+    assert PricingBlocker.CANONICAL_LOCATION_CITY_MISMATCH.value in lines["Pricing blocked by"]
+    assert "SYNTH" not in outputs and list(workdir.iterdir()) == []
+
+
+@pytest.mark.parametrize("state", ["confirmed_alias", "confirmed_distinct"])
+def test_ingestion_notebook_blocks_resolved_policy_on_mapping_defect(state: str, tmp_path: Path) -> None:
+    # Regression (P1): a resolved policy stayed sufficient - and pricing could become
+    # ready - although the comparison reported a location mapping defect. The notebook
+    # source is unchanged; only the kernel's configuration is overridden.
+    from test_comparison import ID_COL
+
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    city_col, label_col = EXPECTED_LOCATION_COVERAGE.location_columns
+    parent_city, = EXPECTED_LOCATION_COVERAGE.parent_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city, first), (_, second) = COMPARED_LOCATION_STREAMS
+    jobs = [{rel.parent_key_columns[0]: job, parent_city: city,
+             **{c: "2" for c in rel.expected_detail_count_columns}} for job in ("SYNTH-JOB-001", "SYNTH-JOB-002")]
+    # The first stream carries two different authoritative identities: a within-stream conflict.
+    identities = {("SYNTH-JOB-001", first): "SYNTH-SITE-1", ("SYNTH-JOB-002", first): "SYNTH-SITE-3",
+                  ("SYNTH-JOB-001", second): "SYNTH-SITE-2", ("SYNTH-JOB-002", second): "SYNTH-SITE-2"}
+    cars = [{rel.detail_key_columns[0]: job, position: str(i), city_col: city, label_col: label, ID_COL: site}
+            for i, ((job, label), site) in enumerate(identities.items())]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(_POLICY_OVERRIDE.format(
+        state=state, canonical=(city, first), identity=ID_COL), encoding="utf-8")
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    pythonpath = os.pathsep.join(p for p in (str(site), os.environ.get("PYTHONPATH", "")) if p)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory), "PYTHONPATH": pythonpath})
+    comparison = _step_output(result, "compare_location_streams(")
+    assert "Behavioural comparison result: location_mapping_defect" in comparison
+    outputs = _step_output(result, "assess_pricing_readiness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Vancouver identity policy state"].strip() == state       # decision stays recorded
+    assert lines["Policy authority-backed and resolved"].strip() == "True"
+    assert lines["Identity evidence conflicts with policy"].strip() == "True"
+    assert lines["Policy authority sufficient for analysis"].strip() == "False"
+    assert lines["Vancouver labels confirmed aliases"].strip() == "False"
+    assert lines["Vancouver labels comparable independently"].strip() == "False"
+    assert lines["Pricing analysis ready"].strip() == "False"
+    blocked = lines["Pricing blocked by"]
+    assert PricingBlocker.IDENTITY_EVIDENCE_CONFLICT.value in blocked
+    assert PricingBlocker.LOCATION_POLICY_UNRESOLVED.value not in blocked
+    # Governed keys / canonical key are repository configuration and are shown on their own lines.
+    shown = comparison + "\n".join(line for line in outputs.splitlines()
+                                   if not line.startswith(("Governed", "Supplied canonical")))
+    assert "SYNTH" not in shown and first not in shown and second not in shown and city not in shown
+    assert list(workdir.iterdir()) == []
+
+
+# ------------------------------------------------------------ data completeness
+
+
+def test_ingestion_notebook_gates_completeness_through_the_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    assert re.search(r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bassess_completeness\b", code, re.S)
+    cell = next(s for s in sources if "assess_completeness(" in s)
+    # The all-expected-stream aggregate, never a hand-picked subset (a single Calgary
+    # report used to be passed, so other expected streams could fail unnoticed).
+    for argument in ("datasets=cleaned", "coverage=location_coverage_report", "streams=expected_streams_report",
+                     "reconciliation=reconciliation_report", "city_integrity=city_integrity_report"):
+        assert argument in cell
+    assert "streams=(location_stream_report,)" not in code
+    expected = next(s for s in sources if "assess_expected_location_streams(" in s)
+    assert re.search(r"expected_streams_report\s*=\s*assess_expected_location_streams\(", expected)
+    assert "coverage=EXPECTED_LOCATION_COVERAGE" in expected
+    assert sources.index(expected) < sources.index(cell)
+    pricing = next(s for s in sources if "assess_pricing_readiness(" in s)
+    assert "completeness=completeness" in pricing and "source_complete" not in pricing
+    for forbidden in ("nrows", "skipfooter", "skiprows", "on_bad_lines", "chunksize", "usecols"):
+        assert forbidden not in code
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert "data_complete" in guidance
+
+
+def test_ingestion_notebook_reports_completeness_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    from ql2_sixt_canada_analysis.readiness import CompletenessBlocker
+
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    loaded = _step_output(result, "load_raw_datasets(raw_dir)")
+    assert "Complete-source ingestion rules enforced: True" in loaded
+    outputs = _step_output(result, "assess_completeness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Overall completeness"].strip() == "not proven"
+    blocked = lines["Completeness blocked by"]
+    assert CompletenessBlocker.EXPECTED_PAIRS_MISSING.value in blocked
+    assert CompletenessBlocker.SOURCE_NOT_COMPLETE.value not in blocked
+    reconcile = _step_output(result, "assess_job_detail_reconciliation(")
+    assert len(re.findall(r"^Declared .* reconciled:", reconcile, re.M)) == len(
+        JOB_DETAIL_RELATIONSHIP.expected_detail_count_columns)
+    assert list(workdir.iterdir()) == []
+
+
+def test_ingestion_notebook_blocks_when_one_expected_stream_is_partial(tmp_path: Path) -> None:
+    # Regression: only the investigated stream fed completeness and pricing, so the
+    # notebook could report complete data while another expected stream was partial.
+    from ql2_sixt_canada_analysis.readiness import CompletenessBlocker, PricingBlocker
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    cov = EXPECTED_LOCATION_COVERAGE
+    city_col, label_col = cov.location_columns
+    parent_city, = cov.parent_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city1, label1) = INVESTIGATED_LOCATION_STREAM
+    (city2, label2), (_, label3) = COMPARED_LOCATION_STREAMS
+    counts = {"SYNTH-JOB-001": "1", "SYNTH-JOB-002": "2", "SYNTH-JOB-003": "1"}
+    jobs = [{rel.parent_key_columns[0]: job, parent_city: city1 if job.endswith("1") else city2,
+             **{c: n for c in rel.expected_detail_count_columns}} for job, n in counts.items()]
+    cars = [{rel.detail_key_columns[0]: "SYNTH-JOB-001", position: "0", city_col: city1, label_col: label1},
+            {rel.detail_key_columns[0]: "SYNTH-JOB-002", position: "0", city_col: city2, label_col: label2},
+            {rel.detail_key_columns[0]: "SYNTH-JOB-002", position: "1", city_col: city2, label_col: label3},
+            {rel.detail_key_columns[0]: "SYNTH-JOB-003", position: "0", city_col: city2, label_col: label2}]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    calgary = _step_output(result, "investigate_location_stream(")
+    assert "Stream continuity: complete" in calgary                       # the investigated stream is fine
+    streams = _step_output(result, "assess_expected_location_streams(")
+    lines = dict(line.split(":", 1) for line in streams.splitlines() if ":" in line)
+    assert lines["Configured expected streams"].strip() == "3" and lines["Assessed streams"].strip() == "3"
+    assert lines["Every expected stream assessed exactly once"].strip() == "True"
+    assert lines["All expected streams healthy"].strip() == "False"
+    assert "stream_continuity_partial" in lines["Expected streams blocked by"]
+    assert not any(label in streams for label in (label1, label2, label3)) and "SYNTH" not in streams
+    complete = _step_output(result, "assess_completeness(")
+    assert "Overall completeness: not proven" in complete
+    assert CompletenessBlocker.STREAM_CONTINUITY_PARTIAL.value in complete
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    assert "Pricing analysis ready: False" in pricing
+    assert PricingBlocker.EXPECTED_STREAMS_NOT_PROVEN.value in pricing
+    assert list(workdir.iterdir()) == []
+
+
+def test_ingestion_notebook_assesses_city_integrity_through_the_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    assert re.search(r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bassess_city_integrity\b", code, re.S)
+    cell = next(s for s in sources if "assess_city_integrity(" in s)
+    assert re.search(r"^city_integrity_report\s*=\s*assess_city_integrity\(", cell, re.M)
+    assert "coverage=EXPECTED_LOCATION_COVERAGE" in cell and "city_integrity_valid" in cell
+    assert "_sample" not in code                                  # identifiers never printed
+    order = [next(i for i, s in enumerate(sources) if call in s) for call in (
+        "assess_city_integrity(", "assess_job_detail_join_readiness(", "assess_completeness(",
+        "assess_pricing_readiness(")]
+    assert order == sorted(order)
+    join = sources[order[1]]
+    assert "job_detail_join.city_integrity_valid != city_integrity_valid" in join
+    assert "city_integrity=city_integrity_report" in sources[order[2]]
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert "city_integrity_valid" in guidance
+
+
+@pytest.mark.parametrize("defect", ["cross_city_row", "blank_job_city"])
+def test_ingestion_notebook_blocks_on_city_integrity_defects(defect: str, tmp_path: Path) -> None:
+    # Regression: coverage, all three streams and the declared counts passed while a
+    # detail row sat under another city than its job, or a job's city was blank.
+    from ql2_sixt_canada_analysis.city_integrity import CityIntegrityBlocker
+    from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    city_col, label_col = EXPECTED_LOCATION_COVERAGE.location_columns
+    parent_city, = EXPECTED_LOCATION_COVERAGE.parent_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city1, label1) = INVESTIGATED_LOCATION_STREAM
+    (city2, label2), (_, label3) = COMPARED_LOCATION_STREAMS
+    job_rows = [("SYNTH-JOB-001", city1, "1"), ("SYNTH-JOB-002", city2, "2")]
+    detail_rows = [("SYNTH-JOB-001", city1, label1), ("SYNTH-JOB-002", city2, label2),
+                   ("SYNTH-JOB-002", city2, label3)]
+    if defect == "cross_city_row":
+        job_rows.append(("SYNTH-JOB-003", city1, "2"))
+        detail_rows += [("SYNTH-JOB-003", city1, label1), ("SYNTH-JOB-003", city2, label2)]
+        expected = CityIntegrityBlocker.PARENT_DETAIL_CITY_MISMATCH
+    else:
+        job_rows.append(("SYNTH-JOB-003", "   ", "0"))
+        expected = CityIntegrityBlocker.CITY_SCOPE_UNASSIGNABLE
+    jobs = [{rel.parent_key_columns[0]: job, parent_city: city, **{c: n for c in rel.expected_detail_count_columns}}
+            for job, city, n in job_rows]
+    cars = [{rel.detail_key_columns[0]: job, position: str(i), city_col: city, label_col: label}
+            for i, (job, city, label) in enumerate(detail_rows)]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    integrity = _step_output(result, "assess_city_integrity(")
+    lines = dict(line.split(":", 1) for line in integrity.splitlines() if ":" in line)
+    assert lines["Scope integrity passed"].strip() == "False"
+    assert expected.value in lines["Scope integrity blocked by"]
+    assert lines["Jobs with unassignable scope"].strip() == ("1" if defect == "blank_job_city" else "0")
+    assert lines["Linked detail rows disagreeing with their parent scope"].strip() == (
+        "1" if defect == "cross_city_row" else "0")
+    join = _step_output(result, "assess_job_detail_join_readiness(")
+    assert "Trusted join ready: False" in join and "Scope integrity passed: False" in join
+    assert JobDetailJoinBlocker(expected.value).value in join
+    assert "Joined frame held: diagnostic only - UNTRUSTED" in join
+    complete = _step_output(result, "assess_completeness(")
+    assert "Overall completeness: not proven" in complete and expected.value in complete
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    assert "Pricing analysis ready: False" in pricing
+    assert PricingBlocker.SCOPE_INTEGRITY_NOT_PROVEN.value in pricing
+    shown = integrity + join + complete + pricing
+    assert "SYNTH" not in shown and label1 not in shown          # the governed Vancouver keys are configuration
+    assert list(workdir.iterdir()) == []
 
 
 # ----------------------------------------------------------------- execution

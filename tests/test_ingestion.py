@@ -160,7 +160,7 @@ def test_loaded_values_match_synthetic_input(raw_dir: Path) -> None:
     expected = pd.DataFrame(
         [[f"synthetic_r{r}_c{c}" for c in range(len(columns))] for r in range(2)],
         columns=list(columns),
-    )
+    ).astype(dict(DATASET_DEFINITIONS[JOBS].identifier_dtypes))
     pd.testing.assert_frame_equal(jobs, expected)
 
 
@@ -211,8 +211,14 @@ def _write_dialect_files(directory: Path, header: str, row: str, **write) -> Non
 
 
 def _patch_contracts(monkeypatch: pytest.MonkeyPatch, columns: tuple[str, ...]) -> None:
+    # The first synthetic column doubles as the identifier, so the dialect
+    # cases also exercise the identifier dtype mapping.
     patched = MappingProxyType(
-        {key: replace(DATASET_DEFINITIONS[key], columns=columns) for key in DatasetKey}
+        {
+            key: replace(DATASET_DEFINITIONS[key], columns=columns, identifier_columns=columns[:1],
+                         unique_key_columns=columns[:1])
+            for key in DatasetKey
+        }
     )
     monkeypatch.setattr(ingestion, "DATASET_DEFINITIONS", patched)
 
@@ -272,18 +278,13 @@ DIALECT_CASES = [
     ),
     pytest.param(
         {},
-        ("alpha", "beta"), "\n\nalpha,beta\n", "x,y\n", {},
-        id="leading-blank-lines",
+        ("alpha", "beta"), "alpha,beta\n", "x,y\n\n,\nz,w\n", {},
+        id="inner-blank-lines-kept",
     ),
     pytest.param(
         {"sep": r"\s*\|\s*", "engine": "python"},
         ("alpha", "beta"), "alpha | beta\n", "x | y\n", {},
         id="regex-sep",
-    ),
-    pytest.param(
-        {"sep": ";", "engine": "pyarrow"},
-        ("alpha", "beta"), "alpha;beta\n", "x;y\n", {},
-        id="pyarrow-engine",
     ),
 ]
 
@@ -301,6 +302,96 @@ def test_tokenizer_options_govern_the_header_check(
     datasets = load_raw_datasets(tmp_path, read_csv_options=options)
     assert tuple(datasets.jobs.columns) == columns
     assert tuple(datasets.cars.columns) == columns
+
+
+# ------------------------------------------------ blank physical lines policy
+
+
+def test_read_defaults_keep_blank_lines_and_are_read_only() -> None:
+    assert ingestion.RAW_CSV_READ_DEFAULTS == {"skip_blank_lines": False}
+    with pytest.raises(TypeError):
+        ingestion.RAW_CSV_READ_DEFAULTS["skip_blank_lines"] = True  # type: ignore[index]
+
+
+def test_blank_physical_lines_are_kept_as_rows_before_cleaning(tmp_path: Path) -> None:
+    for key in DatasetKey:
+        columns = contract_columns(key)
+        n = len(columns)
+        record = ",".join(["synthetic"] * n)
+        lines = [record, "", "," * (n - 1), "   ", record]
+        (tmp_path / f"s_{key}.csv").write_bytes(
+            (",".join(columns) + "\n" + "".join(l + "\n" for l in lines)).encode("utf-8")
+        )
+    datasets = load_raw_datasets(tmp_path)
+    for frame in (datasets.jobs, datasets.cars):
+        assert len(frame) == 5
+        assert frame.iloc[0, 0] == "synthetic" and frame.iloc[4, 0] == "synthetic"  # order kept
+        assert frame.iloc[1].isna().all()      # empty line
+        assert frame.iloc[2].isna().all()      # delimiter-only line
+        assert frame.iloc[3, 0] == "   "       # whitespace-only line: kept, unstripped
+        assert frame.iloc[3, 1:].isna().all()
+
+
+def test_both_reads_use_the_blank_line_policy(raw_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[bool] = []
+    real = pd.read_csv
+
+    def recording(path, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(kwargs["skip_blank_lines"])
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(ingestion.pd, "read_csv", recording)
+    load_raw_datasets(raw_dir, read_csv_options={"sep": ","})
+    assert seen == [False] * 4  # header read + full read, per file
+
+
+def test_skip_blank_lines_cannot_be_passed_as_a_read_option(raw_dir: Path) -> None:
+    for value in (True, False):
+        with pytest.raises(ValueError, match="skip_blank_lines.*preserve_blank_lines"):
+            load_raw_datasets(raw_dir, read_csv_options={"skip_blank_lines": value})
+    with pytest.raises(ValueError, match="skip_blank_lines"):
+        ingestion.read_csv_header(
+            raw_dir / f"synthetic_{JOBS}.csv", JOBS, read_csv_options={"skip_blank_lines": False}
+        )
+
+
+def test_explicit_opt_out_lets_pandas_drop_blank_lines(tmp_path: Path) -> None:
+    for key in DatasetKey:
+        columns = contract_columns(key)
+        record = ",".join(["synthetic"] * len(columns))
+        (tmp_path / f"s_{key}.csv").write_text(
+            ",".join(columns) + f"\n{record}\n\n{record}\n", encoding="utf-8"
+        )
+    kept = load_raw_datasets(tmp_path)
+    dropped = load_raw_datasets(tmp_path, preserve_blank_lines=False)
+    assert len(kept.jobs) == 3 and len(kept.cars) == 3
+    assert len(dropped.jobs) == 2 and len(dropped.cars) == 2
+
+
+def test_blank_lines_before_the_header_are_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # With blank lines preserved, the first physical line must be the header.
+    _patch_contracts(monkeypatch, ("alpha", "beta"))
+    _write_dialect_files(tmp_path, "\n\nalpha,beta\n", "x,y\n")
+    with pytest.raises(RawDataLoadError):
+        load_raw_datasets(tmp_path)
+    # The documented opt-out restores pandas' default tolerance.
+    assert tuple(load_raw_datasets(tmp_path, preserve_blank_lines=False).jobs.columns) == ("alpha", "beta")
+
+
+def test_pyarrow_engine_header_check_for_datasets_without_identifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pyarrow engine is only allowed when a dataset has no identifiers
+    # (see the identifier tests); its header check still works then.
+    patched = MappingProxyType(
+        {key: replace(DATASET_DEFINITIONS[key], columns=("alpha", "beta"), identifier_columns=(),
+                      unique_key_columns=())
+         for key in DatasetKey}
+    )
+    monkeypatch.setattr(ingestion, "DATASET_DEFINITIONS", patched)
+    _write_dialect_files(tmp_path, "alpha;beta\n", "x;y\n")
+    datasets = load_raw_datasets(tmp_path, read_csv_options={"sep": ";", "engine": "pyarrow"})
+    assert tuple(datasets.jobs.columns) == ("alpha", "beta")
 
 
 def test_tokenizer_options_still_detect_real_mismatches(
