@@ -75,6 +75,11 @@ from typing import Final
 import pandas as pd
 
 __all__ = [
+    "VANCOUVER_LOCATION_POLICY",
+    "LocationIdentityPolicy",
+    "LocationPolicyAuthority",
+    "LocationPolicyConfigurationError",
+    "LocationPolicyState",
     "AttributeComparisonPolicy",
     "MissingValueStabilityPolicy",
     "VEHICLE_ATTRIBUTE_STABILITY",
@@ -1092,6 +1097,139 @@ LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
     pairing=CapturePairing.SHARED_COLLECTION_EVENT,
     product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
     price_columns=('price_per_day', 'price_num'),
+)
+
+
+# --------------------------------------------------- location identity policy
+
+
+class LocationPolicyConfigurationError(ValueError):
+    """A location identity policy is incomplete, contradictory or unauthorised.
+
+    Messages never contain location values.
+    """
+
+
+class LocationPolicyState(StrEnum):
+    """Authoritative identity decision for two related location labels.
+
+    * ``UNRESOLVED`` - no sufficient authoritative decision exists. The labels
+      must neither be compared independently nor merged.
+    * ``CONFIRMED_ALIAS`` - an authority established that both labels are one
+      analytical location; they may be used only through the approved
+      canonical location, never as two separate locations.
+    * ``CONFIRMED_DISTINCT`` - an authority established that the labels are
+      distinct analytical locations; independent comparison is allowed,
+      subject to every other readiness gate.
+
+    Behavioural evidence (for example a likely-duplicate comparison result)
+    never selects a state; only configuration backed by authority does.
+    """
+
+    UNRESOLVED = "unresolved"
+    CONFIRMED_ALIAS = "confirmed_alias"
+    CONFIRMED_DISTINCT = "confirmed_distinct"
+
+
+@dataclass(frozen=True, slots=True)
+class LocationPolicyAuthority:
+    """Provenance of a resolved identity decision (never fabricated).
+
+    Attributes:
+        source: Who decided (for example the supplier, the collection owner
+            or a named business owner). Required, non-blank.
+        reference: Optional ticket, document or decision identifier.
+        note: Optional short explanation.
+    """
+
+    source: str
+    reference: str | None = None
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise LocationPolicyConfigurationError("authority source must be a non-blank string")
+        for value in (self.reference, self.note):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise LocationPolicyConfigurationError("authority reference and note must be non-blank or None")
+
+
+@dataclass(frozen=True, slots=True)
+class LocationIdentityPolicy:
+    """Authority-backed identity policy for two expected location labels.
+
+    Attributes:
+        first, second: The two expected location keys the policy governs.
+        coverage: Expected-location contract (both keys must be expected,
+            so its aliases can never merge them).
+        state: :class:`LocationPolicyState`; ``UNRESOLVED`` by default.
+        authority: Required for a resolved state; must be absent otherwise.
+        canonical_location: Approved analytical key for ``CONFIRMED_ALIAS``
+            (required there, forbidden otherwise). Source labels are kept for
+            lineage; only the analytical key is canonicalised.
+    """
+
+    first: tuple[str, ...]
+    second: tuple[str, ...]
+    coverage: LocationCoverageDefinition
+    state: LocationPolicyState = LocationPolicyState.UNRESOLVED
+    authority: LocationPolicyAuthority | None = None
+    canonical_location: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        E = LocationPolicyConfigurationError
+        cov = self.coverage
+        if not isinstance(cov, LocationCoverageDefinition) or not cov.is_configured:
+            raise E("a configured expected-location contract is required")
+        width = len(cov.location_columns)
+
+        def well_formed(key: object) -> bool:
+            return (isinstance(key, tuple) and len(key) == width
+                    and all(isinstance(v, str) and v.strip() for v in key))
+
+        for key in (self.first, self.second):
+            if not well_formed(key) or key not in cov.expected_locations:
+                raise E("policy labels must be expected location keys")
+        if self.first == self.second:
+            raise E("policy labels must differ")
+        if not isinstance(self.state, LocationPolicyState):
+            raise E("state must be a LocationPolicyState")
+        if self.authority is not None and not isinstance(self.authority, LocationPolicyAuthority):
+            raise E("authority must be a LocationPolicyAuthority")
+        resolved = self.state is not LocationPolicyState.UNRESOLVED
+        if resolved and self.authority is None:
+            raise E("a resolved policy requires authority metadata")
+        if not resolved and self.authority is not None:
+            raise E("an unresolved policy must not carry decision authority")
+        if self.state is LocationPolicyState.CONFIRMED_ALIAS:
+            if not well_formed(self.canonical_location):
+                raise E("a confirmed alias requires a well-formed canonical location")
+        elif self.canonical_location is not None:
+            raise E("a canonical location is allowed only for a confirmed alias")
+
+    @property
+    def resolved(self) -> bool:
+        return self.state is not LocationPolicyState.UNRESOLVED
+
+    @property
+    def alias_mapping(self) -> Mapping[tuple[str, ...], tuple[str, ...]]:
+        """Read-only source-key -> canonical-key mapping (empty unless a confirmed alias)."""
+        if self.state is not LocationPolicyState.CONFIRMED_ALIAS:
+            return MappingProxyType({})
+        return MappingProxyType({self.first: self.canonical_location, self.second: self.canonical_location})
+
+
+#: Identity policy for the Vancouver pair in ``COMPARED_LOCATION_STREAMS``.
+#: UNRESOLVED: no authoritative decision exists in the repository or project
+#: documentation. Behavioural comparison (``LOCATION_STREAM_COMPARISON``) is
+#: diagnostic evidence only. Set CONFIRMED_ALIAS (with a canonical location)
+#: or CONFIRMED_DISTINCT only with ``LocationPolicyAuthority`` naming the
+#: supplier / collection-owner / business decision.
+VANCOUVER_LOCATION_POLICY: Final = LocationIdentityPolicy(
+    first=COMPARED_LOCATION_STREAMS[0],
+    second=COMPARED_LOCATION_STREAMS[1],
+    coverage=EXPECTED_LOCATION_COVERAGE,
+    state=LocationPolicyState.UNRESOLVED,
 )
 
 

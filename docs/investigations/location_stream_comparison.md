@@ -68,3 +68,8 @@ identical offers and identical prices do not prove physical identity.
   breadth) without flagging the duplication.
 - Regression control: `compare_location_streams` in the ingestion notebook
   (`location_comparison_report`) and `tests/test_comparison.py`.
+- Policy gate (added later): the identity decision is recorded only in the
+  authority-backed `VANCOUVER_LOCATION_POLICY`, which stays `UNRESOLVED`;
+  pricing readiness is blocked until an authority confirms an alias (with a
+  canonical location) or distinct locations. This investigation's behavioural
+  result does not resolve it.

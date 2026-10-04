@@ -539,9 +539,77 @@ validate_confirmed_location_alias(jobs_df, cars_df)   # raises LocationAliasNotC
   comparison can reach at most a *likely* conclusion; confirmation requires
   supplier or collection-configuration evidence. See
   `docs/investigations/location_stream_comparison.md` (sanitized).
+- The comparison is **evidence only**. `alias_authority_sufficient` refers to
+  identity metadata in the data (none exists here) and does not decide
+  anything downstream: whether the two labels may be merged or compared is
+  decided solely by the location identity policy below.
 - Tests use fabricated values only. Comparison tables, offer fingerprints,
   paired-capture and price comparison exports are ignored by Git and must
   not be committed.
+
+## Vancouver location policy and pricing readiness
+
+**Behavioural evidence is not identity authority.** Identical offers, full
+temporal overlap, similar names or a `LIKELY_DUPLICATE_STREAMS` /
+`LIKELY_DISTINCT_STREAMS` comparison can justify an investigation, but never
+decide whether the two Vancouver labels are one analytical location.
+That decision is the authority-backed `VANCOUVER_LOCATION_POLICY`
+(`LocationIdentityPolicy` in `schemas.py`), with three states:
+
+| State | Meaning | Analysis allowed |
+| --- | --- | --- |
+| `UNRESOLVED` (**default**) | No sufficient authoritative decision exists. | Neither independent comparison nor merging. Pricing is blocked. |
+| `CONFIRMED_ALIAS` | An authority established both labels are one analytical location. | Only through the approved `canonical_location`; never as two separate locations. |
+| `CONFIRMED_DISTINCT` | An authority established they are distinct analytical locations. | Independent comparison, subject to every other gate. |
+
+A resolved state requires `LocationPolicyAuthority` (non-blank `source`,
+optional `reference` and `note`); an unresolved policy may not carry one.
+`CONFIRMED_ALIAS` requires a canonical location; any other state forbids one.
+Incomplete or contradictory configuration raises
+`LocationPolicyConfigurationError`. Nothing is derived from data.
+
+```python
+from ql2_sixt_canada_analysis import (
+    VANCOUVER_LOCATION_POLICY, apply_location_policy, assess_location_policy, assess_pricing_readiness,
+)
+
+keys = apply_location_policy(cars_df)                    # source_keys + analytical_keys (frame untouched)
+policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, location_comparison_report, keys)
+readiness = assess_pricing_readiness(location_policy=policy, key_contracts_valid=..., ...)
+readiness.ready, readiness.blocking_reasons
+```
+
+Derived permissions on `LocationPolicyReport`:
+
+- `location_policy_resolved` - an authority-backed `CONFIRMED_ALIAS` or
+  `CONFIRMED_DISTINCT`.
+- `location_policy_authority_sufficient` - resolved and not contradicted by
+  authoritative identity metadata in the comparison (a contradiction blocks
+  pricing as `identity_evidence_conflicts_with_policy`).
+- `locations_are_aliases` - true only for a sufficient `CONFIRMED_ALIAS`.
+  **False is not evidence that the locations are distinct.**
+- `locations_comparable_independently` - true only for a sufficient
+  `CONFIRMED_DISTINCT`.
+- `canonicalization_required` / `canonicalization_applied` - a confirmed
+  alias needs `apply_location_policy` keys built from that same policy;
+  `analytical_keys` use the canonical location while `source_keys` keep the
+  original labels for lineage and audit.
+
+`assess_pricing_readiness` is fail closed: every foundational gate (key
+contracts, expected coverage, expected stream health, job/detail
+reconciliation, one-to-many relationship, temporal trust, vehicle
+stability) must be a real `True`, and the location policy must add no
+blocker. Each failure is a `PricingBlocker` (for example
+`vancouver_policy_unresolved`, `alias_canonicalization_not_applied`,
+`temporal_fields_untrusted`); `validate_pricing_readiness` raises
+`PricingNotReadyError`. A resolved policy never overrides another gate.
+
+**Still required:** an authoritative statement - from the supplier, the
+collection owner or the business - of whether the two Vancouver labels are
+the same pickup location (with the approved canonical label) or distinct
+locations, recorded as `LocationPolicyAuthority`. Until then no Vancouver
+pricing conclusion or airport-versus-downtown comparison involving these
+labels may proceed.
 
 ## Vehicle-attribute stability
 
