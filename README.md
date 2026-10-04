@@ -1048,6 +1048,22 @@ locations, recorded as `LocationPolicyAuthority`. Until then no Vancouver
 pricing conclusion or airport-versus-downtown comparison involving these
 labels may proceed.
 
+### Sanitized pricing-readiness baseline
+
+`python -m ql2_sixt_canada_analysis.pricing_baseline --commit <sha> --date <YYYY-MM-DD>`
+runs the same assessments as the ingestion notebook on the real files and
+prints a sanitized Markdown baseline (`pricing_baseline.py`: a reporting
+layer only - it never re-decides readiness). It separates **active
+blockers** (the exact typed values the existing reports emitted) from
+**plan-level gaps** (`PlanReadinessGap`: a `MINIMUM_REQUIRED` stream
+contract, no airport/downtown role map, no pickup/return-date rules - none
+of them a `PricingBlocker`), lists the configured expected and the observed
+stream populations separately (observations establish no authority) and
+reports the investigated stream's continuity in aggregate only. Serialization
+is fail closed: only counts, booleans, snake-case codes and digit-free
+location labels are accepted. The current baseline is
+`docs/investigations/pricing_readiness_baseline.md`.
+
 ## Vehicle-attribute stability
 
 `VEHICLE_ATTRIBUTE_STABILITY` (`src/ql2_sixt_canada_analysis/schemas.py`) is
