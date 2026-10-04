@@ -71,6 +71,29 @@ data/processed/*
 *.7z
 *.tar
 
+# --- Data-quality outputs ---
+# Blank-row / rejected-row extracts, quality reports and audit files derived
+# from the proprietary data are proprietary too: never commit them.
+# (Source code, tests and docs are never matched: patterns name data/report
+# extensions only; *.csv/*.parquet/... are already ignored globally above.)
+*blank_rows*.json
+*blank_rows*.txt
+*blank_rows*.html
+*rejected_rows*.json
+*rejected_rows*.txt
+*rejected_rows*.html
+*removed_rows*.json
+*removed_rows*.txt
+*removed_rows*.html
+*quality_report*.json
+*quality_report*.txt
+*quality_report*.html
+*quality_metrics*.json
+*quality_metrics*.txt
+*quality_metrics*.html
+*_audit.json
+*_audit.txt
+
 # --- Generated reports and figures ---
 # Ignored by default; use `git add -f` to deliberately publish a final report.
 reports/*

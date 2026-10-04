@@ -151,6 +151,53 @@ def test_generated_outputs_are_ignored(relative_path: str) -> None:
     assert _git_is_ignored(relative_path)
 
 
+QUALITY_OUTPUT_PATHS = [
+    f"{INTERIM}/synthetic_blank_rows.csv",
+    f"{PROCESSED}/synthetic_cleaned.parquet",
+    "reports/synthetic_quality_report.json",
+    "notebooks/synthetic_blank_rows_audit.json",
+    "synthetic_removed_rows.txt",
+    "synthetic_rejected_rows.json",
+    "synthetic_quality_metrics.json",
+    "notebooks/01_data_ingestion.executed.ipynb",
+    "notebooks/01_data_ingestion.nbconvert.ipynb",
+    "notebooks/.ipynb_checkpoints/01_data_ingestion-checkpoint.ipynb",
+    "synthetic_extract.tmp.csv",
+    ".venv/lib/python3.12/site-packages/x.py",
+    "build/lib/x.py",
+    f"src/{PACKAGE_NAME}/__pycache__/x.cpython-312.pyc",
+    ".pytest_cache/v/cache/nodeids",
+]
+
+
+@pytest.mark.usefixtures("require_git")
+@pytest.mark.parametrize("relative_path", QUALITY_OUTPUT_PATHS)
+def test_quality_outputs_and_tooling_artifacts_are_ignored(relative_path: str) -> None:
+    assert _git_is_ignored(relative_path)
+
+
+@pytest.mark.usefixtures("require_git")
+@pytest.mark.parametrize(
+    "relative_path",
+    [f"src/{PACKAGE_NAME}/quality.py", "tests/test_quality.py", "notebooks/01_data_ingestion.ipynb",
+     "tests/test_removed_rows_synthetic.py", "docs/quality_notes.md"],
+)
+def test_quality_source_tests_and_docs_are_not_ignored(relative_path: str) -> None:
+    assert not _git_is_ignored(relative_path)
+
+
+@pytest.mark.usefixtures("require_git")
+def test_no_proprietary_data_file_is_tracked_or_staged() -> None:
+    # Only placeholder/README files may be tracked or staged under the data
+    # directories; file names are checked, never opened.
+    for args in (["git", "ls-files", "--", RAW, INTERIM, PROCESSED],
+                 ["git", "diff", "--cached", "--name-only", "--", RAW, INTERIM, PROCESSED]):
+        listed = subprocess.run(args, cwd=PROJECT_ROOT, capture_output=True, text=True, check=True)
+        offending = [line for line in listed.stdout.splitlines()
+                     if line and Path(line).name not in {"README.md", ".gitkeep"}]
+        assert not offending, f"{len(offending)} data file(s) tracked or staged"
+
+
 @pytest.mark.parametrize("relative_path", DIRECTORY_PLACEHOLDERS)
 def test_directory_placeholder_exists(relative_path: str) -> None:
     assert (PROJECT_ROOT / relative_path).is_file()

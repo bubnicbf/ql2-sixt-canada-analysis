@@ -145,10 +145,69 @@ def test_notebook_uses_package_apis_not_direct_reads(notebook_path: Path) -> Non
 
 def test_ingestion_notebook_imports_centralized_apis() -> None:
     code = _code_source(read_notebook(INGESTION_NOTEBOOK))
-    assert re.search(r"from ql2_sixt_canada_analysis(\.ingestion)? import .*load_raw_datasets", code)
+    assert re.search(r"from ql2_sixt_canada_analysis(\.ingestion)? import\s*\(?[^)]*?\bload_raw_datasets\b", code, re.S)
     assert re.search(r"from ql2_sixt_canada_analysis\.paths import .*resolve_raw_data_dir", code)
     assert "resolve_raw_data_dir(" in code
     assert "load_raw_datasets(" in code
+
+
+# ---------------------------------------------------- blank-row quality step
+
+
+def test_ingestion_notebook_imports_reusable_quality_api() -> None:
+    code = _code_source(read_notebook(INGESTION_NOTEBOOK))
+    assert re.search(
+        r"from ql2_sixt_canada_analysis(\.quality)? import\s*\(?[^)]*?\bremove_blank_rows_from_raw_datasets\b",
+        code, re.S,
+    )
+    assert "remove_blank_rows_from_raw_datasets(" in code
+
+
+def test_ingestion_notebook_applies_quality_step_after_loading() -> None:
+    cells = _code_cells(read_notebook(INGESTION_NOTEBOOK))
+    load_index = next(i for i, c in enumerate(cells) if "load_raw_datasets(" in c.source)
+    quality_index = next(i for i, c in enumerate(cells) if "remove_blank_rows_from_raw_datasets(" in c.source)
+    assert quality_index > load_index
+    later = "\n".join(c.source for c in cells[quality_index:])
+    # Per-dataset and total counts are kept in named in-memory objects and the
+    # cleaned frames feed subsequent variables.
+    assert re.search(r"\bblank_rows\s*=\s*remove_blank_rows_from_raw_datasets\(", later)
+    assert "total_removed_blank_row_count" in later
+    assert re.search(r"\bjobs_df\s*=.*\.cleaned", later) and re.search(r"\bcars_df\s*=.*\.cleaned", later)
+
+
+def test_ingestion_notebook_does_not_reimplement_blank_row_detection() -> None:
+    code = _code_source(read_notebook(INGESTION_NOTEBOOK))
+    for pattern in (r"\.dropna\(", r"\.isna\(\)\.all\(", r"\.isnull\(", r"\.str\.strip\(", r"\.strip\(\)\s*==", r"\.replace\("):
+        assert not re.search(pattern, code), f"notebook reimplements blank-row logic: {pattern}"
+
+
+def test_ingestion_notebook_never_displays_counts_or_frames() -> None:
+    code = _code_source(read_notebook(INGESTION_NOTEBOOK))
+    assert not re.search(r"print\([^\n]*(row_count|len\(|\.shape|_df\b|\.cleaned\b)", code)
+    assert not re.search(r"(?m)^\s*(raw|cleaned|jobs_df|cars_df|blank_rows|\w+\.cleaned)\s*$", code), "bare expression would display"
+    assert not re.search(r"\.(head|tail|sample|describe|info|to_string|to_markdown)\(", code)
+
+
+def test_ingestion_notebook_quality_step_runs_with_synthetic_blank_rows(tmp_path: Path) -> None:
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    for key in DatasetKey:
+        columns = contract_columns(key)
+        record = ",".join(f"synthetic_{c}" for c in range(len(columns)))
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(columns) + f"\n{record}\n\n{record}\n").encode("utf-8")
+        )
+    result = execute_notebook_copy(
+        INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
+    )
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "blank" in outputs.lower()
+    assert not re.search(r"\b[0-9]+\b", outputs), "cell output shows a number"
+    assert "synthetic_0" not in outputs
+    assert not any(o.get("output_type") in {"execute_result", "display_data"}
+                   for c in _code_cells(result.executed) for o in c.outputs)
+    assert not list(directory.parent.glob("**/*blank*")), "notebook wrote a blank-row artifact"
 
 
 # ----------------------------------------------------------------- execution

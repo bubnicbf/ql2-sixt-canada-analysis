@@ -9,6 +9,28 @@ column contract, then the file is read once with :func:`pandas.read_csv` and
 returned unchanged. It never cleans, renames, coerces, deduplicates, or writes
 data. Importing this module performs no filesystem access.
 
+Blank physical lines
+--------------------
+:func:`pandas.read_csv` silently drops completely blank lines by default
+(``skip_blank_lines=True``), which would make them impossible to audit. The
+raw loader therefore reads with the project policy :data:`RAW_CSV_READ_DEFAULTS`
+(``skip_blank_lines=False``): every physical line after the header becomes a
+DataFrame row, so an empty line, a delimiter-only line and a whitespace-only
+line all arrive as rows (all-missing, all-missing, and a first field holding
+the whitespace with the rest missing, respectively) for
+:mod:`ql2_sixt_canada_analysis.quality` to classify, remove and count. The
+loader itself removes nothing. Two consequences are intentional:
+
+* A file whose header is preceded by blank lines is rejected
+  (:class:`RawDataLoadError`), because with blank lines preserved the first
+  physical line *is* the header. The raw files start with their header.
+* Each blank line that follows the final record, if any, is also a row.
+
+The policy lives here only. ``read_csv_options`` may not contain
+``skip_blank_lines``; the single documented way to opt out is
+``preserve_blank_lines=False`` on :func:`load_raw_datasets` /
+:func:`read_csv_header`, after which blank-row counts are not meaningful.
+
 Filename discovery
 ------------------
 Only regular ``*.csv`` files directly inside the raw-data directory are
@@ -41,6 +63,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final
 
 import pandas as pd
@@ -53,6 +76,7 @@ from ql2_sixt_canada_analysis.schemas import (
 )
 
 __all__ = [
+    "RAW_CSV_READ_DEFAULTS",
     "AmbiguousDatasetError",
     "DatasetNotFoundError",
     "IngestionError",
@@ -70,6 +94,14 @@ __all__ = [
 ]
 
 _TOKEN_SPLIT: Final = re.compile(r"[^a-z0-9]+")
+#: Authoritative :func:`pandas.read_csv` settings for every raw CSV read (header
+#: check and full load alike). ``skip_blank_lines=False`` keeps blank physical
+#: lines as rows so the blank-row quality step can measure them. Defined once;
+#: other modules must not restate it. Callers cannot override these through
+#: ``read_csv_options``; see ``preserve_blank_lines``.
+RAW_CSV_READ_DEFAULTS: Final[Mapping[str, Any]] = MappingProxyType({"skip_blank_lines": False})
+# read_csv options governed by project policy rather than by callers.
+_POLICY_READ_OPTIONS: Final = frozenset(RAW_CSV_READ_DEFAULTS)
 # read_csv options that would stop the loader returning one complete
 # DataFrame whose columns are exactly the validated header.
 _FORBIDDEN_READ_OPTIONS: Final = frozenset(
@@ -85,7 +117,7 @@ _TOKENIZER_READ_OPTIONS: Final = frozenset(
     {
         "sep", "delimiter", "delim_whitespace", "engine", "dialect",
         "quotechar", "quoting", "doublequote", "escapechar", "skipinitialspace",
-        "lineterminator", "skip_blank_lines", "on_bad_lines",
+        "lineterminator", "on_bad_lines",
         "encoding", "encoding_errors", "compression", "storage_options", "memory_map",
     }
 )
@@ -263,14 +295,17 @@ def load_raw_datasets(
     raw_dir: StrPath | None = None,
     *,
     read_csv_options: Mapping[str, Any] | None = None,
+    preserve_blank_lines: bool = True,
 ) -> RawDatasets:
     """Discover, header-validate and load the ``jobs`` and ``cars`` raw CSVs.
 
     Each header is validated against its :class:`DatasetDefinition` before
-    the file is read once with :func:`pandas.read_csv` using pandas defaults
-    plus any ``read_csv_options`` (applied to both files, e.g. ``dtype=str``
-    or ``low_memory=False``). No cleaning or type coercion is applied and
-    nothing is written to disk.
+    the file is read once with :func:`pandas.read_csv` using pandas defaults,
+    the project policy :data:`RAW_CSV_READ_DEFAULTS` (blank physical lines are
+    kept as rows) and any ``read_csv_options`` (applied to both files, e.g.
+    ``dtype=str`` or ``low_memory=False``). No cleaning or type coercion is
+    applied and nothing is written to disk; completely blank rows are removed
+    and counted later by :mod:`ql2_sixt_canada_analysis.quality`.
 
     Args:
         raw_dir: Directory containing the raw CSVs. Defaults to
@@ -283,18 +318,22 @@ def load_raw_datasets(
             Options that change which rows or columns form the header or
             result (``header``, ``names``, ``usecols``, ``index_col``,
             ``skiprows``, ``comment``, ``chunksize``, ``iterator``,
-            ``filepath_or_buffer``) and unrecognised options are rejected.
+            ``filepath_or_buffer``), the policy option ``skip_blank_lines``
+            and unrecognised options are rejected.
+        preserve_blank_lines: ``True`` (the project policy) keeps every blank
+            physical line as an all-missing row so it can be audited. Pass
+            ``False`` only as a deliberate, documented decision to let pandas
+            drop blank lines; blank-row counts are then not meaningful.
 
     Raises:
         RawDataDiscoveryError: Discovery failed (see :func:`discover_raw_csvs`).
         SourceSchemaError: A header does not match its column contract.
         RawDataLoadError: A file could not be read; the original exception
             is available as ``__cause__``.
-        ValueError: ``read_csv_options`` contains a rejected or unrecognised
-            option.
+        ValueError: ``read_csv_options`` contains a rejected, policy-governed
+            or unrecognised option.
     """
-    options = dict(read_csv_options or {})
-    _check_read_options(options)
+    options = _resolve_read_options(read_csv_options, preserve_blank_lines)
 
     paths = discover_raw_csvs(raw_dir)
     return RawDatasets(
@@ -308,23 +347,28 @@ def read_csv_header(
     key: DatasetKey,
     *,
     read_csv_options: Mapping[str, Any] | None = None,
+    preserve_blank_lines: bool = True,
 ) -> tuple[str, ...]:
     """Read only the header row of a CSV, tokenized as pandas will tokenize it.
 
     Uses :func:`pandas.read_csv` with ``header=None`` and ``nrows=1`` plus the
-    tokenizer subset of ``read_csv_options``, returning the raw header cells
-    as strings (duplicates preserved, no renaming).
+    project policy :data:`RAW_CSV_READ_DEFAULTS` and the tokenizer subset of
+    ``read_csv_options``, returning the raw header cells as strings
+    (duplicates preserved, no renaming). With blank lines preserved (the
+    default) the header must be the first physical line of the file.
 
     Raises:
-        RawDataLoadError: The file cannot be opened, decoded or parsed, or has
-            no header row; the original exception is the cause.
-        ValueError: ``read_csv_options`` contains a rejected or unrecognised
-            option.
+        RawDataLoadError: The file cannot be opened, decoded or parsed, has
+            no header row, or starts with a blank line; the original
+            exception is the cause.
+        ValueError: ``read_csv_options`` contains a rejected, policy-governed
+            or unrecognised option.
     """
     path = Path(path)
-    options = dict(read_csv_options or {})
-    _check_read_options(options)
-    header_options = {k: v for k, v in options.items() if k in _TOKENIZER_READ_OPTIONS}
+    options = _resolve_read_options(read_csv_options, preserve_blank_lines)
+    header_options = {
+        k: v for k, v in options.items() if k in _TOKENIZER_READ_OPTIONS | _POLICY_READ_OPTIONS
+    }
     if header_options.get("engine") == "pyarrow":
         # The pyarrow engine does not support nrows. Its supported dialect
         # options are a subset of the C engine's, which tokenizes them alike.
@@ -373,11 +417,36 @@ def _classify(stem: str) -> DatasetKey | None:
     return matches[-1] if matches else None
 
 
+def _resolve_read_options(
+    read_csv_options: Mapping[str, Any] | None, preserve_blank_lines: bool
+) -> dict[str, Any]:
+    """Validate caller options and merge them with the project read policy.
+
+    The policy option (``skip_blank_lines``) is set here from
+    ``preserve_blank_lines`` and cannot be supplied in ``read_csv_options``,
+    so it is impossible to bypass the blank-line policy by accident.
+    """
+    options = dict(read_csv_options or {})
+    _check_read_options(options)
+    if preserve_blank_lines:
+        options.update(RAW_CSV_READ_DEFAULTS)
+    else:
+        options["skip_blank_lines"] = True
+    return options
+
+
 def _check_read_options(options: Mapping[str, Any]) -> None:
     """Reject options that reshape the result or are not classified above."""
     forbidden = sorted(_FORBIDDEN_READ_OPTIONS.intersection(options))
     if forbidden:
         raise ValueError(f"Unsupported read_csv option(s): {', '.join(forbidden)}")
+    policy = sorted(_POLICY_READ_OPTIONS.intersection(options))
+    if policy:
+        raise ValueError(
+            f"Policy-governed read_csv option(s): {', '.join(policy)}; blank-line "
+            "handling is fixed by RAW_CSV_READ_DEFAULTS. Pass preserve_blank_lines=False "
+            "to opt out deliberately."
+        )
     known = _TOKENIZER_READ_OPTIONS | _DATA_READ_OPTIONS
     unknown = sorted(set(options) - known)
     if unknown:
@@ -389,7 +458,13 @@ def _check_read_options(options: Mapping[str, Any]) -> None:
 
 def _load(definition: DatasetDefinition, path: Path, options: Mapping[str, Any]) -> pd.DataFrame:
     """Validate one file's header, then read it fully once with pandas."""
-    header = read_csv_header(path, definition.key, read_csv_options=options)
+    # ``options`` are already resolved (policy applied); pass them through the
+    # header read unchanged so both reads tokenize the file identically.
+    header_options = {k: v for k, v in options.items() if k not in _POLICY_READ_OPTIONS}
+    header = read_csv_header(
+        path, definition.key, read_csv_options=header_options,
+        preserve_blank_lines=not options["skip_blank_lines"],
+    )
     validate_header(definition, header)
     try:
         frame = pd.read_csv(path, **options)

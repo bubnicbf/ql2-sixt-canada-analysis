@@ -6,6 +6,12 @@ from ql2_sixt_canada_analysis.ingestion import (
     discover_raw_csvs,
     load_raw_datasets,
 )
+from ql2_sixt_canada_analysis.quality import (
+    BlankRowResult,
+    RawDatasetBlankRowResults,
+    remove_blank_rows_from_raw_datasets,
+    remove_completely_blank_rows,
+)
 from ql2_sixt_canada_analysis.schemas import (
     DATASET_DEFINITIONS,
     DatasetDefinition,
@@ -15,11 +21,15 @@ from ql2_sixt_canada_analysis.schemas import (
 
 __all__ = [
     "DATASET_DEFINITIONS",
+    "BlankRowResult",
     "DatasetDefinition",
     "DatasetKey",
+    "RawDatasetBlankRowResults",
     "RawDatasetPaths",
     "RawDatasets",
     "discover_raw_csvs",
     "get_dataset_definition",
     "load_raw_datasets",
+    "remove_blank_rows_from_raw_datasets",
+    "remove_completely_blank_rows",
 ]
