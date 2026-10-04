@@ -33,6 +33,7 @@ from enum import StrEnum
 import pandas as pd
 
 from ql2_sixt_canada_analysis.comparison import LocationStreamComparisonReport, LocationStreamComparisonStatus
+from ql2_sixt_canada_analysis.stability import VehicleStabilityReport
 from ql2_sixt_canada_analysis.schemas import (
     VANCOUVER_LOCATION_POLICY,
     LocationIdentityPolicy,
@@ -64,6 +65,8 @@ class PricingBlocker(StrEnum):
     ONE_TO_MANY_INVALID = "one_to_many_invalid"
     TEMPORAL_FIELDS_UNTRUSTED = "temporal_fields_untrusted"
     VEHICLE_ATTRIBUTES_UNSTABLE = "vehicle_attributes_unstable"
+    VEHICLE_HISTORY_INSUFFICIENT = "vehicle_history_insufficient"
+    VEHICLE_STABILITY_UNAVAILABLE = "vehicle_stability_unavailable"
     LOCATION_POLICY_UNRESOLVED = "vancouver_policy_unresolved"
     ALIAS_CANONICALIZATION_NOT_APPLIED = "alias_canonicalization_not_applied"
     IDENTITY_EVIDENCE_CONFLICT = "identity_evidence_conflicts_with_policy"
@@ -231,15 +234,20 @@ def assess_pricing_readiness(
     job_detail_counts_reconciled: bool,
     one_to_many_contract_valid: bool,
     temporal_fields_trusted: bool,
-    vehicle_attributes_stable: bool,
+    vehicle_stability: VehicleStabilityReport | None,
 ) -> PricingReadinessReport:
     """Combine every foundational gate with the location policy (all must pass).
 
     Gate values must be real booleans; anything else is a ``TypeError`` so a
-    missing result can never be read as a pass.
+    missing result can never be read as a pass. ``vehicle_stability`` is the
+    full-population stability report (``None`` = unavailable, which blocks);
+    proven violations and insufficient product history are separate blockers
+    and both are reported when both apply.
     """
     if not isinstance(location_policy, LocationPolicyReport):
         raise TypeError("location_policy must be a LocationPolicyReport")
+    if vehicle_stability is not None and not isinstance(vehicle_stability, VehicleStabilityReport):
+        raise TypeError("vehicle_stability must be a VehicleStabilityReport or None")
     gates = (
         (key_contracts_valid, PricingBlocker.KEY_CONTRACTS_INVALID),
         (expected_coverage_passed, PricingBlocker.EXPECTED_COVERAGE_FAILED),
@@ -247,13 +255,27 @@ def assess_pricing_readiness(
         (job_detail_counts_reconciled, PricingBlocker.JOB_DETAIL_COUNTS_UNRECONCILED),
         (one_to_many_contract_valid, PricingBlocker.ONE_TO_MANY_INVALID),
         (temporal_fields_trusted, PricingBlocker.TEMPORAL_FIELDS_UNTRUSTED),
-        (vehicle_attributes_stable, PricingBlocker.VEHICLE_ATTRIBUTES_UNSTABLE),
     )
     if not all(isinstance(value, bool) for value, _ in gates):
         raise TypeError("every readiness gate must be a bool")
     reasons = [blocker for value, blocker in gates if not value]
+    reasons.extend(_stability_blockers(vehicle_stability))
     reasons.extend(location_policy.blocking_reasons)
     return PricingReadinessReport(blocking_reasons=tuple(reasons), location_policy=location_policy)
+
+
+def _stability_blockers(report: VehicleStabilityReport | None) -> list[PricingBlocker]:
+    """Stability blockers; only a full-population PASSED report adds none."""
+    if report is None:
+        return [PricingBlocker.VEHICLE_STABILITY_UNAVAILABLE]
+    blockers = []
+    if report.violations:
+        blockers.append(PricingBlocker.VEHICLE_ATTRIBUTES_UNSTABLE)
+    if report.insufficient_history_entities or (report.distinct_entities == 0):
+        blockers.append(PricingBlocker.VEHICLE_HISTORY_INSUFFICIENT)
+    if not report.is_valid and not blockers:          # fail closed on any unforeseen non-pass
+        blockers.append(PricingBlocker.VEHICLE_ATTRIBUTES_UNSTABLE)
+    return blockers
 
 
 def validate_pricing_readiness(**gates: object) -> PricingReadinessReport:

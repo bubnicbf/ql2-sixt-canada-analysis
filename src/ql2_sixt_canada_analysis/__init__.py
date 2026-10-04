@@ -136,8 +136,10 @@ from ql2_sixt_canada_analysis.stability import (
     VehicleAttributeStabilityReport,
     VehicleStabilityPreconditionError,
     VehicleStabilityReport,
+    VehicleEntityHistory,
     VehicleStabilityStatus,
     assess_vehicle_attribute_stability,
+    classify_vehicle_entities,
     validate_vehicle_attribute_stability,
 )
 from ql2_sixt_canada_analysis.temporal import (
@@ -164,6 +166,8 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "VehicleEntityHistory",
+    "classify_vehicle_entities",
     "JobDetailJoinBlocker",
     "JobDetailJoinReadiness",
     "UntrustedJoinError",

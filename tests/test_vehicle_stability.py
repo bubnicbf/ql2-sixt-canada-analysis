@@ -39,8 +39,10 @@ from ql2_sixt_canada_analysis.stability import (
     VehicleAttributeStabilityReport,
     VehicleStabilityPreconditionError,
     VehicleStabilityReport,
+    VehicleEntityHistory as H,
     VehicleStabilityStatus as St,
     assess_vehicle_attribute_stability as assess,
+    classify_vehicle_entities as classify,
     validate_vehicle_attribute_stability as validate,
 )
 
@@ -336,7 +338,8 @@ def test_single_observation_insufficient():
     assert r.status is St.UNASSESSABLE and attr(r, CAT).insufficient_history == 1
     with pytest.raises(VehicleAttributeStabilityError) as info:
         validate(frame([obs()]))
-    assert info.value.violations == ("insufficient_history",)
+    # Missing evidence is a blocking reason, not a proven violation.
+    assert info.value.blocking_reasons == ("insufficient_history",) and info.value.violations == ()
 
 
 def test_same_instant_duplicates_are_one_capture():
@@ -636,3 +639,173 @@ def test_authoritative_mapping_applied_non_destructively():
     assert attr(assess(df, mapped), CAT).value_conflict == 0
     assert attr(assess(df), CAT).value_conflict == 1           # exact by default
     pd.testing.assert_frame_equal(df, before)
+
+
+# --------------------------------------------- full-population validity (history)
+
+V3 = "SYNTH-VEHICLE-003"
+
+
+def history_of(df: pd.DataFrame) -> dict[str, str]:
+    entities = classify(df)
+    return dict(zip(entities[KEY], entities["history"]))
+
+
+def vehicle_attributes_stable(report: VehicleStabilityReport) -> bool:
+    """The notebook-facing gate: the report's own validity, nothing else."""
+    return report is not None and report.is_valid
+
+
+def test_mixed_sufficient_and_insufficient_history_is_not_passed():
+    # Original defect: one vehicle with two captures, one with one capture -> was PASSED / valid.
+    df = frame([obs(V1, T[0]), obs(V1, T[1]), obs(V2, T[0])])
+    r = assess(df)
+    assert r.status is St.PARTIALLY_ASSESSABLE and r.is_valid is False
+    assert (r.distinct_entities, r.sufficient_history_entities, r.insufficient_history_entities) == (2, 1, 1)
+    assert r.violations == () and r.blocking_reasons == ("insufficient_history",)
+    assert r.fully_stable_entities == 1 and not r.fully_assessed and r.invariants_hold
+    assert history_of(df) == {V1: H.SUFFICIENT_HISTORY.value, V2: H.INSUFFICIENT_HISTORY.value}
+    assert vehicle_attributes_stable(r) is False
+    with pytest.raises(VehicleAttributeStabilityError) as info:
+        validate(df)
+    assert info.value.report.status is St.PARTIALLY_ASSESSABLE
+    assert info.value.blocking_reasons == ("insufficient_history",)
+    assert "partially_assessable" in str(info.value) and "SYNTH" not in str(info.value)
+
+
+def test_full_population_with_sufficient_stable_history_passes():
+    df = frame([obs(v, t) for v in (V1, V2, V3) for t in T[:2]])
+    r = assess(df)
+    assert r.status is St.PASSED and r.is_valid and r.fully_assessed
+    assert (r.sufficient_history_entities, r.insufficient_history_entities, r.fully_stable_entities) == (3, 0, 3)
+    assert r.violations == () and r.blocking_reasons == ()
+    entities = classify(df)
+    assert entities["stable"].all() and set(entities["history"]) == {H.SUFFICIENT_HISTORY.value}
+    assert vehicle_attributes_stable(r) is True and validate(df) == r
+
+
+def test_entirely_insufficient_population_is_unassessable():
+    df = frame([obs(V1, T[0]), obs(V2, T[1]), obs(V3, T[2])])
+    r = assess(df)
+    assert r.status is St.UNASSESSABLE and not r.is_valid
+    assert (r.sufficient_history_entities, r.insufficient_history_entities, r.fully_stable_entities) == (0, 3, 0)
+    assert r.blocking_reasons == ("insufficient_history",)
+    entities = classify(df)
+    assert set(entities["history"]) == {H.INSUFFICIENT_HISTORY.value} and not entities["stable"].any()
+
+
+def test_fully_assessed_population_with_violation_fails_and_names_entity_and_attribute():
+    df = frame([obs(V1, T[0]), obs(V1, T[1], **{CAT: "SYNTH-CLASS-B"}), obs(V2, T[0]), obs(V2, T[1])])
+    r = assess(df)
+    assert r.status is St.VIOLATIONS and not r.is_valid and r.insufficient_history_entities == 0
+    assert r.violations == ("value_conflict",) and r.blocking_reasons == ("value_conflict",)
+    assert attr(r, CAT).value_conflict == 1
+    entities = classify(df).set_index(KEY)
+    assert entities.loc[V1, "unstable_attributes"] == (CAT,) and entities.loc[V1, "value_conflict"]
+    assert entities.loc[V2, "stable"] and entities.loc[V2, "unstable_attributes"] == ()
+
+
+def test_violations_and_insufficient_history_are_both_preserved():
+    df = frame([obs(V1, T[0]), obs(V1, T[1], **{TRANS: "SYNTH-MANUAL"}),   # sufficient, unstable
+                obs(V2, T[0]), obs(V2, T[1]),                              # sufficient, stable
+                obs(V3, T[0])])                                            # insufficient
+    r = assess(df)
+    assert r.status is St.VIOLATIONS and not r.is_valid           # proven violations take precedence
+    assert r.violations == ("value_conflict",)
+    assert r.blocking_reasons == ("value_conflict", "insufficient_history")
+    assert (r.sufficient_history_entities, r.insufficient_history_entities, r.fully_stable_entities,
+            r.entities_with_value_conflicts) == (2, 1, 1, 1)
+    entities = classify(df).set_index(KEY)
+    assert entities.loc[V1, "unstable_attributes"] == (TRANS,)
+    assert entities.loc[V2, "stable"] and entities.loc[V3, "history"] == H.INSUFFICIENT_HISTORY.value
+    with pytest.raises(VehicleAttributeStabilityError) as info:
+        validate(df)
+    assert info.value.blocking_reasons == ("value_conflict", "insufficient_history")
+
+
+def test_minimum_history_boundary_is_inclusive():
+    three = _replace(minimum_observations=3)
+    df = frame([obs(V1, T[0]), obs(V1, T[1]),                     # one below the threshold
+                obs(V2, T[0]), obs(V2, T[1]), obs(V2, T[2])])     # exactly at the threshold
+    r = assess(df, three)
+    assert r.status is St.PARTIALLY_ASSESSABLE
+    assert classify(df, three).set_index(KEY)["history"].to_dict() == {
+        V1: H.INSUFFICIENT_HISTORY.value, V2: H.SUFFICIENT_HISTORY.value}
+
+
+def test_duplicate_rows_in_one_capture_do_not_satisfy_history():
+    df = frame([obs(V1, T[0])] * 3 + [obs(V2, T[0]), obs(V2, T[1])])
+    r = assess(df)
+    assert r.status is St.PARTIALLY_ASSESSABLE and r.insufficient_history_entities == 1
+    assert history_of(df)[V1] == H.INSUFFICIENT_HISTORY.value
+
+
+def test_empty_population_is_never_a_validated_stable_population():
+    r = assess(frame([]))
+    assert r.status is St.UNASSESSABLE and not r.is_valid and not r.fully_assessed
+    assert r.blocking_reasons == ("empty_population",) and r.violations == ()
+    assert len(classify(frame([]))) == 0 and vehicle_attributes_stable(r) is False
+    with pytest.raises(VehicleAttributeStabilityError):
+        validate(frame([]))
+
+
+def test_row_order_does_not_change_status_or_classification():
+    rows = [obs(V1, T[0]), obs(V1, T[1], **{CAT: "SYNTH-CLASS-B"}), obs(V2, T[0]), obs(V2, T[1]), obs(V3, T[0])]
+    a, b = frame(rows), frame(rows[::-1])
+    assert assess(a) == assess(b)
+    pd.testing.assert_frame_equal(classify(a), classify(b))
+
+
+@pytest.mark.parametrize("rows", [
+    [obs(V1, T[0]), obs(V1, T[1])],
+    [obs(V1, T[0]), obs(V1, T[1]), obs(V2, T[0])],
+    [obs(V1, T[0]), obs(V2, T[0])],
+    [obs(V1, T[0]), obs(V1, T[1], **{CAT: "SYNTH-CLASS-B"}), obs(V2, T[0])],
+    [obs(V1, None), obs(V1, T[1]), obs(None, T[0]), obs(V2, T[0])],
+    [],
+])
+def test_status_invariants_hold_for_every_population(rows):
+    df = frame(rows)
+    r = assess(df)
+    assert r.invariants_hold and r.is_valid == (r.status is St.PASSED)
+    if r.status is St.PASSED:
+        assert r.insufficient_history_entities == 0 and r.violations == () and r.blocking_reasons == ()
+    else:
+        assert r.blocking_reasons, "a non-passing population always says why"
+    entities = classify(df)
+    counts = entities["history"].value_counts().to_dict()
+    assert len(entities) == r.distinct_entities                      # nobody dropped
+    assert counts.get(H.SUFFICIENT_HISTORY.value, 0) == r.sufficient_history_entities
+    assert counts.get(H.INSUFFICIENT_HISTORY.value, 0) == r.insufficient_history_entities
+    assert counts.get(H.TEMPORALLY_UNASSESSABLE.value, 0) == r.temporally_unassessable_entities
+    assert counts.get(H.INCOMPLETE_IDENTITY.value, 0) == r.incomplete_identity_entities
+    assert int(entities["stable"].sum()) == r.fully_stable_entities
+
+
+def test_status_and_history_values_are_stable_strings():
+    assert [s.value for s in St] == ["passed", "violations", "partially_assessable", "unassessable"]
+    assert [h.value for h in H] == ["incomplete_identity", "temporally_unassessable",
+                                    "insufficient_history", "sufficient_history"]
+    assert str(St.PARTIALLY_ASSESSABLE) == "partially_assessable"
+    assert "PARTIALLY_ASSESSABLE" not in repr(assess(frame([obs(V1, T[0])])).blocking_reasons)
+
+
+def test_entity_classification_is_isolated_from_callers():
+    df = frame([obs(V1, T[0]), obs(V1, T[1]), obs(V2, T[0])])
+    before = df.copy(deep=True)
+    first = classify(df)
+    first.loc[:, "history"] = H.SUFFICIENT_HISTORY.value
+    first.loc[:, "stable"] = True
+    second = classify(df)
+    assert second["history"].tolist() == [H.SUFFICIENT_HISTORY.value, H.INSUFFICIENT_HISTORY.value]
+    assert assess(df).status is St.PARTIALLY_ASSESSABLE
+    pd.testing.assert_frame_equal(df, before)
+    assert isinstance(second.loc[0, "unstable_attributes"], tuple)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        assess(df).status = St.PASSED  # type: ignore[misc]
+
+
+def test_classification_withholds_nothing_from_memory_but_report_holds_no_keys():
+    df = frame([obs(V1, T[0]), obs(V2, T[0])])
+    assert set(classify(df)[KEY]) == {V1, V2}
+    assert "SYNTH" not in repr(assess(df))

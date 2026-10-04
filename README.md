@@ -626,7 +626,8 @@ from ql2_sixt_canada_analysis import (
 
 keys = apply_location_policy(cars_df)                    # source_keys + analytical_keys (frame untouched)
 policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, location_comparison_report, keys)
-readiness = assess_pricing_readiness(location_policy=policy, key_contracts_valid=..., ...)
+readiness = assess_pricing_readiness(location_policy=policy, key_contracts_valid=..., ...,
+                                     vehicle_stability=vehicle_stability_report)
 readiness.ready, readiness.blocking_reasons
 ```
 
@@ -649,8 +650,8 @@ Derived permissions on `LocationPolicyReport`:
 `assess_pricing_readiness` is fail closed: every foundational gate (key
 contracts, expected coverage, expected stream health, job/detail
 reconciliation, one-to-many relationship, temporal trust, vehicle
-stability) must be a real `True`, and the location policy must add no
-blocker. Each failure is a `PricingBlocker` (for example
+stability, passed as the full-population `VehicleStabilityReport`) must
+pass, and the location policy must add no blocker. Each failure is a `PricingBlocker` (for example
 `vancouver_policy_unresolved`, `alias_canonicalization_not_applied`,
 `temporal_fields_untrusted`); `validate_pricing_readiness` raises
 `PricingNotReadyError`. A resolved policy never overrides another gate.
@@ -699,8 +700,35 @@ volatile/non-structural, so new columns cannot silently join or escape it.
 - **Aliases:** source location labels define the scope. Canonical grouping
   applies only aliases declared in the coverage contract and only when
   `canonical_location_grouping` is enabled; none is confirmed, so it is off.
-- **Empty data / no history:** no conflict is observed but stability is not
-  proven: status `UNASSESSABLE`, and strict validation fails. Presence and
+- **Full-population status:** the result describes every in-scope entity,
+  never only the assessable ones. Each entity is in exactly one category
+  (`classify_vehicle_entities`: incomplete identity, temporally
+  unassessable, insufficient history, sufficient history), so
+  `distinct_entities = incomplete + temporally unassessable + sufficient +
+  insufficient`.
+
+  | Status | Meaning | Valid |
+  | --- | --- | --- |
+  | `PASSED` | Every entity has a complete identity, valid times and at least `minimum_observations` distinct captures, and none violates the contract. | yes |
+  | `VIOLATIONS` | At least one proven violation (conflict, presence, same-capture, incomplete identity, unassessable time). Takes precedence; insufficient history is still listed. | no |
+  | `PARTIALLY_ASSESSABLE` | No proven violation, but some entities have sufficient and others insufficient history. | no |
+  | `UNASSESSABLE` | No entity has sufficient history, or the population is empty. | no |
+
+  `violations` lists proven violations only; **an empty list does not mean
+  stable**. `blocking_reasons` lists every reason the population did not
+  pass, adding `insufficient_history` (also alongside violations) and
+  `empty_population`. There is no partial-coverage tolerance: one
+  under-observed product blocks the pass. Duplicate rows in one capture do
+  not add history; the boundary is inclusive (exactly the minimum is
+  sufficient).
+- **Downstream:** `vehicle_attributes_stable` (notebook) is true only for
+  `PASSED`. `assess_pricing_readiness` takes the report itself
+  (`vehicle_stability=`) and blocks with `vehicle_attributes_unstable` for
+  proven violations, `vehicle_history_insufficient` for missing history or an
+  empty population (both when both apply) and
+  `vehicle_stability_unavailable` when no report exists. Product-level
+  aggregation, vehicle matching and comparisons that assume stable product
+  identity must not proceed on a non-passing population. Presence and
   volume are separate controls.
 
 ```python
@@ -717,10 +745,14 @@ Assessment requires blank rows removed and identifier types applied
 (`VehicleStabilityPreconditionError`), raises
 `VehicleStabilityConfigurationError` for configuration problems and otherwise
 returns a frozen report of counts, enums and contract field names - no
-vehicles, values, timestamps or locations. Strict validation raises with
-categories (`incomplete_identity`, `temporally_unassessable`,
+vehicles, values, timestamps or locations. Strict validation raises
+`VehicleAttributeStabilityError` for every non-`PASSED` status, with
+`blocking_reasons` (`incomplete_identity`, `temporally_unassessable`,
 `value_conflict`, `same_capture_conflict`, `presence_instability`,
-`insufficient_history`). Source values are never rewritten, filled or
+`insufficient_history`, `empty_population`) and the proven `violations`
+separately. `classify_vehicle_entities` returns per-entity keys and
+categories in memory only; identifiers are confidential and are never
+printed or persisted (the notebook reports aggregate counts only). Source values are never rewritten, filled or
 dropped. Tests use fabricated vehicles only; real stability profiles, change
 extracts and fingerprints are ignored by Git and must not be committed.
 

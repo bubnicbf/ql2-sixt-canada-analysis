@@ -12,6 +12,7 @@ import dataclasses
 import pandas as pd
 import pytest
 from test_comparison import COV, DEF, _jobs, same_both
+from test_vehicle_stability import T, V1, V2, frame as stability_frame, obs, two
 
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.comparison import (
@@ -34,7 +35,9 @@ from ql2_sixt_canada_analysis.readiness import (
     assess_pricing_readiness,
     validate_pricing_readiness,
 )
+from ql2_sixt_canada_analysis.stability import VehicleStabilityStatus, assess_vehicle_attribute_stability
 from ql2_sixt_canada_analysis.schemas import (
+    VEHICLE_ATTRIBUTE_STABILITY as V,
     COMPARED_LOCATION_STREAMS,
     EXPECTED_LOCATION_COVERAGE,
     LOCATION_STREAM_COMPARISON,
@@ -53,9 +56,16 @@ AUTHORITY = LocationPolicyAuthority(source="SYNTH-AUTHORITY", reference="SYNTH-D
 UNRESOLVED = LocationIdentityPolicy(first=A, second=B_, coverage=COV)
 DISTINCT = dataclasses.replace(UNRESOLVED, state=PS.CONFIRMED_DISTINCT, authority=AUTHORITY)
 ALIAS = dataclasses.replace(UNRESOLVED, state=PS.CONFIRMED_ALIAS, authority=AUTHORITY, canonical_location=CANONICAL)
+# Vehicle-stability evidence comes from the real assessment on fabricated vehicles.
+STABLE = assess_vehicle_attribute_stability(two())                                   # full population passes
+UNSTABLE = assess_vehicle_attribute_stability(two(**{V.attribute_columns[0]: "SYNTH-CLASS-B"}))
+PARTIAL = assess_vehicle_attribute_stability(stability_frame([obs(V1, T[0]), obs(V1, T[1]), obs(V2, T[0])]))
+UNSTABLE_AND_PARTIAL = assess_vehicle_attribute_stability(stability_frame([
+    obs(V1, T[0]), obs(V1, T[1], **{V.attribute_columns[0]: "SYNTH-CLASS-B"}), obs(V2, T[0])]))
 GATES = dict(key_contracts_valid=True, expected_coverage_passed=True, expected_stream_healthy=True,
              job_detail_counts_reconciled=True, one_to_many_contract_valid=True,
-             temporal_fields_trusted=True, vehicle_attributes_stable=True)
+             temporal_fields_trusted=True, vehicle_stability=STABLE)
+FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE}
 
 
 def evidence(status: CS) -> LocationStreamComparisonReport:
@@ -246,7 +256,7 @@ def test_identity_metadata_contradicting_policy_blocks_pricing(policy, status):
 def test_resolved_policy_does_not_override_other_gates():
     report = assess_location_policy(DISTINCT)
     readiness = assess_pricing_readiness(location_policy=report, **(GATES | {
-        "temporal_fields_trusted": False, "vehicle_attributes_stable": False}))
+        "temporal_fields_trusted": False, "vehicle_stability": UNSTABLE}))
     assert readiness.ready is False
     assert readiness.blocking_reasons == (B.TEMPORAL_FIELDS_UNTRUSTED, B.VEHICLE_ATTRIBUTES_UNSTABLE)
 
@@ -254,15 +264,16 @@ def test_resolved_policy_does_not_override_other_gates():
 @pytest.mark.parametrize("gate", sorted(GATES))
 def test_each_foundational_gate_blocks_alone(gate):
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
-                                         **(GATES | {gate: False}))
+                                         **(GATES | {gate: FAILING[gate]}))
     assert not readiness.ready and len(readiness.blocking_reasons) == 1
 
 
 def test_all_failures_are_reported_together():
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(),
-                                         **{g: False for g in GATES})
+                                         **(FAILING | {"vehicle_stability": UNSTABLE_AND_PARTIAL}))
     assert set(readiness.blocking_reasons) == set(B) - {B.ALIAS_CANONICALIZATION_NOT_APPLIED,
-                                                        B.IDENTITY_EVIDENCE_CONFLICT}
+                                                        B.IDENTITY_EVIDENCE_CONFLICT,
+                                                        B.VEHICLE_STABILITY_UNAVAILABLE}
     assert readiness.blocking_reasons[-1] is B.LOCATION_POLICY_UNRESOLVED
 
 
@@ -273,6 +284,49 @@ def test_missing_gate_results_cannot_pass(value):
                                  **(GATES | {"temporal_fields_trusted": value}))
     with pytest.raises(TypeError):
         assess_pricing_readiness(location_policy=None, **GATES)  # type: ignore[arg-type]
+
+
+# ------------------------------------------------ full-population vehicle stability
+
+
+def test_stability_fixtures_cover_each_population_state():
+    assert (STABLE.status, UNSTABLE.status, PARTIAL.status, UNSTABLE_AND_PARTIAL.status) == (
+        VehicleStabilityStatus.PASSED, VehicleStabilityStatus.VIOLATIONS,
+        VehicleStabilityStatus.PARTIALLY_ASSESSABLE, VehicleStabilityStatus.VIOLATIONS)
+
+
+def test_partially_assessed_product_history_blocks_pricing():
+    # Regression: one vehicle assessed, one under-observed, no violations - formerly PASSED.
+    readiness = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
+                                         **(GATES | {"vehicle_stability": PARTIAL}))
+    assert readiness.ready is False and readiness.blocking_reasons == (B.VEHICLE_HISTORY_INSUFFICIENT,)
+
+
+@pytest.mark.parametrize("rows, expected", [
+    ([obs(V1, T[0]), obs(V2, T[0])], (B.VEHICLE_HISTORY_INSUFFICIENT,)),     # entirely unassessable
+    ([], (B.VEHICLE_HISTORY_INSUFFICIENT,)),                                  # empty population
+])
+def test_unassessed_product_population_blocks_pricing(rows, expected):
+    stability = assess_vehicle_attribute_stability(stability_frame(rows))
+    readiness = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
+                                         **(GATES | {"vehicle_stability": stability}))
+    assert readiness.blocking_reasons == expected
+
+
+def test_violations_and_insufficient_history_are_both_reported():
+    readiness = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
+                                         **(GATES | {"vehicle_stability": UNSTABLE_AND_PARTIAL}))
+    assert readiness.blocking_reasons == (B.VEHICLE_ATTRIBUTES_UNSTABLE, B.VEHICLE_HISTORY_INSUFFICIENT)
+
+
+def test_missing_stability_report_blocks_and_wrong_types_are_rejected():
+    readiness = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
+                                         **(GATES | {"vehicle_stability": None}))
+    assert readiness.blocking_reasons == (B.VEHICLE_STABILITY_UNAVAILABLE,)
+    for value in (True, "passed", STABLE.status):
+        with pytest.raises(TypeError):
+            assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
+                                     **(GATES | {"vehicle_stability": value}))
 
 
 def test_blocker_values_name_no_source_columns():

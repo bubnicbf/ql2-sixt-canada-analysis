@@ -27,9 +27,19 @@ Counting policy
 * Per attribute, every complete entity falls in exactly one category, in
   precedence order: value conflict, temporally unassessable, insufficient
   history, always missing, intermittently missing, stable.
-* **Empty / no history:** no observed conflict cannot establish stability;
-  the status is ``UNASSESSABLE`` (strict validation fails) unless a violation
-  is proven.
+* **Full-population status** (:class:`VehicleStabilityStatus`):
+  ``PASSED`` only when *every* in-scope entity has a complete identity,
+  valid observation times and sufficient history, and no entity violates
+  the contract. Proven violations give ``VIOLATIONS`` (precedence: they are
+  facts, not missing evidence); otherwise some sufficient and some
+  insufficient entities give ``PARTIALLY_ASSESSABLE`` and no sufficient
+  entity gives ``UNASSESSABLE``. An empty violations list never implies
+  stability: ``blocking_reasons`` adds ``insufficient_history`` whenever any
+  entity lacks history (also alongside violations) and ``empty_population``
+  for empty input. No partial-coverage tolerance exists.
+* **Empty input:** no entity, nothing assessed - ``UNASSESSABLE``.
+* :func:`classify_vehicle_entities` returns, in memory only, each entity's
+  key and category (identifiers are confidential: never print or persist).
 
 Source frames are never sorted, mutated or written; the report holds
 contract field names, enums and integer counts only.
@@ -63,15 +73,33 @@ __all__ = [
     "VehicleStabilityPreconditionError",
     "VehicleStabilityReport",
     "VehicleStabilityStatus",
+    "VehicleEntityHistory",
     "assess_vehicle_attribute_stability",
+    "classify_vehicle_entities",
     "validate_vehicle_attribute_stability",
 ]
 
 
 class VehicleStabilityStatus(StrEnum):
+    """Status of the full in-scope entity population (see module docstring).
+
+    Precedence: ``VIOLATIONS`` > ``PARTIALLY_ASSESSABLE`` > ``UNASSESSABLE`` >
+    ``PASSED``. Only ``PASSED`` is valid.
+    """
+
     PASSED = "passed"
     VIOLATIONS = "violations"
+    PARTIALLY_ASSESSABLE = "partially_assessable"
     UNASSESSABLE = "unassessable"
+
+
+class VehicleEntityHistory(StrEnum):
+    """Exactly one assessment category per in-scope entity."""
+
+    INCOMPLETE_IDENTITY = "incomplete_identity"
+    TEMPORALLY_UNASSESSABLE = "temporally_unassessable"
+    INSUFFICIENT_HISTORY = "insufficient_history"
+    SUFFICIENT_HISTORY = "sufficient_history"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,13 +169,38 @@ class VehicleStabilityReport:
     def all_attributes_pass(self) -> bool:
         return all(a.passes for a in self.attributes)
 
+    def __post_init__(self) -> None:
+        # Programmer invariants: PASSED means the full population was assessed and stable.
+        if self.status is VehicleStabilityStatus.PASSED:
+            assert self.sufficient_history_entities == self.distinct_entities > 0
+            assert self.insufficient_history_entities == 0 and not self.violations
+
     @property
     def is_valid(self) -> bool:
+        """True only for ``PASSED``: every in-scope entity assessed and stable."""
         return self.status is VehicleStabilityStatus.PASSED
 
     @property
+    def fully_assessed(self) -> bool:
+        """Every in-scope entity had a complete identity, valid times and sufficient history."""
+        return self.distinct_entities > 0 and self.sufficient_history_entities == self.distinct_entities
+
+    @property
+    def blocking_reasons(self) -> tuple[str, ...]:
+        """Every reason the population is not ``PASSED``: proven violations plus missing evidence."""
+        found = list(self.violations)
+        if self.insufficient_history_entities:
+            found.append("insufficient_history")
+        if self.distinct_entities == 0:
+            found.append("empty_population")
+        return tuple(found)
+
+    @property
     def violations(self) -> tuple[str, ...]:
-        """Violation categories, in a fixed order (no values)."""
+        """Proven violation categories, in a fixed order (no values).
+
+        Empty does **not** mean stable: see :attr:`blocking_reasons`.
+        """
         found = []
         if self.incomplete_identity_entities:
             found.append("incomplete_identity")
@@ -159,8 +212,6 @@ class VehicleStabilityReport:
             found.append("same_capture_conflict")
         if self.entities_with_presence_instability:
             found.append("presence_instability")
-        if not found and self.status is VehicleStabilityStatus.UNASSESSABLE:
-            found.append("insufficient_history")
         return tuple(found)
 
     @property
@@ -186,12 +237,19 @@ class VehicleStabilityPreconditionError(Exception):
 
 
 class VehicleAttributeStabilityError(Exception):
-    """Strict validation failed; ``violations`` lists categories, ``report`` the aggregates."""
+    """Strict validation failed.
+
+    ``blocking_reasons`` lists every category (violations and missing
+    evidence), ``violations`` the proven violations only, ``report`` the
+    aggregates. No values appear in the message.
+    """
 
     def __init__(self, report: VehicleStabilityReport) -> None:
-        super().__init__("Vehicle-attribute stability contract failed: " + ", ".join(report.violations) + ".")
+        super().__init__(f"Vehicle-attribute stability contract failed ({report.status.value}): "
+                         + ", ".join(report.blocking_reasons) + ".")
         self.report = report
         self.violations = report.violations
+        self.blocking_reasons = report.blocking_reasons
 
 
 # ------------------------------------------------------------------- public API
@@ -203,11 +261,77 @@ def assess_vehicle_attribute_stability(
 ) -> VehicleStabilityReport:
     """Assess stability on the cleaned, identifier-typed detail frame.
 
-    Raises only for configuration or structural problems
+    Every in-scope entity is assessed; the status describes the full
+    population. Raises only for configuration or structural problems
     (:class:`VehicleStabilityConfigurationError`,
     :class:`VehicleStabilityPreconditionError`, ``TypeError``); unstable
     source values are reported, never raised or repaired.
     """
+    return _run(cars, definition).report
+
+
+def classify_vehicle_entities(
+    cars: pd.DataFrame,
+    definition: VehicleStabilityDefinition = VEHICLE_ATTRIBUTE_STABILITY,
+) -> pd.DataFrame:
+    """In-memory per-entity classification (a new frame on every call).
+
+    Columns: the entity's scope and key columns (canonical scope if the
+    contract enables it), ``history`` (:class:`VehicleEntityHistory` value),
+    ``value_conflict``, ``presence_violation``, ``same_capture_conflict``,
+    ``stable`` (sufficient history and no violation) and
+    ``unstable_attributes`` (contract attribute names, contract order). Rows
+    are sorted by key. Holds confidential identifiers: never print, log or
+    persist it.
+    """
+    return _run(cars, definition).entities()
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _Run:
+    report: VehicleStabilityReport
+    keys: pd.DataFrame                   # one row per entity code (first occurrence), index = code
+    complete_codes: pd.Index
+    unassessable: pd.Series
+    sufficient: pd.Series
+    conflict: dict
+    presence: dict
+    same: pd.Series
+
+    def entities(self) -> pd.DataFrame:
+        frame = self.keys.copy()
+        idx = frame.index
+        history = pd.Series(VehicleEntityHistory.INCOMPLETE_IDENTITY.value, index=idx, dtype=object)
+        complete = idx.isin(self.complete_codes)
+        c = self.complete_codes
+        history.loc[c] = np.where(self.unassessable.reindex(c), VehicleEntityHistory.TEMPORALLY_UNASSESSABLE.value,
+                                  np.where(self.sufficient.reindex(c), VehicleEntityHistory.SUFFICIENT_HISTORY.value,
+                                           VehicleEntityHistory.INSUFFICIENT_HISTORY.value))
+        def flag(series: pd.Series) -> np.ndarray:
+            return series.reindex(idx, fill_value=False).astype(bool).to_numpy() & complete
+        columns = list(self.conflict)
+        value = np.zeros(len(idx), dtype=bool)
+        presence = np.zeros(len(idx), dtype=bool)
+        unstable = [[] for _ in range(len(idx))]
+        for column in columns:
+            vc, pv = flag(self.conflict[column]), flag(self.presence[column])
+            value |= vc
+            presence |= pv
+            for i in np.flatnonzero(vc | pv):
+                unstable[i].append(column)
+        frame["history"] = history.to_numpy()
+        frame["value_conflict"] = value
+        frame["presence_violation"] = presence
+        frame["same_capture_conflict"] = flag(self.same)
+        frame["stable"] = (frame["history"] == VehicleEntityHistory.SUFFICIENT_HISTORY.value).to_numpy() \
+            & ~value & ~presence
+        frame["unstable_attributes"] = [tuple(u) for u in unstable]
+        key_columns = list(self.keys.columns)
+        frame = frame.sort_values(key_columns, kind="mergesort", na_position="last") if key_columns else frame
+        return frame.reset_index(drop=True)
+
+
+def _run(cars: pd.DataFrame, definition: VehicleStabilityDefinition) -> _Run:
     if not isinstance(definition, VehicleStabilityDefinition):
         raise TypeError("definition must be a VehicleStabilityDefinition")
     if not isinstance(cars, pd.DataFrame):
@@ -248,10 +372,12 @@ def assess_vehicle_attribute_stability(
     entities = unassessable.index
 
     attribute_reports, conflict_any, presence_any, same_any = [], _false(entities), _false(entities), _false(entities)
+    conflicts, presences = {}, {}
     for attribute in definition.attributes:
         codes = _value_codes(cars[attribute.column].reset_index(drop=True), attribute)[complete]
         rep, conflict, presence, same = _assess_attribute(attribute, work, codes, unassessable, insufficient)
         attribute_reports.append(rep)
+        conflicts[attribute.column], presences[attribute.column] = conflict, presence
         conflict_any |= conflict
         presence_any |= presence
         same_any |= same
@@ -274,13 +400,22 @@ def assess_vehicle_attribute_stability(
     )
     violated = (incomplete_entities or report["temporally_unassessable_entities"]
                 or report["entities_with_value_conflicts"] or report["entities_with_presence_instability"])
+    # Full-population status: absence of violations is not proof while any entity lacks history.
     if violated:
         status = VehicleStabilityStatus.VIOLATIONS
     elif report["sufficient_history_entities"] == 0:
         status = VehicleStabilityStatus.UNASSESSABLE
+    elif report["insufficient_history_entities"]:
+        status = VehicleStabilityStatus.PARTIALLY_ASSESSABLE
     else:
         status = VehicleStabilityStatus.PASSED
-    return VehicleStabilityReport(status=status, **report)
+    first = pd.Series(np.arange(len(entity))).groupby(entity).min()
+    keys = group.iloc[first.to_numpy()].astype(object).set_axis(first.index)
+    keys = keys.where(keys.notna(), None)
+    return _Run(report=VehicleStabilityReport(status=status, **report), keys=keys,
+                complete_codes=entities, unassessable=unassessable, sufficient=sufficient,
+                conflict=conflicts, presence=presences,
+                same=same_any if definition.same_capture_conflicts_reported else _false(entities))
 
 
 def validate_vehicle_attribute_stability(

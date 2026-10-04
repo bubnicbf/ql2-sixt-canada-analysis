@@ -61,6 +61,26 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
     return "\n".join(c.source for c in _code_cells(notebook))
 
 
+# Cells that are required to report categorical gate results and aggregate
+# counts (never values or identifiers); the per-step "stay quiet" checks
+# exclude them and each has its own focused tests.
+REPORTING_STEPS = ("assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+                   "assess_pricing_readiness(")
+
+
+def _is_reporting(cell: nbformat.NotebookNode) -> bool:
+    return any(marker in cell.source for marker in REPORTING_STEPS)
+
+
+def _quiet_code(notebook: nbformat.NotebookNode) -> str:
+    return "\n".join(c.source for c in _code_cells(notebook) if not _is_reporting(c))
+
+
+def _quiet_outputs(result: object) -> str:
+    return "\n".join(o.get("text", "") for c in _code_cells(result.executed)  # type: ignore[attr-defined]
+                      if not _is_reporting(c) for o in c.outputs)
+
+
 def _snapshot(root: Path) -> dict[str, str]:
     return {
         p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -215,7 +235,7 @@ def test_ingestion_notebook_quality_step_runs_with_synthetic_blank_rows(tmp_path
     result = execute_notebook_copy(
         INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
     )
-    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    outputs = _quiet_outputs(result)
     assert "blank" in outputs.lower()
     assert not re.search(r"\b[0-9]+\b", outputs), "cell output shows a number"
     assert "synthetic_0" not in outputs
@@ -269,7 +289,7 @@ def test_ingestion_notebook_runs_with_risky_synthetic_identifiers(tmp_path: Path
     result = execute_notebook_copy(
         INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
     )
-    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    outputs = _quiet_outputs(result)
     assert "nullable string" in outputs
     assert not any(v in outputs for v in risky if v and v != "0")
     assert not re.search(r"\b[0-9]+\b", outputs)
@@ -307,7 +327,7 @@ def test_ingestion_notebook_has_no_key_lists_or_own_key_algorithm() -> None:
                     r"\.value_counts\(", r"unique_key_columns", r"\.notna\(", r"\.isna\("):
         assert not re.search(pattern, code), f"notebook reimplements key logic: {pattern}"
     for attribute in ("row_count", "is_valid", "all_valid", "violations"):
-        assert not re.search(rf"print\([^\n]*{attribute}", code), "key results must not be displayed"
+        assert not re.search(rf"print\([^\n]*{attribute}", _quiet_code(notebook)), "key results must not be displayed"
 
 
 def test_ingestion_notebook_key_step_runs_on_synthetic_violations(tmp_path: Path) -> None:
@@ -443,7 +463,7 @@ def test_ingestion_notebook_relationship_step_runs_on_synthetic_inputs(tmp_path:
         repo_before = _snapshot(PROJECT_ROOT)
         result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
                                        env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
-        outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+        outputs = _quiet_outputs(result)
         assert "One-to-many relationship validation step completed." in outputs
         assert "SYNTH" not in outputs and not re.search(r"\b[0-9]+\b", outputs)
         assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
@@ -570,7 +590,8 @@ def test_ingestion_notebook_investigates_stream_via_central_target() -> None:
     for pattern in (r"\.query\(", r"\.loc\[", r"\.merge\(", r"\.groupby\(", r"==\s*stream_target",
                     r"\.isin\(", r"\.str\.", r"validate_location_stream"):
         assert not re.search(pattern, code), f"one-off stream logic in notebook: {pattern}"
-    assert not re.search(r"print\([^\n]*(location_stream_report|stream_target|_healthy|status)", code)
+    quiet = "\n".join(s for s in sources if not any(m in s for m in REPORTING_STEPS))
+    assert not re.search(r"print\([^\n]*(location_stream_report|stream_target|_healthy|status)", quiet)
 
 
 def test_ingestion_notebook_stream_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
@@ -649,7 +670,8 @@ def test_ingestion_notebook_compares_related_streams_through_the_api() -> None:
     for pattern in (r"canonical_location_keys", r"validate_confirmed_location_alias", r"drop_duplicates",
                     r"\.replace\(", r"\.merge\(", r"to_csv", r"to_parquet", r"Counter"):
         assert not re.search(pattern, code), f"notebook duplicates or merges streams: {pattern}"
-    assert not re.search(r"print\([^\n]*(location_comparison_report|_confirmed|status)", code)
+    quiet = "\n".join(s for s in sources if not any(m in s for m in REPORTING_STEPS))
+    assert not re.search(r"print\([^\n]*(location_comparison_report|_confirmed|status)", quiet)
 
 
 def test_ingestion_notebook_comparison_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
@@ -692,7 +714,18 @@ def test_ingestion_notebook_assesses_vehicle_stability_through_the_api() -> None
                     r"hash", r"\.unique\(", r"value_counts", r"to_csv", r"to_parquet", r"to_json",
                     r"validate_vehicle_attribute_stability"):
         assert not re.search(pattern, code), f"notebook duplicates stability logic: {pattern}"
-    assert not re.search(r"print\([^\n]*(vehicle_stability_report|_stable|status)", code)
+    # The full-population result is reported (aggregates only); identifiers are never displayed.
+    cell = sources[stability]
+    for field in ("status", "is_valid", "distinct_entities", "sufficient_history_entities",
+                  "insufficient_history_entities", "violations", "blocking_reasons"):
+        assert re.search(rf"print\([^\n]*vehicle_stability_report\.{field}\b", cell), field
+    assert "classify_vehicle_entities" not in code and "withheld" in cell
+    # The gate is the report's own validity, not an empty violations list.
+    assert re.search(r"vehicle_attributes_stable\s*=\s*vehicle_stability_report is not None and "
+                     r"vehicle_stability_report\.is_valid", cell)
+    assert not re.search(r"vehicle_attributes_stable\s*=.*violations", code)
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert '"No violations" is not "stable"' in guidance and "pricing analysis must not proceed" in guidance
 
 
 def test_ingestion_notebook_stability_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
@@ -705,8 +738,59 @@ def test_ingestion_notebook_stability_step_runs_on_synthetic_inputs(synthetic_ra
     assert not any(o.get("output_type") == "error" for c in code_cells for o in c.outputs)
     outputs = _step_output(result, "assess_vehicle_attribute_stability(")  # this step's own cell only
     assert "Vehicle-attribute stability step completed." in outputs
-    assert not re.search(r"\b(\d+|passed|violations|unassessable|conflict|True|False)\b", outputs, re.I)
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Full product population valid"].strip() == "False"
+    total, sufficient, insufficient = (int(lines[k]) for k in (
+        "In-scope entities", "Sufficient-history entities", "Insufficient-history entities"))
+    assert sufficient + insufficient <= total
+    assert lines["Insufficient-history entity identifiers"].strip() == "withheld (confidential)"
+    assert "SYNTH" not in outputs and "synthetic_" not in outputs
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+def test_ingestion_notebook_reports_partially_assessable_product_history(tmp_path: Path) -> None:
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+    from ql2_sixt_canada_analysis.schemas import VEHICLE_ATTRIBUTE_STABILITY as V
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    key, = V.entity_key_columns
+    scope, = V.context_columns
+    capture = V.temporal.field(V.observation_time_field).column
+    category, transmission, seats, bags = V.attribute_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    base = {scope: "SYNTH-LOCATION-001", category: "SYNTH-CLASS-A", transmission: "SYNTH-AUTOMATIC",
+            seats: "5", bags: "2", rel.detail_key_columns[0]: "SYNTH-JOB-001"}
+    cars = [base | {key: "SYNTH-VEHICLE-001", capture: "2025-01-15 05:00:00 MST", position: "0"},
+            base | {key: "SYNTH-VEHICLE-001", capture: "2025-01-15 06:00:00 MST", position: "1"},
+            base | {key: "SYNTH-VEHICLE-002", capture: "2025-01-15 05:00:00 MST", position: "2"}]
+    rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "3"}],
+            DatasetKey.CARS: cars}
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in rows.items():
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}_{n}") for i, c in enumerate(columns))
+                 for n, r in enumerate(dataset_rows)]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    stability = dict(line.split(":", 1) for line in
+                     _step_output(result, "assess_vehicle_attribute_stability(").splitlines() if ":" in line)
+    assert stability["Overall stability result"].strip() == "partially_assessable"   # formerly "passed"
+    assert stability["Full product population valid"].strip() == "False"
+    assert [int(stability[k]) for k in ("In-scope entities", "Sufficient-history entities",
+                                        "Insufficient-history entities")] == [2, 1, 1]
+    assert stability["Violations"].split("|")[0].strip() == "none observed"
+    assert stability["Stability blocked by"].strip() == "insufficient_history"
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    assert "Pricing analysis ready: False" in pricing
+    assert PricingBlocker.VEHICLE_HISTORY_INSUFFICIENT.value in pricing
+    assert PricingBlocker.VEHICLE_ATTRIBUTES_UNSTABLE.value not in pricing
+    outputs = _step_output(result, "assess_vehicle_attribute_stability(") + pricing
+    assert "SYNTH" not in outputs and "synthetic_" not in outputs
 
 
 # ------------------------------------------ Vancouver policy and pricing readiness
@@ -730,7 +814,7 @@ def test_ingestion_notebook_gates_pricing_on_the_vancouver_policy() -> None:
         assert re.search(rf"^{name}\s*=", cell, re.M), name
     for gate in ("all_key_contracts_valid", "expected_location_coverage_passed", "location_stream_healthy",
                  "job_detail_counts_reconciled", "one_to_many_contract_valid", "temporal_fields_trusted",
-                 "vehicle_attributes_stable"):
+                 "vehicle_stability_report"):
         assert gate in cell, f"pricing readiness ignores {gate}"
     # No policy decision may be derived from comparison evidence in the notebook.
     assert not re.search(r"(LIKELY_DUPLICATE|likely_duplicate|\.status\s*(==|is))", code)
