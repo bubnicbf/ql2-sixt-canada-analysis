@@ -30,6 +30,7 @@ from ql2_sixt_canada_analysis.quality import remove_blank_rows_from_raw_datasets
 from ql2_sixt_canada_analysis.reconciliation import assess_job_detail_reconciliation
 from ql2_sixt_canada_analysis.relationships import assess_one_to_many_join
 from ql2_sixt_canada_analysis.schemas import (
+    COMPARED_LOCATION_STREAMS,
     DATASET_DEFINITIONS,
     EXPECTED_LOCATION_COVERAGE,
     INVESTIGATED_LOCATION_STREAM,
@@ -104,7 +105,7 @@ def _assess(jobs: pd.DataFrame, coverage: LocationCoverageDefinition) -> Locatio
 # ------------------------------------------------------------- configuration
 
 
-def test_real_contract_is_branch_level_minimum_with_the_investigated_stream() -> None:
+def test_real_contract_is_branch_level_minimum_with_all_authoritative_streams() -> None:
     cov = EXPECTED_LOCATION_COVERAGE
     # Keys are (city, branch label) pairs; branch labels exist only in the detail dataset.
     assert cov.dataset == CARS and isinstance(cov.location_columns, tuple) and len(cov.location_columns) == 2
@@ -114,10 +115,22 @@ def test_real_contract_is_branch_level_minimum_with_the_investigated_stream() ->
     assert cov.location_columns[:-1] == cov.stream_scope_columns     # the city component is the scope
     assert set(cov.parent_scope_columns) <= set(DATASET_DEFINITIONS[JOBS].columns)
     assert cov.is_configured and cov.mode is MIN          # authority covers a minimum, not a universe
-    assert INVESTIGATED_LOCATION_STREAM in cov.expected_locations
+    assert cov.expected_locations == (INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS)
     assert len(INVESTIGATED_LOCATION_STREAM) == len(cov.location_columns)
     assert dict(cov.aliases) == {}                        # no alias is authoritatively confirmed
     assert set(cov.stream_scope_columns) <= set(DATASET_DEFINITIONS[CARS].columns)
+
+
+def test_readme_describes_the_expected_location_contract_consistently() -> None:
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    coverage_section = readme.split("## Expected location coverage", 1)[1].split("\n## ", 1)[0]
+    trust_section = readme.split("## Data trust", 1)[1].split("\n## ", 1)[0]
+
+    assert "three authority-identified streams" in coverage_section
+    assert "`INVESTIGATED_LOCATION_STREAM`" in coverage_section
+    assert "`COMPARED_LOCATION_STREAMS`" in coverage_section
+    assert "All expected locations present in jobs" not in trust_section
+    assert "All authoritative expected (city, branch) pairs present in detail (`cars`) rows" in trust_section
 
 
 def test_unconfigured_contract_fails_closed() -> None:

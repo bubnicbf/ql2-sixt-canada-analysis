@@ -1,4 +1,4 @@
-"""Check that cleaned jobs cover the independently configured expected locations.
+"""Check that the configured cleaned dataset covers the expected locations.
 
 The contract is :data:`~ql2_sixt_canada_analysis.schemas.EXPECTED_LOCATION_COVERAGE`
 (a :class:`~ql2_sixt_canada_analysis.schemas.LocationCoverageDefinition`).
@@ -9,7 +9,7 @@ An unconfigured contract fails closed with
 
 Semantics
 ---------
-Each jobs row's location key (one component per configured column) is:
+Each source row's location key (one component per configured column) is:
 
 * **unassigned** - any component is missing, empty or whitespace-only (the
   row creates no observed location; the source value is not modified);
@@ -17,8 +17,8 @@ Each jobs row's location key (one component per configured column) is:
 * **unexpected** - the complete key matches no expected key.
 
 Coverage is measured on *distinct* complete observed keys: an expected
-location is covered when at least one job has its exact key, and repeated
-jobs at one location never compensate for another missing location.
+location is covered when at least one source row has its exact key, and
+repeated rows at one location never compensate for another missing location.
 Comparison is exact (case-sensitive, no stripping, no fuzzy matching) and
 composite keys are compared as tuples, never concatenated. Only aliases
 declared in the central contract (``aliases``) also count, matched exactly.
@@ -31,8 +31,9 @@ assignment** (``conflicting_location_label_count``) and fails the contract;
 city is never inferred from the label.
 
 The contract passes when every expected location is covered, no label has a
-conflicting assignment and every job has a complete location; in ``EXHAUSTIVE`` mode it additionally requires zero
-unexpected locations, while ``MINIMUM_REQUIRED`` mode only reports them.
+conflicting assignment and every source row has a complete location; in
+``EXHAUSTIVE`` mode it additionally requires zero unexpected locations,
+while ``MINIMUM_REQUIRED`` mode only reports them.
 
 Coverage is checked on the cleaned frame of the contract's dataset (after
 blank-row removal) and before any one-to-many join. Branch-level locations

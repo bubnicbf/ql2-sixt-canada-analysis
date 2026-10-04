@@ -290,9 +290,11 @@ Locations are **branch-level** pickup locations, which only the detail
 (`cars`) rows carry; jobs are city-level collection runs, so a jobs-level
 contract cannot represent a branch stream. Expected locations must come from
 an **independent authority** and are never derived from the extract being
-validated. The current contract holds the one stream the project owner
-identified as expected (`INVESTIGATED_LOCATION_STREAM`), so its mode is
-`MINIMUM_REQUIRED`; add further locations only from an authoritative list.
+validated. The current contract holds three authority-identified streams:
+`INVESTIGATED_LOCATION_STREAM` and the two streams in
+`COMPARED_LOCATION_STREAMS`. The authority defines a required minimum rather
+than an exhaustive universe, so the mode is `MINIMUM_REQUIRED`; add further
+locations only from an authoritative list.
 An unconfigured contract fails closed with `LocationCoverageConfigurationError`.
 
 ```python
@@ -889,7 +891,7 @@ python -m pytest tests/test_notebooks.py
 ## Data trust
 
 - All scheduled cities represented
-- All expected locations present in jobs
+- All authoritative expected (city, branch) pairs present in detail (`cars`) rows
 - Job level counts = detail row counts
 - Valid offers duplicated
 - Job timestamps consistent
