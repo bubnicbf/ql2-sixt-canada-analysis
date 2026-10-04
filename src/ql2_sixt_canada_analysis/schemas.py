@@ -1272,6 +1272,24 @@ class LocationIdentityPolicy:
         canonical_location: Approved analytical key for ``CONFIRMED_ALIAS``
             (required there, forbidden otherwise). Source labels are kept for
             lineage; only the analytical key is canonicalised.
+
+    Governed scope
+    --------------
+    A policy governs the *scope* (the city: the location-key components named
+    by ``coverage.stream_scope_columns``) shared by ``first`` and ``second``.
+    Canonicalisation consolidates identity **inside** that scope; it can never
+    change geographic scope. A confirmed alias is therefore valid only when
+    ``canonical_location`` is exactly one of the two governed keys - the
+    repository has no other authoritative declaration of canonical keys, so an
+    arbitrary well-formed, non-blank tuple (another branch of the same city,
+    another configured stream, or a key in another city) is never accepted.
+
+    Construction rejects structurally malformed configuration (wrong arity,
+    missing or blank components, missing authority). A well-formed policy that
+    breaks its governed scope is still constructed - its declared state stays
+    visible for audit - but :attr:`scope` reports typed
+    :class:`LocationPolicyScopeDefect` values, :attr:`alias_mapping` is empty
+    and readiness treats the policy as not authority-sufficient.
     """
 
     first: tuple[str, ...]
@@ -1317,11 +1335,137 @@ class LocationIdentityPolicy:
         return self.state is not LocationPolicyState.UNRESOLVED
 
     @property
+    def scope(self) -> LocationPolicyScope:
+        """Governed-scope validation (recomputed on every access; see :func:`assess_location_policy_scope`)."""
+        return assess_location_policy_scope(self)
+
+    @property
     def alias_mapping(self) -> Mapping[tuple[str, ...], tuple[str, ...]]:
-        """Read-only source-key -> canonical-key mapping (empty unless a confirmed alias)."""
-        if self.state is not LocationPolicyState.CONFIRMED_ALIAS:
+        """Read-only source-key -> canonical-key mapping.
+
+        Empty unless a confirmed alias whose governed scope is valid: an
+        out-of-scope canonical key is never exposed as a mapping.
+        """
+        if self.state is not LocationPolicyState.CONFIRMED_ALIAS or not self.scope.is_valid:
             return MappingProxyType({})
         return MappingProxyType({self.first: self.canonical_location, self.second: self.canonical_location})
+
+
+class LocationPolicyScopeDefect(StrEnum):
+    """Why a policy's governed scope or canonical key is invalid (fixed order; values avoid column names)."""
+
+    GOVERNED_SCOPE_UNAVAILABLE = "governed_scope_unavailable"          # no scope component can be derived
+    GOVERNED_SCOPE_AMBIGUOUS = "governed_scope_ambiguous"              # governed keys span several scopes
+    CANONICAL_LOCATION_MALFORMED = "canonical_key_malformed"           # missing, wrong arity, blank or padded
+    CANONICAL_LOCATION_NOT_PERMITTED = "canonical_key_not_permitted"   # present on a non-alias state
+    CANONICAL_LOCATION_CITY_MISMATCH = "canonical_key_crosses_governed_scope"
+    CANONICAL_LOCATION_IMPERSONATES_STREAM = "canonical_key_names_other_stream"
+    CANONICAL_LOCATION_SCOPE_MISMATCH = "canonical_key_not_governed"   # not one of the governed keys
+
+
+@dataclass(frozen=True, slots=True)
+class LocationPolicyScope:
+    """Governed scope of a location policy and the validity of its canonical key.
+
+    Attributes:
+        governed_locations: The governed keys ``(first, second)``.
+        scope_columns: Location-key components that form the scope (the city).
+        governed_scope: The single scope both governed keys share, or ``None``
+            when it cannot be derived or is ambiguous.
+        canonical_location: The supplied canonical key, unmodified.
+        canonical_scope: The scope component(s) of the supplied canonical key
+            (for audit, also when rejected), or ``None``.
+        defects: Typed defects in fixed enum order; empty means valid.
+
+    Values are repository configuration, never source data.
+    """
+
+    governed_locations: tuple[object, ...]
+    scope_columns: tuple[str, ...]
+    governed_scope: tuple[str, ...] | None
+    canonical_location: object
+    canonical_scope: tuple[object, ...] | None
+    defects: tuple[LocationPolicyScopeDefect, ...]
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.defects
+
+
+def _assignable_component(value: object) -> bool:
+    """Non-empty string without surrounding whitespace (the project's assignable-value rule)."""
+    return isinstance(value, str) and value != "" and value == value.strip()
+
+
+def assess_location_policy_scope(policy: object) -> LocationPolicyScope:
+    """Validate a policy's governed scope and canonical key (the single, central rule).
+
+    Defensive: works on objects whose construction-time validation was
+    bypassed. Rules, each a typed :class:`LocationPolicyScopeDefect`:
+
+    * the scope components come from ``coverage.stream_scope_columns`` and
+      must all be location-key columns (otherwise ``GOVERNED_SCOPE_UNAVAILABLE``);
+    * both governed keys must be well formed and share one scope value
+      (``GOVERNED_SCOPE_AMBIGUOUS`` otherwise);
+    * ``CONFIRMED_ALIAS`` needs a well-formed canonical key (assignable
+      components, right arity) that is exactly one of the governed keys; a
+      canonical key in another scope, naming another configured stream, or
+      outside the governed keys is rejected - each with its own defect;
+    * any other state must not carry a canonical key.
+
+    Missing or ambiguous information is a defect, never a pass.
+    """
+    D = LocationPolicyScopeDefect
+    defects: set[LocationPolicyScopeDefect] = set()
+    first, second = getattr(policy, "first", None), getattr(policy, "second", None)
+    canonical = getattr(policy, "canonical_location", None)
+    state = getattr(policy, "state", None)
+    cov = getattr(policy, "coverage", None)
+    columns: tuple[str, ...] = ()
+    positions: list[int] = []
+    if isinstance(cov, LocationCoverageDefinition) and cov.is_configured:
+        columns = tuple(cov.location_columns)
+        scope_columns = tuple(cov.stream_scope_columns)
+        if scope_columns and all(c in columns for c in scope_columns):
+            positions = [columns.index(c) for c in scope_columns]
+    else:
+        scope_columns = ()
+
+    def well_formed(key: object) -> bool:
+        return (isinstance(key, tuple) and len(key) == len(columns) > 0
+                and all(_assignable_component(v) for v in key))
+
+    def scope_of(key: object) -> tuple[object, ...] | None:
+        if not positions or not isinstance(key, tuple) or len(key) != len(columns):
+            return None
+        return tuple(key[i] for i in positions)
+
+    governed = None
+    if not positions or not (well_formed(first) and well_formed(second)):
+        defects.add(D.GOVERNED_SCOPE_UNAVAILABLE)
+    else:
+        scopes = {scope_of(first), scope_of(second)}
+        if len(scopes) != 1:
+            defects.add(D.GOVERNED_SCOPE_AMBIGUOUS)
+        else:
+            governed = scopes.pop()
+    canonical_scope = scope_of(canonical) if canonical is not None else None
+    if state is LocationPolicyState.CONFIRMED_ALIAS:
+        if not well_formed(canonical):
+            defects.add(D.CANONICAL_LOCATION_MALFORMED)
+        else:
+            if governed is not None and canonical_scope != governed:
+                defects.add(D.CANONICAL_LOCATION_CITY_MISMATCH)
+            if canonical not in (first, second):
+                defects.add(D.CANONICAL_LOCATION_SCOPE_MISMATCH)
+                if isinstance(cov, LocationCoverageDefinition) and canonical in (cov.expected_locations or ()):
+                    defects.add(D.CANONICAL_LOCATION_IMPERSONATES_STREAM)
+    elif canonical is not None:
+        defects.add(D.CANONICAL_LOCATION_NOT_PERMITTED)
+    return LocationPolicyScope(
+        governed_locations=(first, second), scope_columns=tuple(scope_columns), governed_scope=governed,
+        canonical_location=canonical, canonical_scope=canonical_scope,
+        defects=tuple(d for d in D if d in defects))
 
 
 #: Identity policy for the Vancouver pair in ``COMPARED_LOCATION_STREAMS``.
@@ -1329,7 +1473,9 @@ class LocationIdentityPolicy:
 #: documentation. Behavioural comparison (``LOCATION_STREAM_COMPARISON``) is
 #: diagnostic evidence only. Set CONFIRMED_ALIAS (with a canonical location)
 #: or CONFIRMED_DISTINCT only with ``LocationPolicyAuthority`` naming the
-#: supplier / collection-owner / business decision.
+#: supplier / collection-owner / business decision. Its governed scope is the
+#: one city both keys share; a confirmed alias may canonicalise only to one of
+#: the two governed keys, never to another city or configured stream.
 VANCOUVER_LOCATION_POLICY: Final = LocationIdentityPolicy(
     first=COMPARED_LOCATION_STREAMS[0],
     second=COMPARED_LOCATION_STREAMS[1],

@@ -825,6 +825,44 @@ optional `reference` and `note`); an unresolved policy may not carry one.
 Incomplete or contradictory configuration raises
 `LocationPolicyConfigurationError`. Nothing is derived from data.
 
+**Alias confirmation alone is not sufficient: the canonical key must stay in
+the governed scope.** A policy governs the one city both of its keys share
+(the key components named by the coverage contract's `stream_scope_columns`;
+for `VANCOUVER_LOCATION_POLICY`, Vancouver). Canonicalisation consolidates
+identity inside that scope; it never changes geographic scope. The
+repository declares no other authoritative canonical keys, so a confirmed
+alias may canonicalise only to **one of its two governed keys** - an
+arbitrary well-formed, non-blank tuple is not an authoritative location
+identity. `assess_location_policy_scope` (also `policy.scope`) is the single
+rule and reports typed `LocationPolicyScopeDefect` values:
+
+| Defect | Meaning |
+| --- | --- |
+| `governed_scope_unavailable` | The contract names no scope component in the location key, or a governed key is malformed. |
+| `governed_scope_ambiguous` | The governed keys span more than one city (no single governed city). |
+| `canonical_key_malformed` | The alias's canonical key is missing, of the wrong arity, blank or padded. |
+| `canonical_key_not_permitted` | A non-alias state carries a canonical key. |
+| `canonical_key_crosses_governed_scope` | The canonical key is in another city (Vancouver can never be canonicalised into Calgary). |
+| `canonical_key_names_other_stream` | The canonical key is another configured expected stream. |
+| `canonical_key_not_governed` | The canonical key is not one of the two governed keys. |
+
+A well-formed but out-of-scope policy is still constructed so its declared
+state stays visible for audit, but it is not
+`location_policy_authority_sufficient`: `canonicalization_permitted`,
+`locations_are_aliases` and `locations_comparable_independently` are all
+false, `alias_mapping` is empty and each defect is a `PricingBlocker` of the
+same value (with `alias_canonicalization_not_applied` and any identity
+conflict also reported). `apply_location_policy` re-validates the scope at
+the application boundary - also for policy objects whose construction checks
+were bypassed - and refuses an invalid alias as a whole
+(`canonicalization_refused`, `scope_defects`): every analytical key then
+equals its source key, so no row is moved into another city or stream and
+nothing is partially rewritten. Coverage, stream continuity, the
+three-stream completeness contract and comparisons use source labels (branch
+coverage from the detail rows) and are never computed from canonical keys,
+so a rejected alias neither removes the Vancouver streams nor adds rows to
+Calgary; pricing readiness stays blocked until the policy is corrected.
+
 ```python
 from ql2_sixt_canada_analysis import (
     VANCOUVER_LOCATION_POLICY, apply_location_policy, assess_location_policy, assess_pricing_readiness,
@@ -842,9 +880,12 @@ Derived permissions on `LocationPolicyReport`:
 - `location_policy_resolved` - an authority-backed `CONFIRMED_ALIAS` or
   `CONFIRMED_DISTINCT` decision is configured (recorded, not necessarily
   usable).
-- `location_policy_authority_sufficient` - resolved and not contradicted by
-  authoritative identity metadata in the comparison (a contradiction blocks
-  pricing as `identity_evidence_conflicts_with_policy`; see below).
+- `location_policy_authority_sufficient` - resolved, inside a valid governed
+  scope (above) and not contradicted by authoritative identity metadata in
+  the comparison (a contradiction blocks pricing as
+  `identity_evidence_conflicts_with_policy`; see below).
+- `canonicalization_permitted` - true only for a sufficient, in-scope
+  confirmed alias; never from the state enum alone.
 - `locations_are_aliases` - true only for a sufficient `CONFIRMED_ALIAS`.
   **False is not evidence that the locations are distinct.**
 - `locations_comparable_independently` - true only for a sufficient
@@ -900,7 +941,8 @@ temporal trust, vehicle stability, passed as the full-population
 
 **Still required:** an authoritative statement - from the supplier, the
 collection owner or the business - of whether the two Vancouver labels are
-the same pickup location (with the approved canonical label) or distinct
+the same pickup location (with the approved canonical key - one of the two
+governed Vancouver keys) or distinct
 locations, recorded as `LocationPolicyAuthority`. Until then no Vancouver
 pricing conclusion or airport-versus-downtown comparison involving these
 labels may proceed.

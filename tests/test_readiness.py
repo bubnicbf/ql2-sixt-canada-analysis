@@ -11,7 +11,7 @@ import dataclasses
 
 import pandas as pd
 import pytest
-from test_comparison import COV, DEF, DK, IDDEF, ID_COL, J1, J2, _cars, _jobs, _with_ids, offer, same_both
+from test_comparison import CITY, COV, DEF, DK, IDDEF, ID_COL, J1, J2, _cars, _jobs, _with_ids, offer, same_both
 from test_completeness import complete_inputs
 from test_vehicle_stability import T, V1, V2, frame as stability_frame, obs, two
 
@@ -47,16 +47,22 @@ from ql2_sixt_canada_analysis.schemas import (
     VANCOUVER_LOCATION_POLICY,
     LocationIdentityPolicy,
     LocationPolicyAuthority,
+    LocationCoverageMode,
     LocationPolicyConfigurationError,
+    LocationPolicyScopeDefect,
     LocationPolicyState as PS,
 )
 
-A, B_, C = DEF.first, DEF.second, ("SYNTH-BRANCH-C",)
-LOC = COV.location_columns[0]
-CANONICAL = ("SYNTH-CANONICAL-BRANCH",)
+# Policies govern (city, branch) keys so their scope (the city) is derivable; the
+# branch labels are the comparison fixtures' labels.
+A, B_, C = (CITY, DEF.first[0]), (CITY, DEF.second[0]), ("SYNTH-CITY-2", "SYNTH-BRANCH-C")
+PCOV = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=(A, B_, C),
+                           mode=LocationCoverageMode.MINIMUM_REQUIRED)
+CITY_COL, LOC = PCOV.location_columns
+CANONICAL = A                       # a confirmed alias canonicalises to one of its governed keys
 AUTHORITY = LocationPolicyAuthority(source="SYNTH-AUTHORITY", reference="SYNTH-DECISION-001",
                                     note="Fabricated decision for tests.")
-UNRESOLVED = LocationIdentityPolicy(first=A, second=B_, coverage=COV)
+UNRESOLVED = LocationIdentityPolicy(first=A, second=B_, coverage=PCOV)
 DISTINCT = dataclasses.replace(UNRESOLVED, state=PS.CONFIRMED_DISTINCT, authority=AUTHORITY)
 ALIAS = dataclasses.replace(UNRESOLVED, state=PS.CONFIRMED_ALIAS, authority=AUTHORITY, canonical_location=CANONICAL)
 # Vehicle-stability evidence comes from the real assessment on fabricated vehicles.
@@ -90,10 +96,12 @@ def evidence(status: CS) -> LocationStreamComparisonReport:
 
 
 def frame(labels: list[tuple[str, ...]]) -> pd.DataFrame:
-    return pd.DataFrame({LOC: [k[0] for k in labels], "synth_other": range(len(labels))},
+    return pd.DataFrame({CITY_COL: [k[0] for k in labels], LOC: [k[1] for k in labels],
+                         "synth_other": range(len(labels))},
                         index=[f"SYNTH-ROW-{i}" for i in range(len(labels))])
 
 
+SCOPE_BLOCKERS = {B(d.value) for d in LocationPolicyScopeDefect}
 BEHAVIOURAL = [CS.LIKELY_DUPLICATE_STREAMS, CS.LIKELY_DISTINCT_STREAMS, CS.COMPARISON_INCONCLUSIVE,
                CS.INSUFFICIENT_COMPARABLE_CAPTURES, CS.ONE_STREAM_ABSENT, CS.BOTH_STREAMS_ABSENT]
 
@@ -224,8 +232,8 @@ def test_unresolved_policy_never_merges_labels():
 
 @pytest.mark.parametrize("changes", [
     {"state": PS.CONFIRMED_ALIAS, "authority": AUTHORITY},                          # alias without canonical
-    {"state": PS.CONFIRMED_ALIAS, "authority": AUTHORITY, "canonical_location": ("",)},
-    {"state": PS.CONFIRMED_ALIAS, "authority": AUTHORITY, "canonical_location": ("SYNTH", "EXTRA")},
+    {"state": PS.CONFIRMED_ALIAS, "authority": AUTHORITY, "canonical_location": (CITY, "")},
+    {"state": PS.CONFIRMED_ALIAS, "authority": AUTHORITY, "canonical_location": ("SYNTH", "EXTRA", "ARITY")},
     {"state": PS.CONFIRMED_ALIAS, "canonical_location": CANONICAL},                 # alias without authority
     {"state": PS.CONFIRMED_DISTINCT},                                               # distinct without authority
     {"state": PS.CONFIRMED_DISTINCT, "authority": AUTHORITY, "canonical_location": CANONICAL},  # merges distinct
@@ -235,7 +243,7 @@ def test_unresolved_policy_never_merges_labels():
     {"authority": "SYNTH-AUTHORITY", "state": PS.CONFIRMED_DISTINCT},
     {"second": A},
     {"first": ("SYNTH-NOT-EXPECTED",)},
-    {"coverage": dataclasses.replace(COV, expected_locations=None, mode=None)},
+    {"coverage": dataclasses.replace(PCOV, expected_locations=None, mode=None)},
 ])
 def test_incomplete_or_contradictory_policy_is_rejected(changes):
     with pytest.raises(LocationPolicyConfigurationError):
@@ -274,7 +282,7 @@ RESOLVED = [pytest.param(ALIAS, id="confirmed_alias"), pytest.param(DISTINCT, id
 def mapping_defect_comparison() -> LocationStreamComparisonReport:
     """Real comparison: the first stream carries two different identities (obvious within-stream conflict)."""
     cars = _with_ids(same_both(), "SYNTH-SITE-1", "SYNTH-SITE-2")
-    cars.loc[(cars[COV.location_columns[0]] == A[0]) & (cars[DK] == J2), ID_COL] = "SYNTH-SITE-3"
+    cars.loc[(cars[COV.location_columns[0]] == A[1]) & (cars[DK] == J2), ID_COL] = "SYNTH-SITE-3"
     return compare_location_streams(_jobs(), cars, IDDEF)
 
 
@@ -322,7 +330,7 @@ def test_strict_validator_rejects_resolved_policy_under_mapping_defect(policy):
     assert info.value.report.location_policy.location_policy_authority_sufficient is False
     message = str(info.value)
     assert B.IDENTITY_EVIDENCE_CONFLICT.value in message
-    assert "SYNTH" not in message and A[0] not in message and B_[0] not in message
+    assert "SYNTH" not in message and A[1] not in message and B_[1] not in message
 
 
 def test_alias_mapping_defect_and_missing_canonicalization_are_both_reported():
@@ -345,7 +353,7 @@ def test_mapping_defect_from_the_comparison_api_blocks_resolved_policy(policy):
 
 def test_confirmed_alias_with_compatible_identity_evidence_is_unchanged():
     # Same identity, disjoint events: the real API confirms the alias, which agrees with the policy.
-    cars = _with_ids(_cars([(J1, A[0], offer()), (J2, B_[0], offer("SYNTH-CAR-Y"))]), "SYNTH-SITE-1", "SYNTH-SITE-1")
+    cars = _with_ids(_cars([(J1, A[1], offer()), (J2, B_[1], offer("SYNTH-CAR-Y"))]), "SYNTH-SITE-1", "SYNTH-SITE-1")
     comparison = compare_location_streams(_jobs(), cars, IDDEF)
     assert comparison.status is CS.CONFIRMED_ALIAS
     for evidence_report in (comparison, evidence(CS.LIKELY_DUPLICATE_STREAMS), None):
@@ -455,7 +463,7 @@ def test_all_failures_are_reported_together():
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(),
                                          **(FAILING | {"vehicle_stability": UNSTABLE_AND_PARTIAL,
                                                        "completeness": STREAMS_AND_SCOPE_INCOMPLETE}))
-    assert set(readiness.blocking_reasons) == set(B) - {B.ALIAS_CANONICALIZATION_NOT_APPLIED,
+    assert set(readiness.blocking_reasons) == set(B) - SCOPE_BLOCKERS - {B.ALIAS_CANONICALIZATION_NOT_APPLIED,
                                                         B.IDENTITY_EVIDENCE_CONFLICT,
                                                         B.VEHICLE_STABILITY_UNAVAILABLE,
                                                         B.COMPLETENESS_UNAVAILABLE}

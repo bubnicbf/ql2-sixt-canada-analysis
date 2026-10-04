@@ -84,3 +84,8 @@ identical offers and identical prices do not prove physical identity.
   recorded but is not authority sufficient; neither alias grouping nor
   independent comparison is permitted and pricing stays blocked until the
   source mapping is corrected or authoritatively reconciled.
+- Governed scope (added later): a confirmed alias for the two Vancouver labels
+  may canonicalise only to one of those two Vancouver keys. A canonical key
+  in another city (for example the Calgary stream) or any other arbitrary
+  tuple is rejected with a typed scope defect; no row is rewritten and
+  pricing stays blocked.

@@ -24,6 +24,15 @@ neither permission is granted and pricing is blocked until the source mapping
 is corrected or authoritatively reconciled. Behavioural similarity cannot
 override it.
 
+Governed scope: a policy governs the one city both of its keys share, and a
+confirmed alias may canonicalise only to one of those two governed keys
+(:func:`~ql2_sixt_canada_analysis.schemas.assess_location_policy_scope`).
+Canonicalisation consolidates identity; it never changes geographic scope.
+A well-formed but out-of-scope canonical key (for example a Vancouver alias
+pointing at a Calgary stream) leaves the declared state recorded but makes
+the policy authority-insufficient, withdraws every permission, is never
+applied to data and blocks pricing with a typed scope blocker.
+
 :func:`assess_pricing_readiness` combines the policy with every existing
 foundational gate. Pricing is ready only when *all* pass; each failure is
 reported as a :class:`PricingBlocker`. The location gate never overrides
@@ -58,7 +67,10 @@ from ql2_sixt_canada_analysis.schemas import (
     LocationIdentityPolicy,
     LocationPolicyAuthority,
     LocationPolicyConfigurationError,
+    LocationPolicyScope,
+    LocationPolicyScopeDefect,
     LocationPolicyState,
+    assess_location_policy_scope,
 )
 
 __all__ = [
@@ -93,6 +105,14 @@ class PricingBlocker(StrEnum):
     LOCATION_POLICY_UNRESOLVED = "vancouver_policy_unresolved"
     ALIAS_CANONICALIZATION_NOT_APPLIED = "alias_canonicalization_not_applied"
     IDENTITY_EVIDENCE_CONFLICT = "identity_evidence_conflicts_with_policy"
+    # Governed-scope defects (values equal LocationPolicyScopeDefect values).
+    GOVERNED_SCOPE_UNAVAILABLE = "governed_scope_unavailable"
+    GOVERNED_SCOPE_AMBIGUOUS = "governed_scope_ambiguous"
+    CANONICAL_LOCATION_MALFORMED = "canonical_key_malformed"
+    CANONICAL_LOCATION_NOT_PERMITTED = "canonical_key_not_permitted"
+    CANONICAL_LOCATION_CITY_MISMATCH = "canonical_key_crosses_governed_scope"
+    CANONICAL_LOCATION_IMPERSONATES_STREAM = "canonical_key_names_other_stream"
+    CANONICAL_LOCATION_SCOPE_MISMATCH = "canonical_key_not_governed"
 
 
 #: Authoritative identity evidence that contradicts *every* resolved policy.
@@ -138,13 +158,22 @@ class AnalyticalLocationKeys:
     """Source and analytical location keys for one frame (copies on access).
 
     ``alias_mapping_applied`` is true only when the policy is a confirmed
-    alias and its approved mapping produced ``analytical_keys``.
+    alias with a valid governed scope and its mapping produced
+    ``analytical_keys``. When the scope is invalid, ``scope_defects`` lists
+    why, ``canonicalization_refused`` is true and the analytical keys equal
+    the source keys for **every** row - nothing is partially rewritten.
     """
 
     policy: LocationIdentityPolicy
     alias_mapping_applied: bool
     _source: pd.Series
     _analytical: pd.Series
+    scope_defects: tuple[LocationPolicyScopeDefect, ...] = ()
+
+    @property
+    def canonicalization_refused(self) -> bool:
+        """A confirmed alias was not applied because its governed scope is invalid."""
+        return bool(self.scope_defects) and self.policy.state is LocationPolicyState.CONFIRMED_ALIAS
 
     @property
     def source_keys(self) -> pd.Series:
@@ -173,6 +202,8 @@ class LocationPolicyReport:
     behavioral_evidence: LocationStreamComparisonStatus | None
     identity_evidence_conflict: bool
     canonicalization_applied: bool
+    #: Governed-scope validation of the policy (``None`` = not assessed, which blocks).
+    scope: LocationPolicyScope | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, LocationPolicyState):
@@ -184,6 +215,21 @@ class LocationPolicyReport:
             raise TypeError("identity_evidence_conflict and canonicalization_applied must be bools")
         if self.identity_evidence_conflict != _identity_evidence_conflicts(self.state, self.behavioral_evidence):
             raise ValueError("identity_evidence_conflict disagrees with the recorded identity evidence")
+        if self.scope is not None and not isinstance(self.scope, LocationPolicyScope):
+            raise TypeError("scope must be a LocationPolicyScope or None")
+        if self.canonicalization_applied and not self.scope_valid:
+            raise ValueError("canonicalization cannot be applied under an invalid governed scope")
+
+    @property
+    def scope_valid(self) -> bool:
+        """The governed scope was assessed and has no defect (canonical key inside it)."""
+        return self.scope is not None and self.scope.is_valid
+
+    @property
+    def scope_defects(self) -> tuple[LocationPolicyScopeDefect, ...]:
+        if self.scope is None:
+            return (LocationPolicyScopeDefect.GOVERNED_SCOPE_UNAVAILABLE,)
+        return self.scope.defects
 
     @property
     def location_policy_resolved(self) -> bool:
@@ -207,7 +253,7 @@ class LocationPolicyReport:
         configured alias or distinct decision stays recorded (resolved) but is
         not sufficient for analysis while the defect exists.
         """
-        return self.location_policy_resolved and not self.identity_evidence_conflict
+        return self.location_policy_resolved and not self.identity_evidence_conflict and self.scope_valid
 
     @property
     def locations_are_aliases(self) -> bool:
@@ -220,6 +266,11 @@ class LocationPolicyReport:
         return self.location_policy_authority_sufficient and self.state is LocationPolicyState.CONFIRMED_DISTINCT
 
     @property
+    def canonicalization_permitted(self) -> bool:
+        """Alias canonicalisation may be used (a sufficient, in-scope confirmed alias only)."""
+        return self.locations_are_aliases
+
+    @property
     def canonicalization_required(self) -> bool:
         return self.state is LocationPolicyState.CONFIRMED_ALIAS
 
@@ -230,6 +281,7 @@ class LocationPolicyReport:
             reasons.append(PricingBlocker.LOCATION_POLICY_UNRESOLVED)
         if self.identity_evidence_conflict:
             reasons.append(PricingBlocker.IDENTITY_EVIDENCE_CONFLICT)
+        reasons.extend(PricingBlocker(d.value) for d in self.scope_defects)
         if self.canonicalization_required and not self.canonicalization_applied:
             reasons.append(PricingBlocker.ALIAS_CANONICALIZATION_NOT_APPLIED)
         return tuple(reasons)
@@ -269,11 +321,23 @@ def apply_location_policy(
 
     Only a confirmed alias changes keys, and only through its approved
     mapping; unresolved and distinct policies leave keys as observed.
+
+    The governed scope is re-validated here, at the application boundary
+    (:func:`~ql2_sixt_canada_analysis.schemas.assess_location_policy_scope`),
+    so a policy whose construction checks were bypassed cannot move rows into
+    another city or stream: an invalid confirmed alias is refused as a whole
+    (``canonicalization_refused``, typed ``scope_defects``) and every
+    analytical key equals its source key. The mapping is built here from the
+    validated fields, never taken from the policy object.
     """
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("frame must be a pandas DataFrame")
     if not isinstance(policy, LocationIdentityPolicy):
         raise TypeError("policy must be a LocationIdentityPolicy")
+    if not isinstance(policy.coverage, LocationCoverageDefinition) or not policy.coverage.is_configured:
+        raise LocationPolicyConfigurationError("the policy has no configured expected-location contract")
+    scope = assess_location_policy_scope(policy)
+    alias = policy.state is LocationPolicyState.CONFIRMED_ALIAS
     columns = list(policy.coverage.location_columns)
     absent = [c for c in columns if c not in frame.columns]
     if absent:
@@ -281,10 +345,12 @@ def apply_location_policy(
     values = frame.loc[:, columns].astype(object)
     values = values.where(values.notna(), None)
     source = pd.Series(list(map(tuple, values.itertuples(index=False))), index=frame.index, dtype=object)
-    mapping = policy.alias_mapping
+    mapping = ({policy.first: policy.canonical_location, policy.second: policy.canonical_location}
+               if alias and scope.is_valid else {})
     analytical = source.map(lambda key: mapping.get(key, key)) if mapping else source.copy()
     return AnalyticalLocationKeys(policy=policy, alias_mapping_applied=bool(mapping),
-                                  _source=source, _analytical=analytical.astype(object))
+                                  _source=source, _analytical=analytical.astype(object),
+                                  scope_defects=scope.defects)
 
 
 def assess_location_policy(
@@ -309,6 +375,11 @@ def assess_location_policy(
     An ``UNRESOLVED`` policy reports no conflict (there is no decision to
     contradict) and is blocked as unresolved; the evidence stays recorded.
     Applied canonicalisation is recorded but never outweighs a conflict.
+
+    The governed scope is validated on every call (``scope``); any
+    :class:`~ql2_sixt_canada_analysis.schemas.LocationPolicyScopeDefect`
+    makes the policy authority-insufficient and is a pricing blocker of the
+    same name, alongside every other applicable blocker.
     """
     if not isinstance(policy, LocationIdentityPolicy):
         raise TypeError("policy must be a LocationIdentityPolicy")
@@ -318,10 +389,11 @@ def assess_location_policy(
         raise TypeError("analytical_keys must be AnalyticalLocationKeys or None")
     evidence = comparison.status if comparison is not None else None
     conflict = _identity_evidence_conflicts(policy.state, evidence)
-    applied = (analytical_keys is not None and analytical_keys.policy == policy
+    scope = assess_location_policy_scope(policy)
+    applied = (scope.is_valid and analytical_keys is not None and analytical_keys.policy == policy
                and analytical_keys.alias_mapping_applied)
     return LocationPolicyReport(state=policy.state, authority=policy.authority, behavioral_evidence=evidence,
-                                identity_evidence_conflict=conflict, canonicalization_applied=applied)
+                                identity_evidence_conflict=conflict, canonicalization_applied=applied, scope=scope)
 
 
 def assess_pricing_readiness(

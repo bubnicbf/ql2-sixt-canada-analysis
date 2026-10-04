@@ -864,7 +864,8 @@ def test_ingestion_notebook_gates_pricing_on_the_vancouver_policy() -> None:
     assert order == sorted(order)
     cell = sources[order[-1]]
     for name in ("vancouver_location_policy_state", "vancouver_location_policy_resolved",
-                 "vancouver_location_policy_authority_sufficient", "vancouver_locations_are_aliases", "vancouver_locations_comparable_independently",
+                 "vancouver_location_policy_authority_sufficient", "vancouver_locations_are_aliases",
+                 "vancouver_policy_scope", "vancouver_policy_scope_valid", "vancouver_canonicalization_permitted", "vancouver_locations_comparable_independently",
                  "pricing_readiness", "pricing_analysis_ready"):
         assert re.search(rf"^{name}\s*=", cell, re.M), name
     # The single-stream health and separate completeness booleans no longer gate pricing:
@@ -896,6 +897,9 @@ def test_ingestion_notebook_reports_unresolved_policy_and_blocked_pricing(
     lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
     assert lines["Vancouver identity policy state"].strip() == "unresolved"
     assert lines["Policy authority-backed and resolved"].strip() == "False"
+    assert lines["Canonical scope validation passed"].strip() == "True"
+    assert lines["Supplied canonical key"].strip() == "none"
+    assert lines["Canonicalization permitted"].strip() == "False"
     assert lines["Identity evidence conflicts with policy"].strip() == "False"
     assert lines["Policy authority sufficient for analysis"].strip() == "False"
     assert lines["Vancouver labels confirmed aliases"].strip() == "False"
@@ -923,6 +927,52 @@ package.VANCOUVER_LOCATION_POLICY = dataclasses.replace(
 package.LOCATION_STREAM_COMPARISON = dataclasses.replace(
     package.LOCATION_STREAM_COMPARISON, identity_columns=({identity!r},))
 """
+
+
+_SCOPE_OVERRIDE = """\
+# Test-only kernel configuration (synthetic authority, never a real decision):
+# a confirmed alias for the governed Vancouver keys whose canonical key is another city's stream.
+import dataclasses
+
+import ql2_sixt_canada_analysis as package
+from ql2_sixt_canada_analysis.schemas import LocationPolicyAuthority, LocationPolicyState
+
+package.VANCOUVER_LOCATION_POLICY = dataclasses.replace(
+    package.VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.CONFIRMED_ALIAS,
+    authority=LocationPolicyAuthority(source="SYNTH-AUTHORITY"), canonical_location={canonical!r})
+"""
+
+
+def test_ingestion_notebook_blocks_alias_canonicalised_into_another_city(
+    synthetic_raw_dir: Path, tmp_path: Path
+) -> None:
+    # Regression: a confirmed Vancouver alias with the Calgary stream as canonical key was
+    # authority-sufficient and its mapping rewrote both Vancouver labels to Calgary.
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(
+        _SCOPE_OVERRIDE.format(canonical=INVESTIGATED_LOCATION_STREAM), encoding="utf-8")
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    pythonpath = os.pathsep.join(p for p in (str(site), os.environ.get("PYTHONPATH", "")) if p)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir), "PYTHONPATH": pythonpath})
+    outputs = _step_output(result, "assess_pricing_readiness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Vancouver identity policy state"].strip() == "confirmed_alias"   # recorded for audit
+    assert lines["Policy authority-backed and resolved"].strip() == "True"
+    assert lines["Canonical scope validation passed"].strip() == "False"
+    assert lines["Supplied canonical key"].strip() == " / ".join(INVESTIGATED_LOCATION_STREAM)
+    assert "canonical_key_crosses_governed_scope" in lines["Policy scope blocked by"]
+    assert lines["Policy authority sufficient for analysis"].strip() == "False"
+    assert lines["Canonicalization permitted"].strip() == "False"
+    assert lines["Vancouver labels confirmed aliases"].strip() == "False"
+    assert lines["Canonicalization required"].strip() == "True | applied: False"
+    assert lines["Pricing analysis ready"].strip() == "False"
+    assert PricingBlocker.CANONICAL_LOCATION_CITY_MISMATCH.value in lines["Pricing blocked by"]
+    assert "SYNTH" not in outputs and list(workdir.iterdir()) == []
 
 
 @pytest.mark.parametrize("state", ["confirmed_alias", "confirmed_distinct"])
@@ -957,7 +1007,7 @@ def test_ingestion_notebook_blocks_resolved_policy_on_mapping_defect(state: str,
     site = tmp_path / "site"
     site.mkdir()
     (site / "sitecustomize.py").write_text(_POLICY_OVERRIDE.format(
-        state=state, canonical=(city, "SYNTH-CANONICAL-BRANCH"), identity=ID_COL), encoding="utf-8")
+        state=state, canonical=(city, first), identity=ID_COL), encoding="utf-8")
     workdir = tmp_path / "kernel"
     workdir.mkdir()
     pythonpath = os.pathsep.join(p for p in (str(site), os.environ.get("PYTHONPATH", "")) if p)
@@ -977,7 +1027,9 @@ def test_ingestion_notebook_blocks_resolved_policy_on_mapping_defect(state: str,
     blocked = lines["Pricing blocked by"]
     assert PricingBlocker.IDENTITY_EVIDENCE_CONFLICT.value in blocked
     assert PricingBlocker.LOCATION_POLICY_UNRESOLVED.value not in blocked
-    shown = comparison + outputs
+    # Governed keys / canonical key are repository configuration and are shown on their own lines.
+    shown = comparison + "\n".join(line for line in outputs.splitlines()
+                                   if not line.startswith(("Governed", "Supplied canonical")))
     assert "SYNTH" not in shown and first not in shown and second not in shown and city not in shown
     assert list(workdir.iterdir()) == []
 
@@ -1156,7 +1208,7 @@ def test_ingestion_notebook_blocks_on_city_integrity_defects(defect: str, tmp_pa
     assert "Pricing analysis ready: False" in pricing
     assert PricingBlocker.SCOPE_INTEGRITY_NOT_PROVEN.value in pricing
     shown = integrity + join + complete + pricing
-    assert "SYNTH" not in shown and not any(v in shown for v in (label1, label2, label3))
+    assert "SYNTH" not in shown and label1 not in shown          # the governed Vancouver keys are configuration
     assert list(workdir.iterdir()) == []
 
 
