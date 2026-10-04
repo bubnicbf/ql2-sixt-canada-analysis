@@ -27,7 +27,12 @@ from ql2_sixt_canada_analysis.notebook_validation import (
     execute_notebook_copy,
     read_notebook,
 )
-from ql2_sixt_canada_analysis.schemas import DATASET_DEFINITIONS, JOB_DETAIL_RELATIONSHIP, DatasetKey
+from ql2_sixt_canada_analysis.schemas import (
+    DATASET_DEFINITIONS,
+    EXPECTED_LOCATION_COVERAGE,
+    JOB_DETAIL_RELATIONSHIP,
+    DatasetKey,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOKS_DIR = PROJECT_ROOT / "notebooks"
@@ -430,6 +435,47 @@ def test_ingestion_notebook_relationship_step_runs_on_synthetic_inputs(tmp_path:
         assert "One-to-many relationship validation step completed." in outputs
         assert "SYNTH" not in outputs and not re.search(r"\b[0-9]+\b", outputs)
         assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ---------------------------------------------------- expected location coverage
+
+
+def test_ingestion_notebook_checks_coverage_on_cleaned_jobs_before_join() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("assess_expected_location_coverage", "EXPECTED_LOCATION_COVERAGE"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    keys = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
+    cover = next(i for i, s in enumerate(sources) if "assess_expected_location_coverage(" in s)
+    reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
+    join = next(i for i, s in enumerate(sources) if "join_jobs_to_details(" in s)
+    assert keys < cover < reconcile < join
+    assert re.search(r"location_coverage_report\s*=\s*assess_expected_location_coverage\(\s*jobs_df\s*,"
+                     r"\s*EXPECTED_LOCATION_COVERAGE\s*\)", sources[cover])
+    assert "validate_expected_location_coverage" not in code
+    # No location literals, column names or own distinct/set logic.
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    assert not any(re.search(rf"\b{re.escape(c)}\b", text) for c in EXPECTED_LOCATION_COVERAGE.location_columns)
+    for pattern in (r"\.unique\(", r"\.nunique\(", r"\.drop_duplicates\(", r"\bset\(", r"\.difference\(",
+                    r"\.isin\(", r"expected_locations", r"location_columns", r"\.str\.strip"):
+        assert not re.search(pattern, code), f"notebook reimplements coverage: {pattern}"
+    assert not re.search(r"print\([^\n]*(location_coverage_report|_ratio|_count\b|_passed)", code)
+
+
+def test_ingestion_notebook_coverage_step_fails_closed_on_synthetic_inputs(
+    synthetic_raw_dir: Path, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "Expected-coverage step completed." in outputs
+    assert "synthetic_r" not in outputs and not re.search(r"\b[0-9]+\b", outputs)
+    assert not re.search(r"\b(True|False|None|missing|unexpected|configured)\b", outputs, re.I)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 
 
 # ----------------------------------------------------------------- execution

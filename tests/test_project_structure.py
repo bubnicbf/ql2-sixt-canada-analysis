@@ -187,6 +187,11 @@ QUALITY_OUTPUT_PATHS = [
     "reports/synthetic_relationship_report.json",
     "synthetic_cardinality_diagnostics.txt",
     "notebooks/synthetic_joined_preview.md",
+    "reports/synthetic_coverage_report.json",
+    "synthetic_missing_locations.txt",
+    "notebooks/synthetic_unexpected_locations.md",
+    "synthetic_location_profile.html",
+    f"{INTERIM}/synthetic_observed_locations.csv",
 ]
 
 
@@ -203,7 +208,8 @@ def test_quality_outputs_and_tooling_artifacts_are_ignored(relative_path: str) -
      "tests/test_removed_rows_synthetic.py", "docs/quality_notes.md",
      f"src/{PACKAGE_NAME}/unique_keys.py", "tests/test_unique_keys.py", "tests/test_missing_key_rows.py",
      f"src/{PACKAGE_NAME}/reconciliation.py", "tests/test_reconciliation.py", "tests/test_orphan_details.py",
-     f"src/{PACKAGE_NAME}/relationships.py", "tests/test_relationships.py", "tests/test_joined_rows.py"],
+     f"src/{PACKAGE_NAME}/relationships.py", "tests/test_relationships.py", "tests/test_joined_rows.py",
+     f"src/{PACKAGE_NAME}/coverage.py", "tests/test_coverage.py", "tests/test_missing_locations.py"],
 )
 def test_quality_source_tests_and_docs_are_not_ignored(relative_path: str) -> None:
     assert not _git_is_ignored(relative_path)

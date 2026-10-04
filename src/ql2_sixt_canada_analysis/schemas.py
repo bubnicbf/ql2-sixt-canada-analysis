@@ -42,6 +42,16 @@ parent column that declares how many detail rows the job should have.
 against the detail rows actually present, and
 :mod:`ql2_sixt_canada_analysis.relationships` validates the one-to-many
 cardinality (jobs = one side, cars = many side) before any join is trusted.
+
+Expected location coverage
+--------------------------
+:data:`EXPECTED_LOCATION_COVERAGE` is the single contract of which locations
+the collection is *supposed* to cover. Expected locations must come from an
+independent authority (a schedule, assignment or documented market scope),
+never from the extract being validated - a list derived from observed rows
+would always pass. Until such an authority is supplied the contract is
+declared but *unconfigured*, and coverage assessment fails closed with
+:class:`LocationCoverageConfigurationError`.
 """
 
 from __future__ import annotations
@@ -62,7 +72,11 @@ __all__ = [
     "JOBS_DEFINITION",
     "JOB_DETAIL_RELATIONSHIP",
     "JobDetailRelationshipDefinition",
+    "EXPECTED_LOCATION_COVERAGE",
     "KeyConfigurationError",
+    "LocationCoverageConfigurationError",
+    "LocationCoverageDefinition",
+    "LocationCoverageMode",
     "RelationshipConfigurationError",
     "SHARED_IDENTIFIER_COLUMNS",
     "DatasetDefinition",
@@ -102,6 +116,34 @@ class RelationshipConfigurationError(ValueError):
     def __init__(self, message: str, columns: tuple[str, ...] = ()) -> None:
         super().__init__(message)
         self.columns = tuple(columns)
+
+
+class LocationCoverageConfigurationError(ValueError):
+    """The expected-location contract is missing, invalid or cannot be applied.
+
+    Distinct from coverage violations in the data (see
+    :class:`ql2_sixt_canada_analysis.coverage.LocationCoverageError`). Messages
+    never contain location values; offending column names are on ``columns``.
+    """
+
+    def __init__(self, message: str, columns: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.columns = tuple(columns)
+
+
+class LocationCoverageMode(StrEnum):
+    """How unexpected observed locations are treated.
+
+    * ``EXHAUSTIVE`` - the expected set is the complete universe: every
+      expected location must appear and any other observed location fails.
+    * ``MINIMUM_REQUIRED`` - the expected set is a required minimum: every
+      expected location must appear; extra locations are reported only.
+
+    In both modes jobs with a missing location assignment fail the contract.
+    """
+
+    EXHAUSTIVE = "exhaustive"
+    MINIMUM_REQUIRED = "minimum_required"
 
 
 class DatasetKey(StrEnum):
@@ -380,6 +422,101 @@ JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
     parent_key_columns=('job_id',),
     detail_key_columns=('job_id',),
     expected_detail_count_column='record_count',
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LocationCoverageDefinition:
+    """Immutable expected-location contract for one dataset.
+
+    Attributes:
+        dataset: Logical dataset whose rows carry the scheduled location.
+        location_columns: Ordered source columns forming one location key.
+        expected_locations: Authoritative expected location keys, each a tuple
+            with one component per location column, or ``None`` when no
+            authoritative list has been supplied (the contract is then
+            unconfigured and assessment fails closed). Never derived from data.
+        mode: :class:`LocationCoverageMode`, or ``None`` while unconfigured.
+            Expected locations and mode are configured together.
+        definitions: Registry the columns are validated against (the project
+            registry by default; tests may pass a synthetic one).
+
+    Comparison policy: **exact**. Components are compared as given -
+    case-sensitive, no stripping, punctuation, alias, abbreviation or fuzzy
+    handling - and composite keys are compared as tuples, never as
+    concatenated strings. A missing, empty or whitespace-only observed
+    component makes that row an *unassigned* location; source values are
+    never modified.
+    """
+
+    dataset: DatasetKey
+    location_columns: tuple[str, ...]
+    expected_locations: tuple[tuple[str, ...], ...] | None = None
+    mode: LocationCoverageMode | None = None
+    definitions: Mapping[DatasetKey, DatasetDefinition] = dataclass_field(
+        default=None, compare=False, repr=False  # type: ignore[arg-type]
+    )
+
+    def __post_init__(self) -> None:
+        if self.definitions is None:
+            object.__setattr__(self, "definitions", DATASET_DEFINITIONS)
+        if self.dataset not in self.definitions:
+            raise LocationCoverageConfigurationError("coverage dataset must be registered")
+        columns = self.location_columns
+        if not isinstance(columns, tuple) or not columns:
+            raise LocationCoverageConfigurationError("location_columns must be a non-empty tuple")
+        if not all(isinstance(c, str) and c for c in columns) or len(set(columns)) != len(columns):
+            raise LocationCoverageConfigurationError("location_columns must be unique non-empty strings")
+        unknown = tuple(c for c in columns if c not in self.source_definition.columns)
+        if unknown:
+            raise LocationCoverageConfigurationError(
+                f"{len(unknown)} location column(s) are not in the '{self.dataset}' contract", unknown
+            )
+        if (self.expected_locations is None) != (self.mode is None):
+            raise LocationCoverageConfigurationError(
+                "expected_locations and mode must be configured together"
+            )
+        if self.expected_locations is None:
+            return
+        if not isinstance(self.mode, LocationCoverageMode):
+            raise LocationCoverageConfigurationError("mode must be a LocationCoverageMode")
+        expected = self.expected_locations
+        if not isinstance(expected, tuple) or not expected:
+            raise LocationCoverageConfigurationError("expected_locations must be a non-empty tuple")
+        for key in expected:
+            if not isinstance(key, tuple) or len(key) != len(columns):
+                raise LocationCoverageConfigurationError(
+                    "each expected location must be a tuple with one component per location column"
+                )
+            if not all(isinstance(v, str) and v.strip() for v in key):
+                raise LocationCoverageConfigurationError(
+                    "expected location components must be non-missing, non-blank strings"
+                )
+        if len(set(expected)) != len(expected):
+            raise LocationCoverageConfigurationError("expected_locations must not contain duplicates")
+
+    @property
+    def is_configured(self) -> bool:
+        """True once an authoritative expected set and mode are supplied."""
+        return self.expected_locations is not None
+
+    @property
+    def source_definition(self) -> DatasetDefinition:
+        return self.definitions[self.dataset]
+
+
+#: The jobs location contract. Each jobs row is one collection job for one
+#: market; its scheduled location is the single ``city`` field (jobs carry no
+#: branch-level field, so the key has one component). No authoritative
+#: expected-location list, schedule or market scope exists in the repository
+#: or project documentation, so expected locations and mode are deliberately
+#: left unconfigured: coverage assessment fails closed until an owner supplies
+#: the authoritative list (``expected_locations``, one 1-tuple per city, exact
+#: source spelling) and states whether it is EXHAUSTIVE or MINIMUM_REQUIRED.
+#: Never fill it from the observed extract.
+EXPECTED_LOCATION_COVERAGE: Final = LocationCoverageDefinition(
+    dataset=DatasetKey.JOBS,
+    location_columns=('city',),
 )
 
 

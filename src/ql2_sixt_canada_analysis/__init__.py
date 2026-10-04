@@ -1,5 +1,11 @@
 """Reusable analysis and data-quality code for the QL2 Sixt Canada rate feed."""
 
+from ql2_sixt_canada_analysis.coverage import (
+    LocationCoverageError,
+    LocationCoverageReport,
+    assess_expected_location_coverage,
+    validate_expected_location_coverage,
+)
 from ql2_sixt_canada_analysis.identifiers import (
     IdentifierDtypeError,
     IdentifierTypeConflictError,
@@ -40,6 +46,7 @@ from ql2_sixt_canada_analysis.relationships import (
 )
 from ql2_sixt_canada_analysis.schemas import (
     DATASET_DEFINITIONS,
+    EXPECTED_LOCATION_COVERAGE,
     IDENTIFIER_DTYPE,
     JOB_DETAIL_RELATIONSHIP,
     SHARED_IDENTIFIER_COLUMNS,
@@ -47,6 +54,9 @@ from ql2_sixt_canada_analysis.schemas import (
     DatasetKey,
     JobDetailRelationshipDefinition,
     KeyConfigurationError,
+    LocationCoverageConfigurationError,
+    LocationCoverageDefinition,
+    LocationCoverageMode,
     RelationshipConfigurationError,
     get_dataset_definition,
 )
@@ -65,6 +75,7 @@ __all__ = [
     "BlankRowResult",
     "DatasetDefinition",
     "DatasetKey",
+    "EXPECTED_LOCATION_COVERAGE",
     "IDENTIFIER_DTYPE",
     "IdentifierDtypeError",
     "IdentifierTypeConflictError",
@@ -73,6 +84,11 @@ __all__ = [
     "JobDetailReconciliationReport",
     "JobDetailRelationshipDefinition",
     "KeyConfigurationError",
+    "LocationCoverageConfigurationError",
+    "LocationCoverageDefinition",
+    "LocationCoverageError",
+    "LocationCoverageMode",
+    "LocationCoverageReport",
     "OneToManyJoinReport",
     "OneToManyRelationshipError",
     "MissingIdentifierColumnError",
@@ -88,6 +104,7 @@ __all__ = [
     "UniqueKeyViolationError",
     "ValidatedJoinError",
     "ValidatedJoinResult",
+    "assess_expected_location_coverage",
     "assess_job_detail_reconciliation",
     "assess_one_to_many_join",
     "assess_raw_dataset_unique_keys",
@@ -101,6 +118,7 @@ __all__ = [
     "remove_blank_rows_from_raw_datasets",
     "remove_completely_blank_rows",
     "validate_identifier_dtypes",
+    "validate_expected_location_coverage",
     "validate_job_detail_reconciliation",
     "validate_one_to_many_join",
     "validate_raw_dataset_identifier_dtypes",

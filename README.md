@@ -257,6 +257,47 @@ validate_raw_dataset_unique_keys(cleaned)               # raises on violations
   extracts and key reports derived from the proprietary data must never be
   committed.
 
+## Expected location coverage
+
+`ql2_sixt_canada_analysis.schemas.EXPECTED_LOCATION_COVERAGE` is the single
+expected-location contract for jobs: the location column(s), an immutable
+tuple of expected location keys (one component per column) and a mode.
+Expected locations must come from an **independent authority** (a schedule,
+assignment or documented market scope) and are never derived from the
+extract being validated - a list built from observed rows would always pass.
+No such authority exists in the repository yet, so the contract is declared
+but **unconfigured** and assessment **fails closed** with
+`LocationCoverageConfigurationError`. To enable it, the data owner supplies
+`expected_locations` (exact source spelling) and the mode in `schemas.py`.
+
+```python
+from ql2_sixt_canada_analysis import assess_expected_location_coverage, validate_expected_location_coverage
+
+report = assess_expected_location_coverage(jobs_df)    # aggregate report, in memory
+report.coverage_ratio, report.is_valid, report.violations
+validate_expected_location_coverage(jobs_df)           # raises LocationCoverageError
+```
+
+- **Distinct coverage:** an expected location is covered when at least one
+  cleaned job has its exact key; repeated jobs at one location never
+  compensate for another missing location.
+- **Separate signals:** missing expected locations, unexpected observed
+  locations and jobs with a missing / empty / whitespace-only location
+  component are counted separately; unassigned jobs create no observed key.
+- **Modes:** `EXHAUSTIVE` fails on any unexpected location;
+  `MINIMUM_REQUIRED` only reports them. Both fail on missing expected
+  locations and on unassigned jobs. The mode must be stated by the authority.
+- **Exact comparison:** case-sensitive, no stripping, punctuation, alias,
+  abbreviation or fuzzy handling; composite keys are compared as tuples,
+  never concatenated. Source values are never modified.
+- **Assessment vs strict validation:** assessment returns a frozen report of
+  counts, a ratio and booleans (no location values or lists) and raises only
+  configuration errors; strict validation raises `LocationCoverageError`
+  listing violation categories only.
+- Coverage runs on cleaned jobs, before the one-to-many join, and never
+  removes or alters rows. Tests use fabricated locations. Real location lists
+  and coverage reports must not be committed.
+
 ## Job-to-detail count reconciliation
 
 The jobs-to-cars relationship is defined once in

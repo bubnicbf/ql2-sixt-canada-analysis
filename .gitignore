@@ -127,6 +127,28 @@ data/processed/*
 *key_profile*.txt
 *key_profile*.html
 *key_profile*.md
+# Location coverage outputs: coverage reports, location profiles and
+# missing / unexpected location extracts.
+*coverage_report*.json
+*coverage_report*.txt
+*coverage_report*.html
+*coverage_report*.md
+*location_profile*.json
+*location_profile*.txt
+*location_profile*.html
+*location_profile*.md
+*missing_location*.json
+*missing_location*.txt
+*missing_location*.html
+*missing_location*.md
+*unexpected_location*.json
+*unexpected_location*.txt
+*unexpected_location*.html
+*unexpected_location*.md
+*observed_location*.json
+*observed_location*.txt
+*observed_location*.html
+*observed_location*.md
 # Job/detail reconciliation and one-to-many join outputs: mismatch, orphan
 # and missing-link extracts, reconciliation/relationship reports, cardinality
 # diagnostics and joined datasets.
