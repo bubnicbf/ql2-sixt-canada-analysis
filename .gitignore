@@ -127,6 +127,28 @@ data/processed/*
 *key_profile*.txt
 *key_profile*.html
 *key_profile*.md
+# Job/detail reconciliation outputs: mismatch, orphan and missing-link
+# extracts and reconciliation reports.
+*reconciliation_report*.json
+*reconciliation_report*.txt
+*reconciliation_report*.html
+*reconciliation_report*.md
+*mismatch*.json
+*mismatch*.txt
+*mismatch*.html
+*mismatch*.md
+*orphan*.json
+*orphan*.txt
+*orphan*.html
+*orphan*.md
+*missing_link*.json
+*missing_link*.txt
+*missing_link*.html
+*missing_link*.md
+*unlinked*.json
+*unlinked*.txt
+*unlinked*.html
+*unlinked*.md
 
 # --- Generated reports and figures ---
 # Ignored by default; use `git add -f` to deliberately publish a final report.

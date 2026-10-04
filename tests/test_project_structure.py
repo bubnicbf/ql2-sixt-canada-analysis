@@ -178,6 +178,11 @@ QUALITY_OUTPUT_PATHS = [
     "synthetic_missing_key_rows.txt",
     "notebooks/synthetic_duplicate_key_extract.json",
     "synthetic_key_profile.md",
+    "reports/synthetic_reconciliation_report.json",
+    "synthetic_mismatch_jobs.txt",
+    "notebooks/synthetic_orphan_details.json",
+    "synthetic_missing_link_rows.md",
+    f"{PROCESSED}/synthetic_orphans.parquet",
 ]
 
 
@@ -192,7 +197,8 @@ def test_quality_outputs_and_tooling_artifacts_are_ignored(relative_path: str) -
     "relative_path",
     [f"src/{PACKAGE_NAME}/quality.py", "tests/test_quality.py", "notebooks/01_data_ingestion.ipynb",
      "tests/test_removed_rows_synthetic.py", "docs/quality_notes.md",
-     f"src/{PACKAGE_NAME}/unique_keys.py", "tests/test_unique_keys.py", "tests/test_missing_key_rows.py"],
+     f"src/{PACKAGE_NAME}/unique_keys.py", "tests/test_unique_keys.py", "tests/test_missing_key_rows.py",
+     f"src/{PACKAGE_NAME}/reconciliation.py", "tests/test_reconciliation.py", "tests/test_orphan_details.py"],
 )
 def test_quality_source_tests_and_docs_are_not_ignored(relative_path: str) -> None:
     assert not _git_is_ignored(relative_path)

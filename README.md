@@ -257,6 +257,54 @@ validate_raw_dataset_unique_keys(cleaned)               # raises on violations
   extracts and key reports derived from the proprietary data must never be
   committed.
 
+## Job-to-detail count reconciliation
+
+The jobs-to-cars relationship is defined once in
+`ql2_sixt_canada_analysis.schemas` (`JOB_DETAIL_RELATIONSHIP`: parent key =
+the jobs unique key, the matching detail foreign key, and the jobs column that
+declares how many detail rows each job should have). Field names live in the
+source code only.
+
+```python
+from ql2_sixt_canada_analysis import assess_job_detail_reconciliation, validate_job_detail_reconciliation
+
+report = assess_job_detail_reconciliation(jobs_df, cars_df)   # aggregate report, in memory
+report.is_reconciled, report.violations
+validate_job_detail_reconciliation(jobs_df, cars_df)          # raises JobDetailReconciliationError
+```
+
+- **Per job, not global.** For every job, *expected* is the job's declared
+  count and *observed* is the number of cleaned detail rows whose complete
+  key matches it (zero when none do). Matched, under-counted and over-counted
+  jobs are counted separately, with net and absolute discrepancy; equal
+  global totals cannot produce a pass when per-job errors offset.
+- **Detail rows** are linked, *missing link* (a relationship key component is
+  missing) or *orphan* (complete key matching no job), each counted
+  separately, plus the number of distinct orphan keys. Every row present is
+  counted, duplicates included.
+- **Expected counts are not repaired.** Missing (including empty text),
+  non-numeric (including booleans), non-finite, fractional and negative
+  counts are categorised and make the contract fail; they are never filled,
+  rounded, clamped or dropped. Whole-valued floats and numeric strings for
+  non-negative whole numbers are interpreted in a temporary array only.
+- **Preconditions** raise `ReconciliationPreconditionError`: relationship
+  keys must use the identifier dtype, the jobs key must be complete and
+  unique (duplicate jobs are never collapsed), and completely blank rows
+  must already be removed. Absent columns raise
+  `RelationshipConfigurationError`.
+- **Assessment vs strict validation:** assessment returns a frozen report of
+  aggregate integers (no identifiers, keys or rows) and does not fail on
+  ordinary mismatches; strict validation raises
+  `JobDetailReconciliationError` listing violation categories only.
+- **Nothing is changed:** no rows are removed, deduplicated or altered, and
+  nothing is written.
+- **Empty data:** empty jobs and empty details are vacuously reconciled
+  (presence/volume is a separate control); empty jobs with any detail rows
+  fail; jobs without detail rows pass only if every expected count is a
+  valid zero.
+- Tests use fabricated identifiers and counts. Real reconciliation reports,
+  mismatch, orphan or missing-link extracts must never be committed.
+
 ## Notebooks
 
 Notebooks live in `notebooks/` and run in numeric-prefix order, top to bottom

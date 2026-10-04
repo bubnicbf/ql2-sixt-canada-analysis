@@ -31,12 +31,22 @@ measures both without changing data. Components should be identifier columns;
 any other component is listed by ``non_identifier_key_columns`` and must be
 justified next to the definition. Keys are chosen from the grain's semantics,
 never from whatever happens to be unique in one extract.
+
+Job-to-detail relationship
+--------------------------
+:data:`JOB_DETAIL_RELATIONSHIP` is the single definition of how detail rows
+(``cars``) belong to a parent job (``jobs``): the parent key (the jobs unique
+key), the matching detail foreign-key components in the same order, and the
+parent column that declares how many detail rows the job should have.
+:mod:`ql2_sixt_canada_analysis.reconciliation` reconciles that declaration
+against the detail rows actually present.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
@@ -48,7 +58,10 @@ __all__ = [
     "DATASET_DEFINITIONS",
     "IDENTIFIER_DTYPE",
     "JOBS_DEFINITION",
+    "JOB_DETAIL_RELATIONSHIP",
+    "JobDetailRelationshipDefinition",
     "KeyConfigurationError",
+    "RelationshipConfigurationError",
     "SHARED_IDENTIFIER_COLUMNS",
     "DatasetDefinition",
     "DatasetKey",
@@ -74,6 +87,18 @@ class KeyConfigurationError(ValueError):
     def __init__(self, message: str, key: object = None, columns: tuple[str, ...] = ()) -> None:
         super().__init__(message)
         self.role = key
+        self.columns = tuple(columns)
+
+
+class RelationshipConfigurationError(ValueError):
+    """A job-to-detail relationship definition is invalid or cannot be applied.
+
+    Messages carry dataset keys and counts only; column names are on
+    ``columns``.
+    """
+
+    def __init__(self, message: str, columns: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
         self.columns = tuple(columns)
 
 
@@ -246,6 +271,105 @@ DATASET_DEFINITIONS: Final[Mapping[DatasetKey, DatasetDefinition]] = MappingProx
 SHARED_IDENTIFIER_COLUMNS: Final[tuple[str, ...]] = tuple(
     column for column in JOBS_DEFINITION.identifier_columns
     if column in CARS_DEFINITION.identifier_columns
+)
+
+
+@dataclass(frozen=True, slots=True)
+class JobDetailRelationshipDefinition:
+    """Immutable parent-to-detail relationship used for count reconciliation.
+
+    Attributes:
+        parent: Logical dataset holding one row per parent (job).
+        detail: Logical dataset holding the detail rows.
+        parent_key_columns: Parent key components; must equal the parent's
+            ``unique_key_columns`` so each detail key matches at most one job.
+        detail_key_columns: Detail foreign-key components, positionally
+            matching ``parent_key_columns``.
+        expected_detail_count_column: Parent column declaring how many detail
+            rows the parent should have.
+        definitions: Registry the columns are validated against (the project
+            registry by default; tests may pass a synthetic one).
+    """
+
+    parent: DatasetKey
+    detail: DatasetKey
+    parent_key_columns: tuple[str, ...]
+    detail_key_columns: tuple[str, ...]
+    expected_detail_count_column: str
+    definitions: Mapping[DatasetKey, DatasetDefinition] = dataclass_field(
+        default=None, compare=False, repr=False  # type: ignore[arg-type]
+    )
+
+    def __post_init__(self) -> None:
+        if self.definitions is None:
+            object.__setattr__(self, "definitions", DATASET_DEFINITIONS)
+        if self.parent not in self.definitions or self.detail not in self.definitions:
+            raise RelationshipConfigurationError("relationship datasets must be registered")
+        if self.parent == self.detail:
+            raise RelationshipConfigurationError("parent and detail datasets must differ")
+        for name in ("parent_key_columns", "detail_key_columns"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple) or not value:
+                raise RelationshipConfigurationError(f"{name} must be a non-empty tuple")
+            if not all(isinstance(v, str) and v for v in value):
+                raise RelationshipConfigurationError(f"{name} must contain non-empty strings")
+            if len(set(value)) != len(value):
+                raise RelationshipConfigurationError(f"{name} must not contain duplicates")
+        if len(self.parent_key_columns) != len(self.detail_key_columns):
+            raise RelationshipConfigurationError("parent and detail keys must have equal length")
+        parent, detail = self.parent_definition, self.detail_definition
+        for columns, definition in ((self.parent_key_columns, parent), (self.detail_key_columns, detail)):
+            unknown = tuple(c for c in columns if c not in definition.columns)
+            if unknown:
+                raise RelationshipConfigurationError(
+                    f"{len(unknown)} '{definition.key}' relationship column(s) not in its contract",
+                    unknown,
+                )
+            untyped = tuple(c for c in columns if c not in definition.identifier_columns)
+            if untyped:  # identifier dtype on both sides guarantees compatible types
+                raise RelationshipConfigurationError(
+                    f"{len(untyped)} '{definition.key}' relationship column(s) are not identifiers",
+                    untyped,
+                )
+        if self.parent_key_columns != parent.unique_key_columns:
+            raise RelationshipConfigurationError(
+                f"parent key must equal the '{parent.key}' unique key", self.parent_key_columns
+            )
+        count = self.expected_detail_count_column
+        if not isinstance(count, str) or count not in parent.columns:
+            raise RelationshipConfigurationError(
+                f"expected-count column must be a '{parent.key}' column", (str(count),)
+            )
+        if count in parent.identifier_columns or count in self.parent_key_columns:
+            raise RelationshipConfigurationError(
+                "expected-count column must be a measure, not a key or identifier", (count,)
+            )
+
+    @property
+    def parent_definition(self) -> DatasetDefinition:
+        return self.definitions[self.parent]
+
+    @property
+    def detail_definition(self) -> DatasetDefinition:
+        return self.definitions[self.detail]
+
+
+#: The jobs -> cars relationship. Each cars row carries its parent job's
+#: identifier. Evidence: matching identifier semantics on both sides and the
+#: cars contract's ``job_*`` columns, which repeat parent-job attributes.
+#: Expected count: ``record_count`` is the number of offer records the job
+#: itself reports, i.e. the declaration to reconcile. ``actual_car_rows`` is
+#: a downstream tally of rows written, not a declaration, so it is not used
+#: here (comparing the two fields would be a separate consistency control).
+#: Identifiers are compared verbatim, so the textual-form difference noted on
+#: the cars identifier above is reported as orphans/under-counts until an
+#: explicit normalisation step reconciles the two forms.
+JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
+    parent=DatasetKey.JOBS,
+    detail=DatasetKey.CARS,
+    parent_key_columns=('job_id',),
+    detail_key_columns=('job_id',),
+    expected_detail_count_column='record_count',
 )
 
 

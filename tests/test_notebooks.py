@@ -27,7 +27,7 @@ from ql2_sixt_canada_analysis.notebook_validation import (
     execute_notebook_copy,
     read_notebook,
 )
-from ql2_sixt_canada_analysis.schemas import DATASET_DEFINITIONS, DatasetKey
+from ql2_sixt_canada_analysis.schemas import DATASET_DEFINITIONS, JOB_DETAIL_RELATIONSHIP, DatasetKey
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOKS_DIR = PROJECT_ROOT / "notebooks"
@@ -322,6 +322,64 @@ def test_ingestion_notebook_key_step_runs_on_synthetic_violations(tmp_path: Path
     assert "SYNTH-JOB-001" not in outputs and "000001" not in outputs
     assert not re.search(r"\b[0-9]+\b", outputs)
     assert not re.search(r"\b(True|False|valid|invalid|duplicate)\b", outputs, re.I)
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before
+    assert _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ---------------------------------------------------- job-detail reconciliation
+
+
+def test_ingestion_notebook_reconciles_with_reusable_api_after_key_assessment() -> None:
+    sources = [c.source for c in _code_cells(read_notebook(INGESTION_NOTEBOOK))]
+    code = "\n".join(sources)
+    for name in ("assess_job_detail_reconciliation", "JOB_DETAIL_RELATIONSHIP"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    keys = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
+    reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
+    assert keys < reconcile
+    assert re.search(
+        r"reconciliation_report\s*=\s*assess_job_detail_reconciliation\(\s*jobs_df\s*,\s*cars_df\s*,"
+        r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", sources[reconcile])
+    assert "validate_job_detail_reconciliation" not in code  # assessment keeps the workflow running
+
+
+def test_ingestion_notebook_has_no_relationship_fields_or_own_reconciliation() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    code = _code_source(notebook)
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    rel = JOB_DETAIL_RELATIONSHIP
+    fields = {*rel.parent_key_columns, *rel.detail_key_columns, rel.expected_detail_count_column}
+    assert not any(re.search(rf"\b{re.escape(f)}\b", text) for f in fields), "fields live in schemas only"
+    for pattern in (r"\.merge\(", r"(_df|\.jobs|\.cars)\.join\(", r"\.groupby\(", r"\.value_counts\(", r"\.size\(\)",
+                    r"\.reindex\(", r"\.isin\(", r"\.sum\(", r"parent_key_columns", r"detail_key_columns",
+                    r"expected_detail_count_column"):
+        assert not re.search(pattern, code), f"notebook reimplements reconciliation: {pattern}"
+    assert not re.search(r"print\([^\n]*(reconciliation_report|_count|discrepancy|reconciled)", code)
+
+
+def test_ingestion_notebook_reconciliation_runs_on_synthetic_mismatches(tmp_path: Path) -> None:
+    rel = JOB_DETAIL_RELATIONSHIP
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    jobs_rows = [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "2"},
+                 {rel.parent_key_columns[0]: "000001", rel.expected_detail_count_column: "1"}]
+    cars_rows = [{rel.detail_key_columns[0]: "SYNTH-JOB-001"}, {rel.detail_key_columns[0]: "SYNTH-JOB-404"},
+                 {rel.detail_key_columns[0]: ""}]
+    for key, rows in ((DatasetKey.JOBS, jobs_rows), (DatasetKey.CARS, cars_rows)):
+        columns = DATASET_DEFINITIONS[key].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in rows]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n\n").encode("utf-8"))
+    before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(
+        INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
+    )
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "reconciliation step completed" in outputs
+    assert "SYNTH-JOB" not in outputs and "000001" not in outputs
+    assert not re.search(r"\b[0-9]+\b", outputs)
+    assert not re.search(r"\b(True|False|orphan|mismatch|under|over)\b", outputs, re.I)
     assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before
     assert _snapshot(PROJECT_ROOT) == repo_before
 
