@@ -64,7 +64,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # Cells that are required to report categorical gate results and aggregate
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
-REPORTING_STEPS = ("assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+REPORTING_STEPS = ("assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
                    "investigate_location_stream(", "assess_completeness(")
@@ -930,6 +930,58 @@ def test_ingestion_notebook_gates_pricing_on_the_vancouver_policy() -> None:
     guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
     assert "pricing_analysis_ready" in guidance and "unresolved" in guidance
     assert "No Vancouver pricing" in guidance and "airport-versus-downtown" in guidance
+
+
+def test_ingestion_notebook_gates_pricing_on_schedule_coverage_and_trusted_join() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("COLLECTION_SCHEDULE", "assess_collection_schedule", "assess_scheduled_time_coverage"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    streams = next(s for s in sources if "assess_expected_location_streams(" in s)
+    assert "schedule=COLLECTION_SCHEDULE" in streams
+    coverage = next(s for s in sources if "assess_scheduled_time_coverage(" in s)
+    assert "assess_collection_schedule(COLLECTION_SCHEDULE)" in coverage
+    assert "expected_streams_report" in coverage                       # every expected stream, not one
+    pricing = next(s for s in sources if "assess_pricing_readiness(" in s)
+    assert "scheduled_coverage=scheduled_coverage_report" in pricing
+    assert "job_detail_join=job_detail_join" in pricing
+    assert "trusted_jobs_with_details" not in pricing and "location_stream_healthy" not in pricing
+    # The decision is the central API's: no readiness is computed in the notebook itself.
+    assert re.search(r"^pricing_analysis_ready = pricing_readiness\.ready$", pricing, re.M)
+    assert len(re.findall(r"pricing_analysis_ready\s*=", code)) == 1
+    order = [sources.index(s) for s in (streams, coverage, pricing)]
+    assert order == sorted(order)
+
+
+def test_ingestion_notebook_reports_missing_schedule_as_a_pricing_blocker(
+    synthetic_raw_dir: Path, tmp_path: Path
+) -> None:
+    # With the committed configuration (no schedule) the truthful result is not ready.
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    coverage = _step_output(result, "assess_scheduled_time_coverage(")
+    lines = dict(line.split(":", 1) for line in coverage.splitlines() if ":" in line)
+    assert lines["Collection schedule"].strip() == "unavailable"
+    assert lines["Collection schedule available and valid"].strip() == "False"
+    assert len([k for k in lines if k.startswith("Expected stream ")]) == len(EXPECTED_LOCATION_COVERAGE.expected_locations)
+    assert all(v.strip() in ("not_assessed", "no single report") for k, v in lines.items()
+               if k.startswith("Expected stream "))
+    assert lines["All expected streams complete against the schedule"].strip() == "False"
+    assert "collection_schedule_unavailable" in lines["Scheduled coverage blocked by"]
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    plines = dict(line.split(":", 1) for line in pricing.splitlines() if ":" in line)
+    assert plines["Authoritative schedule available"].strip() == "False"
+    assert plines["Scheduled coverage complete for every expected stream"].strip() == "False"
+    assert plines["Trusted join ready"].strip() == "False"
+    assert plines["Pricing analysis ready"].strip() == "False"
+    for blocker in (PricingBlocker.COLLECTION_SCHEDULE_UNAVAILABLE, PricingBlocker.TRUSTED_JOIN_NOT_READY):
+        assert blocker.value in plines["Pricing blocked by"]
+    assert "SYNTH" not in coverage + pricing and list(workdir.iterdir()) == []
 
 
 def test_ingestion_notebook_reports_unresolved_policy_and_blocked_pricing(

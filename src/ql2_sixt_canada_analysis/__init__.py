@@ -120,6 +120,13 @@ from ql2_sixt_canada_analysis.schemas import (
     get_dataset_definition,
 )
 from ql2_sixt_canada_analysis.streams import (
+    CollectionScheduleAssessment,
+    CollectionScheduleStatus,
+    ScheduledCoverageBlocker,
+    ScheduledCoverageReport,
+    StreamTimeCoverage,
+    assess_collection_schedule,
+    assess_scheduled_time_coverage,
     ExpectedLocationStreamsReport,
     ExpectedStreamBlocker,
     ExpectedStreamResult,
@@ -201,6 +208,13 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "CollectionScheduleAssessment",
+    "CollectionScheduleStatus",
+    "ScheduledCoverageBlocker",
+    "ScheduledCoverageReport",
+    "StreamTimeCoverage",
+    "assess_collection_schedule",
+    "assess_scheduled_time_coverage",
     "INVALID_OFFER_SAMPLE_LIMIT",
     "BaselineEvidence",
     "InvalidOfferSample",

@@ -80,7 +80,7 @@ import csv
 import itertools
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from enum import StrEnum
 from pathlib import Path
@@ -111,6 +111,13 @@ from ql2_sixt_canada_analysis.temporal import parse_temporal_field
 from ql2_sixt_canada_analysis.unique_keys import assess_unique_key
 
 __all__ = [
+    "CollectionScheduleAssessment",
+    "CollectionScheduleStatus",
+    "ScheduledCoverageBlocker",
+    "ScheduledCoverageReport",
+    "StreamTimeCoverage",
+    "assess_collection_schedule",
+    "assess_scheduled_time_coverage",
     "ExpectedLocationStreamsReport",
     "ExpectedStreamBlocker",
     "ExpectedStreamResult",
@@ -545,8 +552,13 @@ class ExpectedLocationStreamsReport:
 
     coverage: LocationCoverageDefinition
     results: tuple[ExpectedStreamResult, ...]
+    #: The collection schedule every stream's time coverage was assessed against
+    #: (``None`` = none; a hand-built aggregate records none, which never matches an available schedule).
+    schedule: CollectionScheduleDefinition | None = None
 
     def __post_init__(self) -> None:
+        if self.schedule is not None and not isinstance(self.schedule, CollectionScheduleDefinition):
+            raise TypeError("schedule must be a CollectionScheduleDefinition or None")
         if not isinstance(self.coverage, LocationCoverageDefinition):
             raise TypeError(f"expected a LocationCoverageDefinition, got {type(self.coverage).__name__}")
         if not self.coverage.is_configured:
@@ -695,9 +707,171 @@ def assess_expected_location_streams(
             schedule=schedule, temporal=temporal))
         for key in coverage.expected_locations
     )
-    aggregate = ExpectedLocationStreamsReport(coverage=coverage, results=results)
+    aggregate = ExpectedLocationStreamsReport(coverage=coverage, results=results, schedule=schedule)
     assert aggregate.assessed_exactly_once            # by construction; guards later refactors
     return aggregate
+
+
+# ------------------------------------------------ schedule and scheduled coverage
+
+
+class CollectionScheduleStatus(StrEnum):
+    """Whether an authoritative collection schedule can be used (fixed order)."""
+
+    AVAILABLE = "available"          # configured and valid against the contracts
+    UNAVAILABLE = "unavailable"      # none configured: temporal completeness cannot be proven
+    INVALID = "invalid"              # configured but structurally unusable
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionScheduleAssessment:
+    """Typed result of validating the configured collection schedule.
+
+    Absence is never read as "no scheduled times were required": it is
+    ``UNAVAILABLE`` and blocks pricing. ``schedule`` is kept only when valid.
+    """
+
+    status: CollectionScheduleStatus
+    schedule: CollectionScheduleDefinition | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, CollectionScheduleStatus):
+            raise TypeError("status must be a CollectionScheduleStatus")
+        if (self.status is CollectionScheduleStatus.AVAILABLE) != isinstance(self.schedule,
+                                                                           CollectionScheduleDefinition):
+            raise ValueError("only an available assessment carries (and must carry) a schedule")
+
+    @property
+    def available(self) -> bool:
+        return self.status is CollectionScheduleStatus.AVAILABLE
+
+
+def assess_collection_schedule(
+    schedule: object = COLLECTION_SCHEDULE,
+    *,
+    relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
+    temporal: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
+) -> CollectionScheduleAssessment:
+    """Validate the authoritative schedule (default: the project's ``COLLECTION_SCHEDULE``).
+
+    ``None`` is ``UNAVAILABLE``. Anything else must be a
+    :class:`~ql2_sixt_canada_analysis.schemas.CollectionScheduleDefinition`
+    on a dataset of the relationship whose timestamp is a timestamp field of
+    the temporal contract and whose scheduled instants resolve; otherwise -
+    including objects whose construction checks were bypassed - ``INVALID``.
+    Never raises for a bad schedule.
+    """
+    S = CollectionScheduleStatus
+    if schedule is None:
+        return CollectionScheduleAssessment(S.UNAVAILABLE)
+    if not isinstance(schedule, CollectionScheduleDefinition):
+        return CollectionScheduleAssessment(S.INVALID)
+    try:
+        _schedule_field(schedule, temporal, {relationship.parent: None, relationship.detail: None})
+        instants = schedule.expected_instants
+        valid = len(instants) > 0 and not instants.isna().any() and not instants.has_duplicates
+    except Exception:  # noqa: BLE001 - any failure to use the schedule is a typed INVALID, never a pass
+        valid = False
+    return CollectionScheduleAssessment(S.AVAILABLE, schedule) if valid else CollectionScheduleAssessment(S.INVALID)
+
+
+class ScheduledCoverageBlocker(StrEnum):
+    """Why scheduled-time coverage is not proven complete (fixed order; values avoid column names)."""
+
+    COLLECTION_SCHEDULE_UNAVAILABLE = "collection_schedule_unavailable"
+    COLLECTION_SCHEDULE_INVALID = "collection_schedule_invalid"
+    STREAM_COVERAGE_ASSESSMENT_MISSING = "scheduled_coverage_streams_unavailable"
+    STREAM_POPULATION_NOT_EXACT = "scheduled_coverage_streams_not_exact"
+    SCHEDULE_NOT_APPLIED = "scheduled_coverage_schedule_not_applied"
+    SCHEDULED_COVERAGE_INCOMPLETE = "scheduled_coverage_incomplete"
+
+
+#: The only accepted per-stream coverage (an allowlist: every other status fails).
+_COMPLETE_COVERAGE = frozenset({TimeCoverageStatus.COMPLETE})
+
+
+@dataclass(frozen=True, slots=True)
+class StreamTimeCoverage:
+    """Scheduled-time coverage of one configured expected stream (``None`` = no single report)."""
+
+    target: tuple[str, ...]
+    time_coverage: TimeCoverageStatus | None
+
+    @property
+    def complete(self) -> bool:
+        """Only the typed ``COMPLETE`` member passes (a look-alike string or unknown value fails)."""
+        return isinstance(self.time_coverage, TimeCoverageStatus) and any(
+            self.time_coverage is accepted for accepted in _COMPLETE_COVERAGE)
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledCoverageReport:
+    """Scheduled-time coverage for the exact expected-stream population.
+
+    Every property is derived from the schedule assessment and the
+    all-expected-stream aggregate on access. Coverage is complete only when
+    the schedule is available, the aggregate holds exactly one report per
+    configured expected stream, every report was assessed against that same
+    schedule, and every expected stream's ``time_coverage`` is ``COMPLETE``.
+    ``NOT_ASSESSED``, ``NEVER_PRESENT``, ``PARTIAL``, ``UNASSESSABLE``, a
+    missing report or any future status fail; stream health is not consulted.
+    """
+
+    schedule_assessment: CollectionScheduleAssessment
+    expected_streams: ExpectedLocationStreamsReport | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.schedule_assessment, CollectionScheduleAssessment):
+            raise TypeError("schedule_assessment must be a CollectionScheduleAssessment")
+        if self.expected_streams is not None and not isinstance(self.expected_streams, ExpectedLocationStreamsReport):
+            raise TypeError("expected_streams must be an ExpectedLocationStreamsReport or None")
+
+    @property
+    def stream_coverage(self) -> tuple[StreamTimeCoverage, ...]:
+        """One entry per configured expected stream, in contract order."""
+        if self.expected_streams is None:
+            return ()
+        reports = self.expected_streams.reports       # keys assessed exactly once only
+        return tuple(
+            StreamTimeCoverage(key, reports[key].time_coverage if reports.get(key) is not None else None)
+            for key in self.expected_streams.coverage.expected_locations)
+
+    @property
+    def all_streams_complete(self) -> bool:
+        return not self.blocking_reasons
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.blocking_reasons
+
+    @property
+    def blocking_reasons(self) -> tuple[ScheduledCoverageBlocker, ...]:
+        B = ScheduledCoverageBlocker
+        found: set[ScheduledCoverageBlocker] = set()
+        status = self.schedule_assessment.status
+        if status is CollectionScheduleStatus.UNAVAILABLE:
+            found.add(B.COLLECTION_SCHEDULE_UNAVAILABLE)
+        elif status is not CollectionScheduleStatus.AVAILABLE:
+            found.add(B.COLLECTION_SCHEDULE_INVALID)
+        streams = self.expected_streams
+        if streams is None:
+            found.add(B.STREAM_COVERAGE_ASSESSMENT_MISSING)
+        else:
+            if not streams.assessed_exactly_once:
+                found.add(B.STREAM_POPULATION_NOT_EXACT)
+            if self.schedule_assessment.available and streams.schedule != self.schedule_assessment.schedule:
+                found.add(B.SCHEDULE_NOT_APPLIED)
+            if not all(entry.complete for entry in self.stream_coverage):
+                found.add(B.SCHEDULED_COVERAGE_INCOMPLETE)
+        return tuple(b for b in B if b in found)
+
+
+def assess_scheduled_time_coverage(
+    schedule: CollectionScheduleAssessment,
+    expected_streams: ExpectedLocationStreamsReport | None,
+) -> ScheduledCoverageReport:
+    """Combine the schedule assessment with the all-expected-stream aggregate (validated by property)."""
+    return ScheduledCoverageReport(schedule_assessment=schedule, expected_streams=expected_streams)
 
 
 # ---------------------------------------------------------------------- helpers

@@ -12,7 +12,7 @@ import dataclasses
 
 import pandas as pd
 import pytest
-from test_city_integrity import completeness, healthy
+from test_city_integrity import PROJECT_GATES, completeness, healthy
 from test_readiness import GATES, evidence
 
 import ql2_sixt_canada_analysis
@@ -228,7 +228,7 @@ def test_invalid_alias_changes_no_coverage_stream_or_completeness_population():
     assert report.complete and report.expected_streams.expected_stream_count == 3
     # Completeness is decided on source labels; pricing still needs a usable identity decision.
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(TO_CALGARY),
-                                         **(GATES | {"completeness": report}))
+                                         **PROJECT_GATES(report))
     assert not readiness.ready and B.CANONICAL_LOCATION_CITY_MISMATCH in readiness.blocking_reasons
 
 
@@ -243,7 +243,7 @@ def test_reported_issue_end_to_end():
     assert not policy.location_policy_authority_sufficient and not policy.canonicalization_permitted
     complete = completeness(j, c)
     assert [r.target for r in complete.expected_streams.results] == [CAL_KEY, DOWNTOWN, THURLOW]
-    readiness = assess_pricing_readiness(location_policy=policy, **(GATES | {"completeness": complete}))
+    readiness = assess_pricing_readiness(location_policy=policy, **PROJECT_GATES(complete))
     assert readiness.ready is False
     assert set(readiness.blocking_reasons) == {B(d.value) for d in CROSS_CITY} | {B.ALIAS_CANONICALIZATION_NOT_APPLIED}
 

@@ -12,7 +12,7 @@ import dataclasses
 import pandas as pd
 import pytest
 from test_comparison import CITY, COV, DEF, DK, IDDEF, ID_COL, J1, J2, _cars, _jobs, _with_ids, offer, same_both
-from test_completeness import complete_inputs
+from test_completeness import SYNTH_COV, complete_inputs
 from test_vehicle_stability import T, V1, V2, frame as stability_frame, obs, two
 
 import ql2_sixt_canada_analysis
@@ -38,7 +38,14 @@ from ql2_sixt_canada_analysis.readiness import (
     assess_pricing_readiness,
     validate_pricing_readiness,
 )
+from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker, assess_job_detail_join_readiness
 from ql2_sixt_canada_analysis.stability import VehicleStabilityStatus, assess_vehicle_attribute_stability
+from ql2_sixt_canada_analysis.streams import (
+    ScheduledCoverageBlocker,
+    assess_collection_schedule,
+    assess_expected_location_streams,
+    assess_scheduled_time_coverage,
+)
 from ql2_sixt_canada_analysis.schemas import (
     VEHICLE_ATTRIBUTE_STABILITY as V,
     COMPARED_LOCATION_STREAMS,
@@ -47,8 +54,13 @@ from ql2_sixt_canada_analysis.schemas import (
     VANCOUVER_LOCATION_POLICY,
     LocationIdentityPolicy,
     LocationPolicyAuthority,
+    TEMPORAL_RECONCILIATION,
+    CollectionScheduleDefinition,
+    DatasetKey,
     LocationCoverageMode,
     LocationPolicyConfigurationError,
+    TemporalAwareness,
+    TemporalKind,
     LocationPolicyScopeDefect,
     LocationPolicyState as PS,
 )
@@ -76,9 +88,47 @@ COMPLETE = assess_completeness(**complete_inputs())
 INCOMPLETE = assess_completeness(**(complete_inputs() | {"reconciliation": None}))       # data, not streams
 STREAMS_INCOMPLETE = assess_completeness(**(complete_inputs() | {"streams": None}))       # stream population
 STREAMS_AND_SCOPE_INCOMPLETE = assess_completeness(**(complete_inputs() | {"streams": None, "city_integrity": None}))
+# Scheduled coverage and the trusted join come from the real assessments on the same
+# fabricated, healthy frames, with a synthetic authoritative schedule (test configuration only).
+CAPTURE = next(f for f in TEMPORAL_RECONCILIATION.fields if f.dataset == DatasetKey.CARS
+               and f.kind is TemporalKind.TIMESTAMP and f.awareness is TemporalAwareness.DESIGNATOR)
+SCHEDULE = CollectionScheduleDefinition(dataset=DatasetKey.CARS, timestamp_column=CAPTURE.column,
+                                        expected_periods=("2025-01-15T12:00:00Z",), period="h")
+CAPTURED_AT = "2025-01-15 05:00:00 MST"           # 12:00Z under the contract's fixed MST designator
+
+
+def captured(cars: pd.DataFrame) -> pd.DataFrame:
+    """A copy whose every detail row was captured inside the synthetic scheduled period."""
+    cars = cars.copy()
+    cars[CAPTURE.column] = CAPTURED_AT
+    return cars
+
+
+def scheduled_frames():  # type: ignore[no-untyped-def]
+    datasets = complete_inputs()["datasets"]
+    return datasets.jobs, captured(datasets.cars)
+
+
+def gates_for(jobs: pd.DataFrame, cars: pd.DataFrame, coverage, completeness):  # type: ignore[no-untyped-def]
+    """GATES whose schedule coverage and trusted join are assessed for ``coverage`` on these frames."""
+    return GATES | {"completeness": completeness,
+                    "scheduled_coverage": scheduled_coverage(frames=(jobs, captured(cars)), coverage=coverage),
+                    "job_detail_join": assess_job_detail_join_readiness(jobs, cars)}
+
+
+def scheduled_coverage(schedule=SCHEDULE, frames=None, coverage=SYNTH_COV):  # type: ignore[no-untyped-def]
+    j, c = frames or scheduled_frames()
+    streams = assess_expected_location_streams(j, c, coverage=coverage, schedule=schedule)
+    return assess_scheduled_time_coverage(assess_collection_schedule(schedule), streams)
+
+
+SCHEDULED_OK = scheduled_coverage()
+JOIN_OK = assess_job_detail_join_readiness(*scheduled_frames())
 GATES = dict(completeness=COMPLETE, key_contracts_valid=True, one_to_many_contract_valid=True,
-             temporal_fields_trusted=True, vehicle_stability=STABLE)
-FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE}
+             temporal_fields_trusted=True, vehicle_stability=STABLE, scheduled_coverage=SCHEDULED_OK,
+             job_detail_join=JOIN_OK)
+FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE,
+                                             "scheduled_coverage": None, "job_detail_join": None}
 
 
 def evidence(status: CS) -> LocationStreamComparisonReport:
@@ -102,6 +152,9 @@ def frame(labels: list[tuple[str, ...]]) -> pd.DataFrame:
 
 
 SCOPE_BLOCKERS = {B(d.value) for d in LocationPolicyScopeDefect}
+# Detailed schedule/join blockers (a missing assessment reports only its own "missing" blocker).
+SCHEDULE_AND_JOIN_DETAIL = ({B(b.value) for b in ScheduledCoverageBlocker} | {B(b.value) for b in JobDetailJoinBlocker}
+                            | {B.SCHEDULED_COVERAGE_CONTRACT_MISMATCH, B.TRUSTED_JOIN_NOT_READY})
 BEHAVIOURAL = [CS.LIKELY_DUPLICATE_STREAMS, CS.LIKELY_DISTINCT_STREAMS, CS.COMPARISON_INCONCLUSIVE,
                CS.COMPARISON_UNASSESSABLE,
                CS.INSUFFICIENT_COMPARABLE_CAPTURES, CS.ONE_STREAM_ABSENT, CS.BOTH_STREAMS_ABSENT]
@@ -464,7 +517,8 @@ def test_all_failures_are_reported_together():
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(),
                                          **(FAILING | {"vehicle_stability": UNSTABLE_AND_PARTIAL,
                                                        "completeness": STREAMS_AND_SCOPE_INCOMPLETE}))
-    assert set(readiness.blocking_reasons) == set(B) - SCOPE_BLOCKERS - {B.ALIAS_CANONICALIZATION_NOT_APPLIED,
+    assert set(readiness.blocking_reasons) == set(B) - SCOPE_BLOCKERS - SCHEDULE_AND_JOIN_DETAIL - {
+                                                        B.ALIAS_CANONICALIZATION_NOT_APPLIED,
                                                         B.IDENTITY_EVIDENCE_CONFLICT,
                                                         B.VEHICLE_STABILITY_UNAVAILABLE,
                                                         B.COMPLETENESS_UNAVAILABLE}

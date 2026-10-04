@@ -407,7 +407,8 @@ present and healthy.
 - Continuity compares the collection events that actually occurred for the
   target's scope; it does not infer a cadence. Temporal completeness needs an
   authoritative `COLLECTION_SCHEDULE`; none exists, so it is reported as
-  `NOT_ASSESSED`.
+  `NOT_ASSESSED` - which **blocks pricing** (see *Scheduled coverage and the
+  trusted join* below), it is never a neutral or passing state.
 - When a schedule is configured, its timestamp must be a timestamp field of
   `TEMPORAL_RECONCILIATION`, and observed times are resolved only through
   that contract (e.g. the `MST` designator as fixed UTC-07:00). Scheduled
@@ -984,6 +985,61 @@ temporal trust, vehicle stability, passed as the full-population
 `temporal_fields_untrusted`); `validate_pricing_readiness` raises
 `PricingNotReadyError`. A resolved policy never overrides another gate.
 
+### Scheduled coverage and the trusted join
+
+Two further prerequisites are required, keyword-only arguments of
+`assess_pricing_readiness` with no defaults - a caller cannot omit them and
+receive `ready=True`; `None` is accepted only to be reported as a blocker:
+
+- `scheduled_coverage` - `assess_scheduled_time_coverage(assess_collection_schedule(COLLECTION_SCHEDULE), expected_streams_report)`.
+  `CollectionScheduleAssessment` is `available` (configured and valid against
+  the relationship and temporal contracts), `unavailable` (none configured -
+  never read as "no scheduled times were required") or `invalid`. The
+  `ScheduledCoverageReport` is complete only when the schedule is available,
+  the all-expected-stream aggregate holds **exactly one** report per
+  configured expected stream (all three; duplicates or unexpected reports
+  never replace a missing one), every report was assessed against that same
+  schedule, and every stream's time coverage is `COMPLETE` - an allowlist:
+  `NOT_ASSESSED`, `NEVER_PRESENT`, `PARTIAL`, `UNASSESSABLE`, a missing
+  report or any other value fails. Stream health, completeness and temporal
+  field trust are separate gates and never substitute for it; a complete
+  Calgary stream cannot mask a Vancouver stream. Blockers:
+  `scheduled_coverage_assessment_missing`, `collection_schedule_unavailable`,
+  `collection_schedule_invalid`, `scheduled_coverage_streams_unavailable`,
+  `scheduled_coverage_streams_not_exact`,
+  `scheduled_coverage_schedule_not_applied`, `scheduled_coverage_incomplete`,
+  `scheduled_coverage_contract_mismatch` (a different contract than
+  completeness).
+- `job_detail_join` - the `JobDetailJoinReadiness` from
+  `assess_job_detail_join_readiness`. Unless it is join-ready, pricing gets
+  `trusted_join_not_ready` plus each join blocker with the same value
+  (`join_construction_failed`, `jobs_key_contract_failed`,
+  `details_key_contract_failed`, `declared_counts_not_reconciled`,
+  `relationship_contract_failed`, `orphan_details_present`,
+  `missing_link_details_present`, `required_report_unavailable`,
+  `job_scope_unassignable`, `parent_detail_scope_mismatch`); a missing
+  assessment is `trusted_join_assessment_missing`. A non-`None` joined frame
+  (including the untrusted diagnostic join) is never evidence of readiness.
+
+Blockers accumulate in a fixed order (completeness, foundational gates,
+stability, scheduled coverage, trusted join, location policy) and nothing
+short-circuits. `PricingReadinessReport` keeps both inputs for audit
+(`schedule_available`, `scheduled_coverage_complete`, `trusted_join_ready`,
+`scheduled_coverage.stream_coverage`). Because `COLLECTION_SCHEDULE` is
+`None`, the truthful committed result is `ready=False` with
+`collection_schedule_unavailable`; no schedule is inferred from observed
+rows. Timestamp authority (ordering, reporting-day derivation and the zone of
+naive `finished_at` values) remains unresolved and is not established here.
+
+**Definition of done for pricing readiness:** complete data (every expected
+stream exactly once, coverage, counts, city integrity), valid key contracts,
+a valid one-to-many relationship, trusted temporal fields, a stable,
+fully assessed vehicle population, an available and valid authoritative
+collection schedule with `COMPLETE` time coverage for every configured
+expected stream, a validated trusted job-detail join (no
+`join_construction_failed` or other join blocker) and an authority-sufficient
+location policy - and nothing else blocking.
+
 **Still required:** an authoritative statement - from the supplier, the
 collection owner or the business - of whether the two Vancouver labels are
 the same pickup location (with the approved canonical key - one of the two
@@ -1099,6 +1155,8 @@ python -m pytest tests/test_notebooks.py
 ## Data trust
 
 - All scheduled cities represented
+- Authoritative collection schedule available, with `COMPLETE` time coverage for every expected stream
+- Trusted job-detail join validated (no `join_construction_failed`)
 - All authoritative expected (city, branch) pairs present in detail (`cars`) rows
 - Job level counts = detail row counts
 - Valid offers duplicated

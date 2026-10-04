@@ -10,7 +10,7 @@ import dataclasses
 
 import pytest
 from test_completeness import CITY, J1, J2, J3, cars, jobs, reconcile
-from test_readiness import GATES, assess_location_policy
+from test_readiness import GATES, assess_location_policy, gates_for
 
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.city_integrity import assess_city_integrity
@@ -63,7 +63,7 @@ def completeness(j, c, streams, coverage=COV3):  # type: ignore[no-untyped-def]
 
 
 def pricing(report):  # type: ignore[no-untyped-def]
-    return assess_pricing_readiness(location_policy=assess_location_policy(), **(GATES | {"completeness": report}))
+    return assess_pricing_readiness(location_policy=assess_location_policy(), **gates_for(*healthy(), COV3, report))
 
 
 # ------------------------------------------------------------------ exact population
@@ -147,7 +147,7 @@ def test_calgary_healthy_and_one_vancouver_like_stream_partial_is_not_complete()
     readiness = pricing(report)
     assert not readiness.ready and PB.EXPECTED_STREAMS_NOT_PROVEN in readiness.blocking_reasons
     with pytest.raises(PricingNotReadyError):
-        validate_pricing_readiness(location_policy=assess_location_policy(), **(GATES | {"completeness": report}))
+        validate_pricing_readiness(location_policy=assess_location_policy(), **gates_for(*healthy(), COV3, report))
 
 
 def test_detail_pairs_without_a_parent_job_in_their_city_are_not_complete():

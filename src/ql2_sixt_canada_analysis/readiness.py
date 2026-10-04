@@ -58,7 +58,12 @@ from ql2_sixt_canada_analysis.coverage import LocationCoverageReport
 from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.reconciliation import JobDetailReconciliationReport
 from ql2_sixt_canada_analysis.stability import VehicleStabilityReport
-from ql2_sixt_canada_analysis.streams import ExpectedLocationStreamsReport
+from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker, JobDetailJoinReadiness
+from ql2_sixt_canada_analysis.streams import (
+    ExpectedLocationStreamsReport,
+    ScheduledCoverageBlocker,
+    ScheduledCoverageReport,
+)
 from ql2_sixt_canada_analysis.schemas import (
     EXPECTED_LOCATION_COVERAGE,
     VANCOUVER_LOCATION_POLICY,
@@ -113,6 +118,29 @@ class PricingBlocker(StrEnum):
     CANONICAL_LOCATION_CITY_MISMATCH = "canonical_key_crosses_governed_scope"
     CANONICAL_LOCATION_IMPERSONATES_STREAM = "canonical_key_names_other_stream"
     CANONICAL_LOCATION_SCOPE_MISMATCH = "canonical_key_not_governed"
+    # Authoritative schedule and scheduled-time coverage of every expected stream
+    # (values equal ScheduledCoverageBlocker values).
+    SCHEDULED_COVERAGE_ASSESSMENT_MISSING = "scheduled_coverage_assessment_missing"
+    COLLECTION_SCHEDULE_UNAVAILABLE = "collection_schedule_unavailable"
+    COLLECTION_SCHEDULE_INVALID = "collection_schedule_invalid"
+    SCHEDULED_COVERAGE_STREAMS_UNAVAILABLE = "scheduled_coverage_streams_unavailable"
+    SCHEDULED_COVERAGE_STREAMS_NOT_EXACT = "scheduled_coverage_streams_not_exact"
+    SCHEDULED_COVERAGE_SCHEDULE_NOT_APPLIED = "scheduled_coverage_schedule_not_applied"
+    SCHEDULED_COVERAGE_INCOMPLETE = "scheduled_coverage_incomplete"
+    SCHEDULED_COVERAGE_CONTRACT_MISMATCH = "scheduled_coverage_contract_mismatch"
+    # Trusted job-detail join (JOIN_* values equal JobDetailJoinBlocker values).
+    TRUSTED_JOIN_ASSESSMENT_MISSING = "trusted_join_assessment_missing"
+    TRUSTED_JOIN_NOT_READY = "trusted_join_not_ready"
+    JOIN_REQUIRED_REPORT_UNAVAILABLE = "required_report_unavailable"
+    JOIN_JOBS_KEY_CONTRACT_FAILED = "jobs_key_contract_failed"
+    JOIN_DETAILS_KEY_CONTRACT_FAILED = "details_key_contract_failed"
+    JOIN_DECLARED_COUNTS_NOT_RECONCILED = "declared_counts_not_reconciled"
+    JOIN_RELATIONSHIP_CONTRACT_FAILED = "relationship_contract_failed"
+    JOIN_ORPHAN_DETAILS_PRESENT = "orphan_details_present"
+    JOIN_MISSING_LINK_DETAILS_PRESENT = "missing_link_details_present"
+    JOIN_CONSTRUCTION_FAILED = "join_construction_failed"
+    JOIN_CITY_SCOPE_UNASSIGNABLE = "job_scope_unassignable"
+    JOIN_PARENT_DETAIL_CITY_MISMATCH = "parent_detail_scope_mismatch"
 
 
 #: Authoritative identity evidence that contradicts *every* resolved policy.
@@ -295,10 +323,27 @@ class PricingReadinessReport:
     location_policy: LocationPolicyReport
     #: The completeness decision this readiness rests on (kept for audit).
     completeness: CompletenessReport | None = None
+    #: The schedule / all-stream scheduled-coverage assessment (kept for audit; ``None`` = missing).
+    scheduled_coverage: ScheduledCoverageReport | None = None
+    #: The trusted-join gate (kept for audit; ``None`` = missing).
+    job_detail_join: JobDetailJoinReadiness | None = None
 
     @property
     def ready(self) -> bool:
         return not self.blocking_reasons
+
+    @property
+    def schedule_available(self) -> bool:
+        return self.scheduled_coverage is not None and self.scheduled_coverage.schedule_assessment.available
+
+    @property
+    def scheduled_coverage_complete(self) -> bool:
+        return self.scheduled_coverage is not None and self.scheduled_coverage.all_streams_complete
+
+    @property
+    def trusted_join_ready(self) -> bool:
+        return (self.job_detail_join is not None and self.job_detail_join.join_ready
+                and not self.job_detail_join.blocking_reasons)
 
 
 class PricingNotReadyError(Exception):
@@ -404,8 +449,26 @@ def assess_pricing_readiness(
     one_to_many_contract_valid: bool,
     temporal_fields_trusted: bool,
     vehicle_stability: VehicleStabilityReport | None,
+    scheduled_coverage: ScheduledCoverageReport | None,
+    job_detail_join: JobDetailJoinReadiness | None,
 ) -> PricingReadinessReport:
     """Combine every foundational gate with the location policy (all must pass).
+
+    Every argument is required (keyword-only, no defaults), so no caller can
+    omit a prerequisite and receive ``ready=True``; ``None`` is accepted only
+    to be reported as a blocker.
+
+    ``scheduled_coverage`` (:func:`~ql2_sixt_canada_analysis.streams.assess_scheduled_time_coverage`)
+    must prove an available, valid authoritative schedule and ``COMPLETE``
+    time coverage for exactly the configured expected streams, all assessed
+    against that schedule and the same contract as ``completeness``.
+    ``NOT_ASSESSED`` (for example ``COLLECTION_SCHEDULE is None``) fails: no
+    schedule is not "no schedule required". Stream health and temporal field
+    trust are separate gates and never substitute for it.
+    ``job_detail_join`` (:func:`~ql2_sixt_canada_analysis.join_readiness.assess_job_detail_join_readiness`)
+    must be join-ready; every join blocker (including
+    ``join_construction_failed``) is propagated with the same value, plus
+    ``trusted_join_not_ready``. A non-``None`` joined frame is never evidence.
 
     Gate values must be real booleans; anything else is a ``TypeError`` so a
     missing result can never be read as a pass. ``completeness`` is the
@@ -423,6 +486,10 @@ def assess_pricing_readiness(
         raise TypeError("vehicle_stability must be a VehicleStabilityReport or None")
     if completeness is not None and not isinstance(completeness, CompletenessReport):
         raise TypeError("completeness must be a CompletenessReport or None")
+    if scheduled_coverage is not None and not isinstance(scheduled_coverage, ScheduledCoverageReport):
+        raise TypeError("scheduled_coverage must be a ScheduledCoverageReport or None")
+    if job_detail_join is not None and not isinstance(job_detail_join, JobDetailJoinReadiness):
+        raise TypeError("job_detail_join must be a JobDetailJoinReadiness or None")
     gates = (
         (key_contracts_valid, PricingBlocker.KEY_CONTRACTS_INVALID),
         (one_to_many_contract_valid, PricingBlocker.ONE_TO_MANY_INVALID),
@@ -433,9 +500,41 @@ def assess_pricing_readiness(
     reasons = list(_completeness_blockers(completeness))
     reasons.extend(blocker for value, blocker in gates if not value)
     reasons.extend(_stability_blockers(vehicle_stability))
+    reasons.extend(_scheduled_coverage_blockers(scheduled_coverage, completeness))
+    reasons.extend(_join_blockers(job_detail_join))
     reasons.extend(location_policy.blocking_reasons)
-    return PricingReadinessReport(blocking_reasons=tuple(reasons), location_policy=location_policy,
-                                  completeness=completeness)
+    return PricingReadinessReport(blocking_reasons=tuple(dict.fromkeys(reasons)), location_policy=location_policy,
+                                  completeness=completeness, scheduled_coverage=scheduled_coverage,
+                                  job_detail_join=job_detail_join)
+
+
+def _scheduled_coverage_blockers(report: ScheduledCoverageReport | None,
+                                 completeness: CompletenessReport | None) -> list[PricingBlocker]:
+    """Schedule and all-stream coverage blockers (central mapping; every non-pass blocks)."""
+    if report is None:
+        return [PricingBlocker.SCHEDULED_COVERAGE_ASSESSMENT_MISSING]
+    blockers = [PricingBlocker(b.value) for b in report.blocking_reasons]
+    if (report.expected_streams is not None and completeness is not None
+            and completeness.expected_streams is not None
+            and report.expected_streams.coverage != completeness.expected_streams.coverage):
+        blockers.append(PricingBlocker.SCHEDULED_COVERAGE_CONTRACT_MISMATCH)
+    if not report.is_valid and not blockers:                       # fail closed on any unforeseen non-pass
+        blockers.append(PricingBlocker.SCHEDULED_COVERAGE_INCOMPLETE)
+    return blockers
+
+
+def _join_blockers(join: JobDetailJoinReadiness | None) -> list[PricingBlocker]:
+    """Trusted-join blockers: the join's own reasons (same values) plus an umbrella blocker."""
+    if join is None:
+        return [PricingBlocker.TRUSTED_JOIN_ASSESSMENT_MISSING]
+    if join.join_ready and not join.blocking_reasons:
+        return []
+    return [PricingBlocker.TRUSTED_JOIN_NOT_READY, *(PricingBlocker(b.value) for b in join.blocking_reasons)]
+
+
+# Every source blocker must have a pricing blocker of the same value (checked at import).
+assert {b.value for b in ScheduledCoverageBlocker} <= {b.value for b in PricingBlocker}
+assert {b.value for b in JobDetailJoinBlocker} <= {b.value for b in PricingBlocker}
 
 
 def _completeness_blockers(report: CompletenessReport | None) -> list[PricingBlocker]:

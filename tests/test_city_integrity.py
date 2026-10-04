@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from test_completeness import COV, J1, J2, J3, cars, jobs, reconcile
-from test_readiness import DISTINCT, GATES
+from test_readiness import DISTINCT, GATES, gates_for
 
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.city_integrity import (
@@ -97,10 +97,15 @@ def completeness(j, c, **overrides):  # type: ignore[no-untyped-def]
     return assess_completeness(**(inputs | overrides))
 
 
+def PROJECT_GATES(report):  # type: ignore[no-untyped-def]  # noqa: N802
+    """Every non-completeness gate passing for the project contract (healthy frames, synthetic schedule)."""
+    return gates_for(*healthy(), COV, report)
+
+
 def pricing(report):  # type: ignore[no-untyped-def]
     """Every other gate passes (synthetic resolved policy), so only completeness can block."""
     return assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
-                                    **(GATES | {"completeness": report}))
+                                    **PROJECT_GATES(report))
 
 
 # ------------------------------------------------------------- the single rule
@@ -169,7 +174,7 @@ def test_unassignable_job_city_blocks_integrity_completeness_and_pricing(value):
     assert readiness.blocking_reasons == (PB.DATA_INCOMPLETE, PB.EXPECTED_STREAMS_NOT_PROVEN,
                                           PB.SCOPE_INTEGRITY_NOT_PROVEN)
     with pytest.raises(PricingNotReadyError):
-        validate_pricing_readiness(location_policy=assess_location_policy(DISTINCT), **(GATES | {"completeness": complete}))
+        validate_pricing_readiness(location_policy=assess_location_policy(DISTINCT), **PROJECT_GATES(complete))
     join = assess_job_detail_join_readiness(j, c)
     assert join.trusted_jobs_with_details is None and JB.CITY_SCOPE_UNASSIGNABLE in join.blocking_reasons
 
@@ -397,7 +402,7 @@ def test_city_agreement_does_not_decide_vancouver_identity():
     assert VANCOUVER_LOCATION_POLICY.state is LocationPolicyState.UNRESOLVED
     policy = assess_location_policy()
     assert not policy.locations_are_aliases and not policy.locations_comparable_independently
-    readiness = assess_pricing_readiness(location_policy=policy, **(GATES | {"completeness": completeness(j, c)}))
+    readiness = assess_pricing_readiness(location_policy=policy, **PROJECT_GATES(completeness(j, c)))
     assert readiness.blocking_reasons == (PB.LOCATION_POLICY_UNRESOLVED,)
 
 
