@@ -23,7 +23,14 @@ single primary :class:`LocationStreamStatus`:
    not infer a cadence.
 5. ``TIME_COVERAGE`` - only with an authoritative
    :class:`~ql2_sixt_canada_analysis.schemas.CollectionScheduleDefinition`;
-   otherwise temporal completeness is ``NOT_ASSESSED``.
+   otherwise temporal completeness is ``NOT_ASSESSED``. Observed collection
+   times are resolved to instants by the central temporal contract
+   (:func:`~ql2_sixt_canada_analysis.temporal.parse_temporal_field`) - there
+   is no separate timestamp policy here. The schedule fails when no scheduled
+   period is observed (``SCHEDULED_TIME_ABSENT``), when only some are
+   (``RAW_STREAM_PARTIAL``), and fails closed when any observed target time is
+   missing, invalid or lacks timezone authority (``SCHEDULED_TIME_UNASSESSABLE``;
+   naive values are never read as UTC).
 6. ``IDENTIFIER_TYPES`` / ``PARENT_KEYS`` - relationship keys use the
    identifier dtype and the parent (jobs) key is complete and unique.
 7. ``RELATIONSHIP`` / ``DETAIL_PRESENCE`` / ``RECONCILIATION`` - target detail
@@ -56,11 +63,17 @@ from ql2_sixt_canada_analysis.schemas import (
     COLLECTION_SCHEDULE,
     EXPECTED_LOCATION_COVERAGE,
     JOB_DETAIL_RELATIONSHIP,
+    TEMPORAL_RECONCILIATION,
     CollectionScheduleDefinition,
     JobDetailRelationshipDefinition,
     LocationCoverageConfigurationError,
     LocationCoverageDefinition,
+    TemporalConfigurationError,
+    TemporalFieldDefinition,
+    TemporalKind,
+    TemporalReconciliationDefinition,
 )
+from ql2_sixt_canada_analysis.temporal import parse_temporal_field
 from ql2_sixt_canada_analysis.unique_keys import assess_unique_key
 
 __all__ = [
@@ -90,6 +103,8 @@ class LocationStreamStatus(StrEnum):
     RELATIONSHIP_LINK_FAILURE = "relationship_link_failure"
     JOBS_PRESENT_DETAILS_ABSENT = "jobs_present_details_absent"
     JOB_DETAIL_COUNT_MISMATCH = "job_detail_count_mismatch"
+    SCHEDULED_TIME_ABSENT = "scheduled_time_absent"
+    SCHEDULED_TIME_UNASSESSABLE = "scheduled_time_unassessable"
     STREAM_PRESENT_AND_HEALTHY = "stream_present_and_healthy"
 
 
@@ -125,6 +140,7 @@ class TimeCoverageStatus(StrEnum):
     NEVER_PRESENT = "never_present"
     PARTIAL = "partial"
     COMPLETE = "complete"
+    UNASSESSABLE = "unassessable"       # an observed time could not be reconciled
 
 
 _REPOSITORY_STATUSES = frozenset({
@@ -135,6 +151,7 @@ _UPSTREAM_STATUSES = frozenset({
     LocationStreamStatus.RAW_STREAM_ABSENT, LocationStreamStatus.RAW_STREAM_PARTIAL,
     LocationStreamStatus.PARENT_KEY_VIOLATION, LocationStreamStatus.RELATIONSHIP_LINK_FAILURE,
     LocationStreamStatus.JOBS_PRESENT_DETAILS_ABSENT, LocationStreamStatus.JOB_DETAIL_COUNT_MISMATCH,
+    LocationStreamStatus.SCHEDULED_TIME_ABSENT,
 })
 
 
@@ -236,6 +253,7 @@ def investigate_location_stream(
     loaded: RawDatasets | None = None,
     raw_source: str | Path | None = None,
     schedule: CollectionScheduleDefinition | None = COLLECTION_SCHEDULE,
+    temporal: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
 ) -> LocationStreamInvestigationReport:
     """Trace ``target`` through the pipeline; return a categorical report.
 
@@ -247,11 +265,15 @@ def investigate_location_stream(
         raw_source: Optional raw CSV of the coverage dataset, scanned
             header-aware with the default CSV dialect, to localise loss.
         schedule: Authoritative schedule, if one exists (default: project's).
+        temporal: Temporal contract that parses the schedule's observed
+            timestamp field (default: project's).
 
     Raises:
         TypeError: Invalid argument types.
-        LocationCoverageConfigurationError: Configured columns are absent or
-            the schedule/contract datasets are not part of the relationship.
+        LocationCoverageConfigurationError: Configured columns are absent,
+            the schedule/contract datasets are not part of the relationship,
+            or the schedule's timestamp is not a timestamp field of the
+            temporal contract.
     """
     if not isinstance(jobs, pd.DataFrame) or not isinstance(cars, pd.DataFrame):
         raise TypeError("jobs and cars must be pandas DataFrames")
@@ -262,6 +284,7 @@ def investigate_location_stream(
     frames = {relationship.parent: jobs, relationship.detail: cars}
     if coverage.dataset not in frames:
         raise LocationCoverageConfigurationError("coverage dataset is not part of the relationship")
+    schedule_field = _schedule_field(schedule, temporal, frames)
     frame = frames[coverage.dataset]
     columns = coverage.location_columns
     absent = tuple(c for c in (*columns, *coverage.stream_scope_columns) if c not in frame.columns)
@@ -334,9 +357,10 @@ def investigate_location_stream(
     # --- target jobs and details
     target_jobs, target_details, details_present, all_linked = _target_rows(
         jobs, cars, mask, coverage, relationship)
-    time_status = _time_coverage(schedule, frames, mask, coverage, target_jobs)
-    if time_status is TimeCoverageStatus.PARTIAL:
-        fail(PipelineStage.TIME_COVERAGE, LocationStreamStatus.RAW_STREAM_PARTIAL)
+    time_status = _time_coverage(schedule, schedule_field, temporal, frames, mask, coverage, target_jobs)
+    time_failure = _TIME_FAILURES.get(time_status)
+    if time_failure is not None:
+        fail(PipelineStage.TIME_COVERAGE, time_failure)
 
     reconciled = related = None
     if dtypes_ok and keys_ok:
@@ -353,7 +377,8 @@ def investigate_location_stream(
             related = False
 
     failing.sort(key=list(PipelineStage).index)        # pipeline order
-    status = _STATUS_BY_STAGE[failing[0]] if failing else LocationStreamStatus.STREAM_PRESENT_AND_HEALTHY
+    by_stage = {**_STATUS_BY_STAGE, PipelineStage.TIME_COVERAGE: time_failure}
+    status = by_stage[failing[0]] if failing else LocationStreamStatus.STREAM_PRESENT_AND_HEALTHY
     return _report(
         status, failing,
         target_configured=True, present_in_raw_source=in_raw, present_after_ingestion=in_loaded,
@@ -379,9 +404,15 @@ def validate_location_stream(
 # ---------------------------------------------------------------------- helpers
 
 
+#: Every scheduled-coverage outcome other than COMPLETE / NOT_ASSESSED fails.
+_TIME_FAILURES = {
+    TimeCoverageStatus.NEVER_PRESENT: LocationStreamStatus.SCHEDULED_TIME_ABSENT,
+    TimeCoverageStatus.PARTIAL: LocationStreamStatus.RAW_STREAM_PARTIAL,
+    TimeCoverageStatus.UNASSESSABLE: LocationStreamStatus.SCHEDULED_TIME_UNASSESSABLE,
+}
+
 _STATUS_BY_STAGE = {
     PipelineStage.SOURCE_CONTINUITY: LocationStreamStatus.RAW_STREAM_PARTIAL,
-    PipelineStage.TIME_COVERAGE: LocationStreamStatus.RAW_STREAM_PARTIAL,
     PipelineStage.IDENTIFIER_TYPES: LocationStreamStatus.IDENTIFIER_TYPE_MISMATCH,
     PipelineStage.PARENT_KEYS: LocationStreamStatus.PARENT_KEY_VIOLATION,
     PipelineStage.RELATIONSHIP: LocationStreamStatus.RELATIONSHIP_LINK_FAILURE,
@@ -478,20 +509,46 @@ def _target_rows(jobs: pd.DataFrame, cars: pd.DataFrame, mask: pd.Series,
     return target_jobs, details, len(target_details) > 0, bool(linked.all())
 
 
-def _time_coverage(schedule: CollectionScheduleDefinition | None, frames: dict, mask: pd.Series,
-                   coverage: LocationCoverageDefinition, target_jobs: pd.DataFrame) -> TimeCoverageStatus:
-    """Compare target periods with an authoritative schedule (never inferred)."""
+def _schedule_field(schedule: CollectionScheduleDefinition | None, temporal: TemporalReconciliationDefinition,
+                    frames: dict) -> TemporalFieldDefinition | None:
+    """The temporal-contract field behind the schedule's timestamp (fail closed if none)."""
     if schedule is None:
-        return TimeCoverageStatus.NOT_ASSESSED
+        return None
+    if not isinstance(temporal, TemporalReconciliationDefinition):
+        raise TypeError(f"expected a TemporalReconciliationDefinition, got {type(temporal).__name__}")
     if schedule.dataset not in frames:
         raise LocationCoverageConfigurationError("schedule dataset is not part of the relationship")
+    try:
+        field = temporal.field((schedule.dataset, schedule.timestamp_column))
+    except TemporalConfigurationError:
+        raise LocationCoverageConfigurationError(
+            "the schedule timestamp is not defined in the temporal contract") from None
+    if field.kind is not TemporalKind.TIMESTAMP:
+        raise LocationCoverageConfigurationError("the schedule timestamp must be a timestamp field")
+    return field
+
+
+def _time_coverage(schedule: CollectionScheduleDefinition | None, field: TemporalFieldDefinition | None,
+                   temporal: TemporalReconciliationDefinition, frames: dict, mask: pd.Series,
+                   coverage: LocationCoverageDefinition, target_jobs: pd.DataFrame) -> TimeCoverageStatus:
+    """Compare target periods with an authoritative schedule (never inferred).
+
+    Observed times are parsed only by the temporal contract; any missing,
+    invalid or unresolved target time makes coverage UNASSESSABLE.
+    """
+    if schedule is None or field is None:
+        return TimeCoverageStatus.NOT_ASSESSED
     if schedule.dataset == coverage.dataset:
         stamps = frames[schedule.dataset].loc[mask.to_numpy(), schedule.timestamp_column]
     else:
         stamps = target_jobs[schedule.timestamp_column]
-    observed = pd.to_datetime(stamps, utc=True, errors="coerce", format="ISO8601").dropna().dt.floor(schedule.period)
-    expected = pd.to_datetime(list(schedule.expected_periods), utc=True, format="ISO8601").floor(schedule.period)
-    hit = expected.isin(pd.DatetimeIndex(observed.unique()))
+    if stamps.empty:                                   # nothing observed for the target
+        return TimeCoverageStatus.NEVER_PRESENT
+    parsed = parse_temporal_field(stamps, field, temporal.canonical_timezone)
+    if bool((parsed.missing | parsed.invalid | parsed.unresolved).any()):
+        return TimeCoverageStatus.UNASSESSABLE
+    observed = pd.DatetimeIndex(parsed.instants.dt.tz_convert("UTC")).floor(schedule.period)
+    hit = schedule.expected_instants.isin(observed.unique())
     if not hit.any():
         return TimeCoverageStatus.NEVER_PRESENT
     return TimeCoverageStatus.COMPLETE if bool(hit.all()) else TimeCoverageStatus.PARTIAL

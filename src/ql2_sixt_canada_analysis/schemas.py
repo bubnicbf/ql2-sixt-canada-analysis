@@ -64,6 +64,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import datetime as dt
+import re
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -612,14 +613,22 @@ EXPECTED_LOCATION_COVERAGE: Final = LocationCoverageDefinition(
 )
 
 
+#: An ISO-8601 instant ends with ``Z`` or an explicit UTC offset.
+_EXPLICIT_OFFSET: Final = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
+
+
 @dataclass(frozen=True, slots=True)
 class CollectionScheduleDefinition:
     """Authoritative collection cadence for temporal-completeness checks.
 
     Attributes:
         dataset: Dataset whose ``timestamp_column`` dates each collection.
-        timestamp_column: Column holding ISO-8601 collection timestamps.
-        expected_periods: Authoritative ISO-8601 period starts (UTC) that must
+        timestamp_column: Observed collection-time column. It must be a
+            timestamp field of the temporal contract, which alone decides how
+            observed values are parsed and resolved to instants (see
+            :func:`ql2_sixt_canada_analysis.streams.investigate_location_stream`).
+        expected_periods: Authoritative ISO-8601 period starts, each with an
+            explicit ``Z`` or UTC offset (naive values are rejected), that must
             each contain the stream. Never inferred from observed rows.
         period: pandas offset alias used to floor timestamps (e.g. ``"h"``).
         definitions: Registry used for validation (tests may pass their own).
@@ -648,8 +657,15 @@ class CollectionScheduleDefinition:
             pd.tseries.frequencies.to_offset(self.period)
         except (ValueError, TypeError) as exc:
             raise LocationCoverageConfigurationError("schedule periods or period alias are invalid") from exc
+        if not all(_EXPLICIT_OFFSET.search(p.strip()) for p in periods):
+            raise LocationCoverageConfigurationError("expected_periods must state an explicit UTC offset")
         if parsed.has_duplicates:
             raise LocationCoverageConfigurationError("expected_periods must not contain duplicates")
+
+    @property
+    def expected_instants(self) -> pd.DatetimeIndex:
+        """Scheduled period starts as UTC instants, floored to ``period``."""
+        return pd.to_datetime(list(self.expected_periods), utc=True, format="ISO8601").floor(self.period)
 
 
 #: No authoritative collection schedule exists in the repository or project

@@ -327,6 +327,14 @@ present and healthy.
   target's scope; it does not infer a cadence. Temporal completeness needs an
   authoritative `COLLECTION_SCHEDULE`; none exists, so it is reported as
   `NOT_ASSESSED`.
+- When a schedule is configured, its timestamp must be a timestamp field of
+  `TEMPORAL_RECONCILIATION`, and observed times are resolved only through
+  that contract (e.g. the `MST` designator as fixed UTC-07:00). Scheduled
+  instants must state an explicit offset. No scheduled period observed
+  (`SCHEDULED_TIME_ABSENT`), some missing (`RAW_STREAM_PARTIAL`) or any
+  target time that cannot be reconciled - missing, invalid, or without zone
+  authority, never assumed UTC (`SCHEDULED_TIME_UNASSESSABLE`) - all fail at
+  `TIME_COVERAGE`, and `validate_location_stream` rejects them.
 - It never creates, repairs, filters or writes records. Tests use fabricated
   locations and identifiers. Proprietary diagnostics and extracts must not be
   committed; sanitized, metric-free notes live in `docs/investigations/`.

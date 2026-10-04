@@ -29,6 +29,9 @@ from ql2_sixt_canada_analysis.schemas import (
     DatasetKey,
     LocationCoverageConfigurationError,
     LocationCoverageMode,
+    TEMPORAL_RECONCILIATION,
+    TemporalAwareness,
+    TemporalKind,
 )
 from ql2_sixt_canada_analysis.streams import (
     LocationStreamError,
@@ -216,25 +219,128 @@ def test_jobs_present_details_absent_for_jobs_level_stream() -> None:
 # ---------------------------------------------------------------- time coverage
 
 
-def _schedule(periods: tuple[str, ...]) -> CollectionScheduleDefinition:
-    return CollectionScheduleDefinition(dataset=JOBS, timestamp_column=TS, expected_periods=periods, period="h")
+# The schedule is matched against observed capture times parsed through the
+# central TEMPORAL_RECONCILIATION contract. Its designator field maps the
+# literal "MST" to a fixed UTC-07:00 offset (the collector's clock label, not
+# Mountain local time), so "2025-01-15 05:00:00 MST" is 2025-01-15 12:00:00Z.
+CAPTURE = next(f for f in TEMPORAL_RECONCILIATION.fields
+               if f.dataset == CARS and f.kind is TemporalKind.TIMESTAMP
+               and f.awareness is TemporalAwareness.DESIGNATOR)
+# A naive timestamp field with no authoritative zone: never reconcilable.
+NAIVE = next(f for f in TEMPORAL_RECONCILIATION.fields
+             if f.dataset == CARS and f.kind is TemporalKind.TIMESTAMP and f.awareness is TemporalAwareness.NAIVE)
+
+
+def _schedule(periods: tuple[str, ...], field: object = None) -> CollectionScheduleDefinition:
+    column = (field or CAPTURE).column  # type: ignore[attr-defined]
+    return CollectionScheduleDefinition(dataset=CARS, timestamp_column=column, expected_periods=periods, period="h")
+
+
+def _timed_inputs(times: dict[str, str | None], column: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Healthy inputs whose target detail rows carry the given capture time per job."""
+    jobs, cars = _healthy_inputs()
+    column = column or CAPTURE.column
+    target = (cars[LOC] == DOWNTOWN).to_numpy()
+    cars = cars.astype({column: object})
+    for job, value in times.items():
+        cars.loc[target & (cars[DK] == job).to_numpy(), column] = value
+    return jobs, cars
+
+
+def _assert_time_failure(report: LocationStreamInvestigationReport, coverage: TimeCoverageStatus) -> None:
+    assert report.schedule_available and report.time_coverage is coverage
+    assert not report.is_healthy and report.status is not S.STREAM_PRESENT_AND_HEALTHY
+    assert report.earliest_failing_stage is P.TIME_COVERAGE and report.failing_stages == (P.TIME_COVERAGE,)
+    # Every other stage is healthy: the failure is attributable to time coverage alone.
+    assert report.present_after_cleaning and report.identifier_dtypes_valid and report.parent_keys_valid
+    assert report.target_details_all_linked and report.reconciliation_passes and report.relationship_passes
 
 
 def test_no_authoritative_schedule_is_explicit() -> None:
     assert COLLECTION_SCHEDULE is None
     report = _investigate(*_healthy_inputs())
     assert not report.schedule_available and report.time_coverage is TimeCoverageStatus.NOT_ASSESSED
+    assert report.is_healthy and report.failing_stages == ()
+    # Unparsable capture times are irrelevant when no schedule is required.
+    assert _investigate(*_timed_inputs({J1: "SYNTH-NOT-A-TIME", J2: None})).is_healthy
 
 
-def test_partial_time_coverage_under_an_authoritative_schedule() -> None:
-    jobs = _jobs([{PK: J1, TS: "2025-01-01T00:00:00Z", COUNT: 2}, {PK: J2, TS: "2025-01-01T01:00:00Z", COUNT: 2}])
-    _, cars = _healthy_inputs()
-    complete = _investigate(jobs, cars, schedule=_schedule(("2025-01-01T00:00:00Z", "2025-01-01T01:00:00Z")))
-    assert complete.time_coverage is TimeCoverageStatus.COMPLETE and complete.is_healthy
-    partial = _investigate(jobs, cars, schedule=_schedule(
-        ("2025-01-01T00:00:00Z", "2025-01-01T01:00:00Z", "2025-01-01T02:00:00Z")))
-    assert partial.time_coverage is TimeCoverageStatus.PARTIAL
-    assert (partial.status, partial.earliest_failing_stage) == (S.RAW_STREAM_PARTIAL, P.TIME_COVERAGE)
+def test_mst_capture_matches_utc_schedule_through_the_temporal_contract() -> None:
+    # Regression: the former ISO-8601-only parser could not read the MST
+    # designator, reported NEVER_PRESENT and still called the stream healthy.
+    jobs, cars = _timed_inputs({J1: "2025-01-15 05:00:00 MST", J2: "2025-01-15 05:00:00 MST"})
+    report = _investigate(jobs, cars, schedule=_schedule(("2025-01-15T12:00:00Z",)))
+    assert report.time_coverage is TimeCoverageStatus.COMPLETE
+    assert report.is_healthy and report.status is S.STREAM_PRESENT_AND_HEALTHY
+    assert report.earliest_failing_stage is None and report.failing_stages == ()
+    assert validate_location_stream(jobs, cars, TARGET, coverage=COV,
+                                    schedule=_schedule(("2025-01-15T12:00:00Z",))) == report
+
+
+def test_complete_schedule_requires_reconciled_instants() -> None:
+    # 05:xx MST = 12:xx UTC and 06:xx MST = 13:xx UTC; the 13:00 local wall
+    # hour would only "match" if the designator were ignored.
+    jobs, cars = _timed_inputs({J1: "2025-01-15 05:10:00 MST", J2: "2025-01-15 06:59:59 MST"})
+    report = _investigate(jobs, cars, schedule=_schedule(("2025-01-15T12:00:00Z", "2025-01-15T13:00:00Z")))
+    assert report.time_coverage is TimeCoverageStatus.COMPLETE and report.is_healthy
+    wall = _investigate(jobs, cars, schedule=_schedule(("2025-01-15T05:00:00Z", "2025-01-15T06:00:00Z")))
+    assert wall.time_coverage is TimeCoverageStatus.NEVER_PRESENT and not wall.is_healthy
+
+
+def test_never_present_schedule_fails_closed() -> None:
+    jobs, cars = _timed_inputs({J1: "2025-01-15 05:00:00 MST", J2: "2025-01-15 05:00:00 MST"})
+    schedule = _schedule(("2025-01-16T12:00:00Z",))             # genuinely absent
+    report = _investigate(jobs, cars, schedule=schedule)
+    _assert_time_failure(report, TimeCoverageStatus.NEVER_PRESENT)
+    assert report.status is S.SCHEDULED_TIME_ABSENT and report.upstream_issue_indicated
+    assert not report.repository_fix_required
+    with pytest.raises(LocationStreamError) as info:
+        validate_location_stream(jobs, cars, TARGET, coverage=COV, schedule=schedule)
+    assert info.value.report == report
+    assert "time_coverage" in str(info.value) and "scheduled_time_absent" in str(info.value)
+    assert "2025" not in str(info.value) and DOWNTOWN not in str(info.value)
+
+
+def test_partial_schedule_remains_a_failure() -> None:
+    jobs, cars = _timed_inputs({J1: "2025-01-15 05:00:00 MST", J2: "2025-01-15 06:00:00 MST"})
+    schedule = _schedule(("2025-01-15T12:00:00Z", "2025-01-15T13:00:00Z", "2025-01-15T14:00:00Z"))
+    report = _investigate(jobs, cars, schedule=schedule)
+    _assert_time_failure(report, TimeCoverageStatus.PARTIAL)
+    assert report.status is S.RAW_STREAM_PARTIAL and report.upstream_issue_indicated
+    with pytest.raises(LocationStreamError):
+        validate_location_stream(jobs, cars, TARGET, coverage=COV, schedule=schedule)
+
+
+@pytest.mark.parametrize("value", ["2025-01-15 05:00:00 PST",   # designator without an authoritative offset
+                                   "2025-01-15 12:00:00",       # naive: must not be read as UTC
+                                   "2025-01-15T12:00:00Z",      # wrong form for this field's contract
+                                   "SYNTH-NOT-A-TIME", None])
+def test_unreconcilable_capture_time_fails_closed(value: str | None) -> None:
+    jobs, cars = _timed_inputs({J1: "2025-01-15 05:00:00 MST", J2: value})
+    schedule = _schedule(("2025-01-15T12:00:00Z",))             # J1 alone would cover it
+    report = _investigate(jobs, cars, schedule=schedule)
+    _assert_time_failure(report, TimeCoverageStatus.UNASSESSABLE)
+    assert report.status is S.SCHEDULED_TIME_UNASSESSABLE
+    with pytest.raises(LocationStreamError):
+        validate_location_stream(jobs, cars, TARGET, coverage=COV, schedule=schedule)
+
+
+def test_field_without_timezone_authority_is_never_assumed_utc() -> None:
+    # The naive field has no authoritative zone in the contract, so even a
+    # value that would equal the scheduled instant if read as UTC is refused.
+    jobs, cars = _timed_inputs({J1: "2025-01-15 12:00:00.000", J2: "2025-01-15 12:00:00.000"}, NAIVE.column)
+    report = _investigate(jobs, cars, schedule=_schedule(("2025-01-15T12:00:00Z",), NAIVE))
+    _assert_time_failure(report, TimeCoverageStatus.UNASSESSABLE)
+
+
+def test_schedule_on_a_field_outside_the_temporal_contract_is_rejected() -> None:
+    schedule = CollectionScheduleDefinition(dataset=JOBS, timestamp_column=TS,
+                                            expected_periods=("2025-01-15T12:00:00Z",), period="h")
+    with pytest.raises(LocationCoverageConfigurationError):
+        _investigate(*_healthy_inputs(), schedule=schedule)
+    date_field = next(f for f in TEMPORAL_RECONCILIATION.fields if f.dataset == CARS and f.kind is TemporalKind.DATE)
+    with pytest.raises(LocationCoverageConfigurationError):
+        _investigate(*_healthy_inputs(), schedule=_schedule(("2025-01-15T12:00:00Z",), date_field))
 
 
 def test_invalid_schedule_is_rejected() -> None:
@@ -242,6 +348,8 @@ def test_invalid_schedule_is_rejected() -> None:
         _schedule(())
     with pytest.raises(LocationCoverageConfigurationError):
         _schedule(("not-a-timestamp",))
+    with pytest.raises(LocationCoverageConfigurationError):
+        _schedule(("2025-01-15T12:00:00",))   # scheduled instants must state their offset
 
 
 # --------------------------------------------------------- representation issues
