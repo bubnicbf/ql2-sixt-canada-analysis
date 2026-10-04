@@ -11,7 +11,7 @@ import dataclasses
 
 import pandas as pd
 import pytest
-from test_comparison import COV, DEF, _jobs, same_both
+from test_comparison import COV, DEF, _jobs, offer, same_both
 from test_vehicle_stability import T, V1, V2, frame as stability_frame, obs, two
 
 import ql2_sixt_canada_analysis
@@ -76,7 +76,10 @@ def evidence(status: CS) -> LocationStreamComparisonReport:
         shares_collection_events=True, temporal_overlap=TemporalOverlap.COMPLETE, ambiguous_pairing=False,
         comparable_captures_exist=True, product_sets=OfferSetResult.IDENTICAL,
         price_aware_offers=OfferSetResult.IDENTICAL, synchronized_prices=True,
-        scope_baseline=ScopeBaseline.DISCRIMINATIVE)
+        scope_baseline=ScopeBaseline.DISCRIMINATIVE, first_capture_count=2, second_capture_count=2,
+        paired_capture_count=2, first_unpaired_capture_count=0, second_unpaired_capture_count=0,
+        matching_paired_capture_count=2, differing_paired_capture_count=0, first_unassessable_row_count=0,
+        second_unassessable_row_count=0, minimum_paired_captures=2, duplicate_inference_blockers=())
 
 
 def frame(labels: list[tuple[str, ...]]) -> pd.DataFrame:
@@ -138,7 +141,9 @@ def test_behavioural_evidence_never_resolves_the_policy(status):
 
 
 def test_likely_duplicate_from_the_comparison_api_keeps_policy_unresolved():
-    comparison = compare_location_streams(_jobs(), same_both(), DEF)
+    # Full overlap, two identical paired captures and a discriminative baseline (another branch differs).
+    other = [(job, "SYNTH-BRANCH-C", offer("SYNTH-CAR-Y")) for job in ("SYNTH-JOB-001", "SYNTH-JOB-002")]
+    comparison = compare_location_streams(_jobs(), same_both(extra=other), DEF)
     assert comparison.status is CS.LIKELY_DUPLICATE_STREAMS          # evidence produced by the real API
     report = assess_location_policy(UNRESOLVED, comparison)
     assert report.state is PS.UNRESOLVED and not report.locations_are_aliases

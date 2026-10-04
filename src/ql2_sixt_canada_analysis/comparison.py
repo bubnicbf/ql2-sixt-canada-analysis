@@ -18,12 +18,19 @@ Evidence rules (fixed in code, not tuned to any data)
    * a stream with several identities -> ``LOCATION_MAPPING_DEFECT``.
 3. **Behaviour** (only when identity is unavailable) on *paired* captures:
    * no unambiguous pairs -> ``INSUFFICIENT_COMPARABLE_CAPTURES``;
-   * offers (products *and* prices, as multisets) identical in every paired
-     capture, and identical behaviour is **not** typical of other location
-     pairs in the same scope -> ``LIKELY_DUPLICATE_STREAMS``;
+   * ``LIKELY_DUPLICATE_STREAMS`` only with affirmative evidence for every
+     prerequisite (each gap is a :class:`DuplicateInferenceBlocker`):
+     at least ``minimum_paired_captures`` independent paired capture events
+     (events, not offer rows); ``COMPLETE`` temporal overlap (no unpaired
+     capture on either side); the ``DISCRIMINATIVE`` scope baseline (an
+     allowlist - ``UNAVAILABLE`` or ``NON_DISCRIMINATIVE`` never suffice);
+     identical price-aware offers in *every* paired capture; no stream row
+     whose capture cannot be identified; unambiguous pairing;
    * no paired capture with equal product multisets -> ``LIKELY_DISTINCT_STREAMS``;
-   * anything else -> ``COMPARISON_INCONCLUSIVE``.
-   Behaviour never confirms an alias or distinctness.
+   * anything else -> ``COMPARISON_INCONCLUSIVE`` (insufficient duplicate
+     evidence is never read as distinctness).
+   Behaviour never confirms an alias or distinctness, never resolves a
+   location policy and never enables pricing.
 
 Pairing: ``SHARED_COLLECTION_EVENT`` pairs exactly by collection event;
 ``CAPTURE_TIME`` pairs reconciled instants within an explicit tolerance and
@@ -39,7 +46,9 @@ identical in all its paired captures (identical offers are then normal for
 the source and prove nothing), ``DISCRIMINATIVE`` if none is, ``UNAVAILABLE``
 if there are no such pairs.
 
-The report holds enums and booleans only. Nothing merges, rewrites, drops,
+The report holds enums, booleans and aggregate evidence counts (captures per
+stream, paired, unpaired, matching and differing paired captures, the
+required minimum) - never values. Nothing merges, rewrites, drops,
 canonicalises or writes rows; :func:`canonical_location_keys` is opt-in and
 applies only aliases declared in the coverage contract.
 """
@@ -66,6 +75,7 @@ from ql2_sixt_canada_analysis.temporal import _parent_positions, parse_temporal_
 
 __all__ = [
     "ComparisonPreconditionError",
+    "DuplicateInferenceBlocker",
     "IdentityEvidence",
     "LocationAliasNotConfirmedError",
     "LocationStreamComparisonReport",
@@ -120,6 +130,20 @@ class ScopeBaseline(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class DuplicateInferenceBlocker(StrEnum):
+    """A missing prerequisite for ``LIKELY_DUPLICATE_STREAMS`` (stable, ordered)."""
+
+    NO_PAIRED_CAPTURES = "no_paired_captures"
+    INSUFFICIENT_PAIRED_CAPTURES = "insufficient_paired_captures"
+    INCOMPLETE_TEMPORAL_OVERLAP = "incomplete_temporal_overlap"
+    TEMPORAL_OVERLAP_UNAVAILABLE = "temporal_overlap_unavailable"
+    AMBIGUOUS_PAIRING = "ambiguous_pairing"
+    UNASSESSABLE_OBSERVATIONS = "unassessable_observations"
+    BASELINE_UNAVAILABLE = "baseline_unavailable"
+    BASELINE_NON_DISCRIMINATIVE = "baseline_non_discriminative"
+    DIFFERING_PAIRED_CAPTURES = "differing_paired_captures"
+
+
 _CONFIRMED = frozenset({
     LocationStreamComparisonStatus.CONFIRMED_DISTINCT_LOCATIONS, LocationStreamComparisonStatus.CONFIRMED_ALIAS,
     LocationStreamComparisonStatus.DUPLICATED_COLLECTION_CONFIGURATION,
@@ -146,6 +170,30 @@ class LocationStreamComparisonReport:
     price_aware_offers: OfferSetResult
     synchronized_prices: bool | None
     scope_baseline: ScopeBaseline
+    first_capture_count: int
+    second_capture_count: int
+    paired_capture_count: int
+    first_unpaired_capture_count: int
+    second_unpaired_capture_count: int
+    matching_paired_capture_count: int
+    differing_paired_capture_count: int
+    first_unassessable_row_count: int
+    second_unassessable_row_count: int
+    minimum_paired_captures: int
+    duplicate_inference_blockers: tuple[DuplicateInferenceBlocker, ...]
+
+    def __post_init__(self) -> None:
+        # Programmer invariants for the evidence denominator.
+        assert self.matching_paired_capture_count + self.differing_paired_capture_count == self.paired_capture_count
+        assert self.first_capture_count == self.paired_capture_count + self.first_unpaired_capture_count
+        assert self.second_capture_count == self.paired_capture_count + self.second_unpaired_capture_count
+        if self.status is LocationStreamComparisonStatus.LIKELY_DUPLICATE_STREAMS:
+            assert not self.duplicate_inference_blockers
+
+    @property
+    def duplicate_evidence_sufficient(self) -> bool:
+        """Every prerequisite of a behavioural likely-duplicate holds (still not authority)."""
+        return not self.duplicate_inference_blockers
 
     @property
     def confirmed_by_authority(self) -> bool:
@@ -228,7 +276,9 @@ def compare_location_streams(
             shares_collection_events=None, temporal_overlap=TemporalOverlap.UNAVAILABLE, ambiguous_pairing=False,
             comparable_captures_exist=False, product_sets=OfferSetResult.UNAVAILABLE,
             price_aware_offers=OfferSetResult.UNAVAILABLE, synchronized_prices=None,
-            scope_baseline=ScopeBaseline.UNAVAILABLE)
+            scope_baseline=ScopeBaseline.UNAVAILABLE,
+            **_evidence(cars, first_mask, second_mask, [], [], definition, TemporalOverlap.UNAVAILABLE,
+                        False, ScopeBaseline.UNAVAILABLE))
 
     identity = _identity(cars, first_mask, second_mask, definition.identity_columns)
     events_first = _events(cars, first_mask, rel)
@@ -236,8 +286,9 @@ def compare_location_streams(
     shares_events = bool(set(events_first) & set(events_second))
     overlap, pairs, ambiguous = _pair(cars, first_mask, second_mask, definition)
     offers = _Offers(cars, definition)
-    products, priced = offers.compare(first_mask, second_mask, pairs)
+    products, priced, full_equal = offers.compare(first_mask, second_mask, pairs)
     baseline = _baseline(cars, keys, first_mask | second_mask, definition, offers)
+    evidence = _evidence(cars, first_mask, second_mask, pairs, full_equal, definition, overlap, ambiguous, baseline)
 
     S = LocationStreamComparisonStatus
     if identity is IdentityEvidence.CONFLICTING:
@@ -248,8 +299,8 @@ def compare_location_streams(
         status = S.DUPLICATED_COLLECTION_CONFIGURATION if shares_events else S.CONFIRMED_ALIAS
     elif not pairs:
         status = S.INSUFFICIENT_COMPARABLE_CAPTURES
-    elif priced is OfferSetResult.IDENTICAL and baseline is not ScopeBaseline.NON_DISCRIMINATIVE:
-        status = S.LIKELY_DUPLICATE_STREAMS
+    elif not evidence["duplicate_inference_blockers"]:
+        status = S.LIKELY_DUPLICATE_STREAMS                    # every prerequisite affirmatively met
     elif products is OfferSetResult.DISTINCT:
         status = S.LIKELY_DISTINCT_STREAMS
     else:
@@ -259,7 +310,7 @@ def compare_location_streams(
         temporal_overlap=overlap, ambiguous_pairing=ambiguous, comparable_captures_exist=bool(pairs),
         product_sets=products, price_aware_offers=priced,
         synchronized_prices=(priced is OfferSetResult.IDENTICAL) if pairs else None,
-        scope_baseline=baseline)
+        scope_baseline=baseline, **evidence)
 
 
 def validate_confirmed_location_alias(
@@ -383,9 +434,11 @@ class _Offers:
         # Exact tuple equality; multiplicity kept; row order irrelevant.
         return Counter(rows[p] for p in self.by_event.get(event, ()) if mask[p])
 
-    def compare(self, a: np.ndarray, b: np.ndarray, pairs: list) -> tuple[OfferSetResult, OfferSetResult]:
+    def compare(self, a: np.ndarray, b: np.ndarray, pairs: list
+                ) -> tuple[OfferSetResult, OfferSetResult, list[bool]]:
+        """(products, price-aware offers, per-pair price-aware equality in ``pairs`` order)."""
         if not pairs:
-            return OfferSetResult.UNAVAILABLE, OfferSetResult.UNAVAILABLE
+            return OfferSetResult.UNAVAILABLE, OfferSetResult.UNAVAILABLE, []
         product_equal = [self._multiset(self.products, a, ea) == self._multiset(self.products, b, eb)
                          for ea, eb in pairs]
         full_equal = [self._multiset(self.full, a, ea) == self._multiset(self.full, b, eb) for ea, eb in pairs]
@@ -403,7 +456,68 @@ class _Offers:
             priced = OfferSetResult.DISTINCT
         else:
             priced = OfferSetResult.PARTIAL
-        return products, priced
+        return products, priced, full_equal
+
+
+_AFFIRMATIVE_BASELINES = frozenset({ScopeBaseline.DISCRIMINATIVE})       # allowlist, not "anything but"
+_BASELINE_GAPS = {ScopeBaseline.UNAVAILABLE: DuplicateInferenceBlocker.BASELINE_UNAVAILABLE,
+                  ScopeBaseline.NON_DISCRIMINATIVE: DuplicateInferenceBlocker.BASELINE_NON_DISCRIMINATIVE}
+
+
+def _evidence(cars: pd.DataFrame, a: np.ndarray, b: np.ndarray, pairs: list, full_equal: list[bool],
+              d: LocationStreamComparisonDefinition, overlap: TemporalOverlap, ambiguous: bool,
+              baseline: ScopeBaseline) -> dict:
+    """Auditable evidence counts and the ordered gaps blocking a likely-duplicate inference.
+
+    Counts are independent capture events (complete detail relationship
+    keys), never offer rows; rows without a complete capture key (or, for
+    ``CAPTURE_TIME`` pairing, without a resolvable capture time) are counted
+    as unassessable instead of being dropped.
+    """
+    B = DuplicateInferenceBlocker
+    rel = d.relationship
+    ev_a, ev_b = set(_events(cars, a, rel)), set(_events(cars, b, rel))
+    paired_a, paired_b = {ea for ea, _ in pairs}, {eb for _, eb in pairs}
+    complete = cars.loc[:, list(rel.detail_key_columns)].notna().all(axis=1).to_numpy()
+    unassessable = ~complete
+    if d.pairing is CapturePairing.CAPTURE_TIME:
+        # Rows whose capture time the temporal contract cannot resolve are counted, not dropped.
+        field = d.temporal.field(d.capture_time_field)
+        parsed = parse_temporal_field(cars[field.column], field, d.temporal.canonical_timezone)
+        unassessable = unassessable | parsed.instants.isna().to_numpy()
+    unassessable_a, unassessable_b = int((a & unassessable).sum()), int((b & unassessable).sum())
+    matching = sum(1 for equal in full_equal if equal)
+
+    gaps: list[DuplicateInferenceBlocker] = []
+    if not pairs:
+        gaps.append(B.NO_PAIRED_CAPTURES)
+    elif len(pairs) < d.minimum_paired_captures:
+        gaps.append(B.INSUFFICIENT_PAIRED_CAPTURES)
+    if overlap is TemporalOverlap.UNAVAILABLE:
+        gaps.append(B.TEMPORAL_OVERLAP_UNAVAILABLE)
+    elif overlap is not TemporalOverlap.COMPLETE:
+        gaps.append(B.INCOMPLETE_TEMPORAL_OVERLAP)
+    if ambiguous:
+        gaps.append(B.AMBIGUOUS_PAIRING)
+    if unassessable_a or unassessable_b:
+        gaps.append(B.UNASSESSABLE_OBSERVATIONS)
+    if baseline not in _AFFIRMATIVE_BASELINES:
+        gaps.append(_BASELINE_GAPS[baseline])
+    if matching < len(pairs):
+        gaps.append(B.DIFFERING_PAIRED_CAPTURES)
+    return dict(
+        first_capture_count=len(paired_a) + len(ev_a - paired_a),
+        second_capture_count=len(paired_b) + len(ev_b - paired_b),
+        paired_capture_count=len(pairs),
+        first_unpaired_capture_count=len(ev_a - paired_a),
+        second_unpaired_capture_count=len(ev_b - paired_b),
+        matching_paired_capture_count=matching,
+        differing_paired_capture_count=len(pairs) - matching,
+        first_unassessable_row_count=unassessable_a,
+        second_unassessable_row_count=unassessable_b,
+        minimum_paired_captures=d.minimum_paired_captures,
+        duplicate_inference_blockers=tuple(gaps),
+    )
 
 
 def _baseline(cars: pd.DataFrame, keys: pd.Series, target_mask: np.ndarray,
@@ -425,7 +539,7 @@ def _baseline(cars: pd.DataFrame, keys: pd.Series, target_mask: np.ndarray,
         my = _key_mask(keys, y) & in_scope
         _, pairs, _ = _pair(cars, mx, my, d)
         if pairs:
-            _, priced = offers.compare(mx, my, pairs)
+            _, priced, _ = offers.compare(mx, my, pairs)
             results.append(priced is OfferSetResult.IDENTICAL)
     if not results:
         return ScopeBaseline.UNAVAILABLE

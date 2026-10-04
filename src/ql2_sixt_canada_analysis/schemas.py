@@ -75,6 +75,7 @@ from typing import Final
 import pandas as pd
 
 __all__ = [
+    "MINIMUM_DUPLICATE_PAIRED_CAPTURES",
     "VANCOUVER_LOCATION_POLICY",
     "LocationIdentityPolicy",
     "LocationPolicyAuthority",
@@ -1016,6 +1017,9 @@ class LocationStreamComparisonDefinition:
         product_columns: Stable offer identity (no prices, identifiers,
             location labels or capture timestamps).
         price_columns: Price fields, compared only in the price-aware offer.
+        minimum_paired_captures: Independent paired capture events (not offer
+            rows) required before ``LIKELY_DUPLICATE_STREAMS`` is possible;
+            an integer of at least two.
     """
 
     first: tuple[str, ...]
@@ -1029,8 +1033,13 @@ class LocationStreamComparisonDefinition:
     identity_columns: tuple[str, ...] = ()
     capture_time_field: tuple[DatasetKey, str] | None = None
     pairing_tolerance: dt.timedelta | None = None
+    minimum_paired_captures: int = 2
 
     def __post_init__(self) -> None:
+        if (isinstance(self.minimum_paired_captures, bool) or not isinstance(self.minimum_paired_captures, int)
+                or self.minimum_paired_captures < 2):
+            raise LocationCoverageConfigurationError(
+                "minimum_paired_captures must be an integer of at least two independent captures")
         cov = self.coverage
         if not cov.is_configured:
             raise LocationCoverageConfigurationError("comparison requires a configured coverage contract")
@@ -1088,6 +1097,11 @@ class LocationStreamComparisonDefinition:
 #: confirmed from this data. Product identity: vehicle and rental-search
 #: attributes; prices are compared only in the price-aware offer, as exact
 #: source text (price types are not yet validated).
+#: Conservative minimum of independent paired capture events for a
+#: behavioural likely-duplicate classification. No authority defines a
+#: threshold, so the floor is two: a single shared capture is never enough.
+MINIMUM_DUPLICATE_PAIRED_CAPTURES: Final = 2
+
 LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
     first=COMPARED_LOCATION_STREAMS[0],
     second=COMPARED_LOCATION_STREAMS[1],
@@ -1097,6 +1111,7 @@ LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
     pairing=CapturePairing.SHARED_COLLECTION_EVENT,
     product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
     price_columns=('price_per_day', 'price_num'),
+    minimum_paired_captures=MINIMUM_DUPLICATE_PAIRED_CAPTURES,
 )
 
 

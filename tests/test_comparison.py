@@ -19,6 +19,7 @@ from conftest import contract_columns
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.comparison import (
     ComparisonPreconditionError,
+    DuplicateInferenceBlocker as DB,
     IdentityEvidence,
     LocationAliasNotConfirmedError,
     LocationStreamComparisonReport,
@@ -250,10 +251,14 @@ def test_identical_offers_discriminative_scope_likely_duplicate():
     assert r.upstream_review_required and r.identity_evidence is IdentityEvidence.UNAVAILABLE
 
 
-def test_identical_offers_without_baseline_still_likely_duplicate():
+def test_identical_offers_without_a_baseline_are_inconclusive():
+    # Previously LIKELY_DUPLICATE_STREAMS: "baseline is not NON_DISCRIMINATIVE" accepted an
+    # UNAVAILABLE baseline, so identical offers counted as evidence although nothing showed
+    # that identical behaviour is unusual for the source. Only DISCRIMINATIVE qualifies.
     r = compare_location_streams(_jobs(), same_both(), DEF)
     assert r.scope_baseline is ScopeBaseline.UNAVAILABLE
-    assert r.status is S.LIKELY_DUPLICATE_STREAMS
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.duplicate_inference_blockers == (DB.BASELINE_UNAVAILABLE,)
 
 
 def test_identical_offers_typical_in_scope_is_inconclusive():
@@ -300,11 +305,13 @@ def test_disjoint_events_insufficient_captures():
     assert r.comparable_captures_exist is False and r.synchronized_prices is None
 
 
-def test_partial_overlap_compares_only_shared_events():
+def test_partial_overlap_compares_only_shared_events_and_is_not_duplicate_evidence():
+    # Previously LIKELY_DUPLICATE_STREAMS from a single shared capture with an unpaired one.
     cars = same_both(jobs=(J1,), extra=[(J2, A, offer("SYNTH-CAR-ONLY-A"))])
     r = compare_location_streams(_jobs(), cars, DEF)
     assert r.temporal_overlap is TemporalOverlap.PARTIAL
-    assert r.status is S.LIKELY_DUPLICATE_STREAMS
+    assert r.price_aware_offers is O.IDENTICAL and r.paired_capture_count == 1   # only shared events compared
+    assert r.status is S.COMPARISON_INCONCLUSIVE
 
 
 def test_missing_event_key_rows_not_paired():
@@ -407,7 +414,7 @@ def test_conflicting_identity_is_mapping_defect():
 
 
 def test_missing_identity_values_fall_back_to_behaviour():
-    cars = _with_ids(same_both(), "SYNTH-ST-1", "SYNTH-ST-1")
+    cars = _with_ids(same_both(extra=[(J1, C, offer("SYNTH-CAR-Y")), (J2, C, offer("SYNTH-CAR-Y"))]), "SYNTH-ST-1", "SYNTH-ST-1")
     cars.loc[cars[LOC] == B, ID_COL] = pd.NA
     r = compare_location_streams(_jobs(), cars, IDDEF)
     assert r.identity_evidence is IdentityEvidence.UNAVAILABLE
@@ -429,8 +436,11 @@ def _timed(rows: list[tuple[str, str, str]]) -> pd.DataFrame:
 def test_capture_time_pairs_within_tolerance_across_events():
     cars = _timed([(J1, A, "2025-01-15 05:00:00 MST"), (J2, B, "2025-01-15 05:03:00 MST")])
     r = compare_location_streams(_jobs(), cars, TDEF)
-    assert r.temporal_overlap is TemporalOverlap.COMPLETE and r.status is S.LIKELY_DUPLICATE_STREAMS
+    assert r.temporal_overlap is TemporalOverlap.COMPLETE and r.paired_capture_count == 1
     assert r.shares_collection_events is False
+    # One pair is below the evidence minimum (and no baseline exists): not a likely duplicate.
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.duplicate_inference_blockers == (DB.INSUFFICIENT_PAIRED_CAPTURES, DB.BASELINE_UNAVAILABLE)
 
 
 @pytest.mark.parametrize("second, paired", [("05:05:00", True), ("05:05:01", False)])
@@ -470,8 +480,8 @@ def test_inconsistent_times_within_event_fail_closed():
 
 def test_validate_alias_raises_without_authority():
     with pytest.raises(LocationAliasNotConfirmedError) as info:
-        validate_confirmed_location_alias(_jobs(), same_both(), DEF)
-    assert info.value.report.status is S.LIKELY_DUPLICATE_STREAMS
+        validate_confirmed_location_alias(_jobs(), same_both(extra=[(J1, C, offer("SYNTH-CAR-Y")), (J2, C, offer("SYNTH-CAR-Y"))]), DEF)
+    assert info.value.report.status is S.LIKELY_DUPLICATE_STREAMS     # behaviour is never alias authority
     assert "SYNTH" not in str(info.value)
 
 
@@ -498,12 +508,15 @@ def test_source_coverage_is_computed_from_raw_labels():
 # --------------------------------------------------------- report safety
 
 
-def test_report_holds_only_enums_bools_and_none():
+def test_report_holds_only_enums_bools_counts_and_none():
     r = compare_location_streams(_jobs(), same_both(), DEF)
     assert isinstance(r, LocationStreamComparisonReport)
     for field in dataclasses.fields(r):
         value = getattr(r, field.name)
-        assert value is None or isinstance(value, bool) or hasattr(value, "value")
+        if isinstance(value, tuple):
+            assert all(isinstance(v, DB) for v in value)
+        else:
+            assert value is None or isinstance(value, (bool, int)) or hasattr(value, "value")
     assert "SYNTH" not in repr(r)
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.status = S.CONFIRMED_ALIAS  # type: ignore[misc]
@@ -533,3 +546,166 @@ def test_package_exports():
                  "LOCATION_STREAM_COMPARISON", "LocationStreamComparisonDefinition", "CapturePairing"):
         assert name in ql2_sixt_canada_analysis.__all__
     assert isinstance(ql2_sixt_canada_analysis.LOCATION_STREAM_COMPARISON, LocationStreamComparisonDefinition)
+
+
+# ------------------------------------------- duplicate-inference evidence rules
+
+# The baseline branch C behaves differently from A/B in every capture it shares,
+# which is what makes the scope DISCRIMINATIVE.
+def _baseline_rows(jobs: tuple[str, ...]) -> list:
+    return [(j, C, offer("SYNTH-CAR-Y")) for j in jobs]
+
+
+def _evidence(r) -> tuple:  # type: ignore[no-untyped-def]
+    return (r.first_capture_count, r.second_capture_count, r.paired_capture_count,
+            r.first_unpaired_capture_count, r.second_unpaired_capture_count,
+            r.matching_paired_capture_count, r.differing_paired_capture_count, r.minimum_paired_captures)
+
+
+def test_single_shared_capture_with_unpaired_capture_and_no_baseline_is_not_duplicate():
+    # Original defect: one identical shared capture + one unpaired capture + no baseline.
+    cars = _cars([(J1, A, offer()), (J1, B, offer()), (J2, A, offer())])
+    r = compare_location_streams(_jobs(), cars, DEF)
+    assert r.status is not S.LIKELY_DUPLICATE_STREAMS and r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.temporal_overlap is TemporalOverlap.PARTIAL and r.scope_baseline is ScopeBaseline.UNAVAILABLE
+    assert _evidence(r) == (2, 1, 1, 1, 0, 1, 0, 2)
+    assert r.duplicate_inference_blockers == (DB.INSUFFICIENT_PAIRED_CAPTURES, DB.INCOMPLETE_TEMPORAL_OVERLAP,
+                                              DB.BASELINE_UNAVAILABLE)
+    assert not r.duplicate_evidence_sufficient and r.price_aware_offers is O.IDENTICAL
+
+
+def test_one_pair_is_below_the_minimum_even_with_full_overlap_and_baseline():
+    cars = _cars([(J1, A, offer()), (J1, B, offer()), *_baseline_rows((J1,))])
+    r = compare_location_streams(_jobs(), cars, DEF)
+    assert r.temporal_overlap is TemporalOverlap.COMPLETE and r.scope_baseline is ScopeBaseline.DISCRIMINATIVE
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.duplicate_inference_blockers == (DB.INSUFFICIENT_PAIRED_CAPTURES,)
+    assert _evidence(r) == (1, 1, 1, 0, 0, 1, 0, 2)
+
+
+def test_enough_matching_pairs_with_partial_overlap_are_not_duplicate():
+    cars = same_both(jobs=(J1, J2), extra=[(J3, B, offer()), *_baseline_rows((J1, J2))])
+    r = compare_location_streams(_jobs(), cars, DEF)
+    assert r.temporal_overlap is TemporalOverlap.PARTIAL and r.scope_baseline is ScopeBaseline.DISCRIMINATIVE
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.duplicate_inference_blockers == (DB.INCOMPLETE_TEMPORAL_OVERLAP,)
+    assert (r.paired_capture_count, r.first_unpaired_capture_count, r.second_unpaired_capture_count) == (2, 0, 1)
+
+
+def test_enough_matching_pairs_with_unavailable_baseline_are_not_duplicate():
+    r = compare_location_streams(_jobs(), same_both(jobs=(J1, J2)), DEF)
+    assert r.temporal_overlap is TemporalOverlap.COMPLETE and r.paired_capture_count == 2
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.duplicate_inference_blockers == (DB.BASELINE_UNAVAILABLE,)
+
+
+def test_enough_matching_pairs_with_non_discriminative_baseline_are_not_duplicate():
+    cars = same_both(jobs=(J1, J2), extra=[(J1, C, offer()), (J2, C, offer())])
+    r = compare_location_streams(_jobs(), cars, DEF)
+    assert r.scope_baseline is ScopeBaseline.NON_DISCRIMINATIVE
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.duplicate_inference_blockers == (DB.BASELINE_NON_DISCRIMINATIVE,)
+
+
+def test_complete_affirmative_evidence_allows_likely_duplicate_but_never_authority():
+    cars = same_both(jobs=(J1, J2), extra=_baseline_rows((J1, J2)))
+    r = compare_location_streams(_jobs(), cars, DEF)
+    assert r.status is S.LIKELY_DUPLICATE_STREAMS and r.duplicate_evidence_sufficient
+    assert r.duplicate_inference_blockers == () and _evidence(r) == (2, 2, 2, 0, 0, 2, 0, 2)
+    assert not r.confirmed_by_authority and not r.alias_authority_sufficient and r.upstream_review_required
+    with pytest.raises(LocationAliasNotConfirmedError):
+        validate_confirmed_location_alias(_jobs(), cars, DEF)
+    from ql2_sixt_canada_analysis.readiness import assess_location_policy
+    from ql2_sixt_canada_analysis.schemas import VANCOUVER_LOCATION_POLICY, LocationPolicyState
+    policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, r)
+    assert policy.state is LocationPolicyState.UNRESOLVED and not policy.locations_are_aliases
+    assert not policy.location_policy_resolved
+
+
+def test_one_contradictory_pair_blocks_duplicate_and_is_retained():
+    cars = _cars([(J1, A, offer()), (J1, B, offer()),
+                  (J2, A, offer()), (J2, B, offer(price="99.00")),           # materially differs
+                  (J3, A, offer()), (J3, B, offer()), *_baseline_rows((J1, J2, J3))])
+    r = compare_location_streams(_jobs(), cars, DEF)
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.duplicate_inference_blockers == (DB.DIFFERING_PAIRED_CAPTURES,)
+    assert (r.matching_paired_capture_count, r.differing_paired_capture_count) == (2, 1)
+    assert r.price_aware_offers is O.SAME_PRODUCTS
+
+
+def test_duplicate_rows_and_many_offers_in_one_capture_count_once():
+    o1, o2 = offer("SYNTH-CAR-X"), offer("SYNTH-CAR-Z")
+    cars = _cars([(J1, A, o1), (J1, A, o1), (J1, A, o2), (J1, B, o1), (J1, B, o1), (J1, B, o2),
+                  *_baseline_rows((J1,))])
+    r = compare_location_streams(_jobs(), cars, DEF)
+    assert (r.first_capture_count, r.second_capture_count, r.paired_capture_count) == (1, 1, 1)
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert DB.INSUFFICIENT_PAIRED_CAPTURES in r.duplicate_inference_blockers
+
+
+def test_rows_without_a_capture_key_are_counted_not_dropped():
+    # Without the unidentifiable row the two streams would look fully overlapping.
+    cars = same_both(jobs=(J1, J2), extra=[(pd.NA, A, offer("SYNTH-CAR-Q")), *_baseline_rows((J1, J2))])
+    r = compare_location_streams(_jobs(), cars, DEF)
+    assert r.temporal_overlap is TemporalOverlap.COMPLETE
+    assert (r.first_unassessable_row_count, r.second_unassessable_row_count) == (1, 0)
+    assert r.status is S.COMPARISON_INCONCLUSIVE
+    assert r.duplicate_inference_blockers == (DB.UNASSESSABLE_OBSERVATIONS,)
+
+
+def test_unresolvable_capture_time_cannot_create_duplicate_evidence():
+    two_pairs = dataclasses.replace(TDEF, pairing_tolerance=dt.timedelta(0))
+    cars = _timed([(J1, A, "2025-01-15 05:00:00 MST"), (J1, B, "2025-01-15 05:00:00 MST"),
+                   (J2, A, "2025-01-15 06:00:00 MST"), (J2, B, "2025-01-15 06:00:00 XYZ")])
+    r = compare_location_streams(_jobs(), cars, two_pairs)
+    assert r.status is not S.LIKELY_DUPLICATE_STREAMS
+    assert DB.UNASSESSABLE_OBSERVATIONS in r.duplicate_inference_blockers
+    assert DB.TEMPORAL_OVERLAP_UNAVAILABLE in r.duplicate_inference_blockers
+    assert r.second_unassessable_row_count == 1
+
+
+@pytest.mark.parametrize("cars_fn", [
+    lambda: _cars([(J1, A, offer()), (J1, B, offer()), (J2, A, offer())]),
+    lambda: same_both(jobs=(J1, J2), extra=_baseline_rows((J1, J2))),
+    lambda: same_both(jobs=(J1, J2), extra=[(J3, B, offer()), *_baseline_rows((J1, J2))]),
+])
+def test_classification_is_symmetric_under_stream_swap(cars_fn):
+    forward = compare_location_streams(_jobs(), cars_fn(), DEF)
+    swapped = compare_location_streams(_jobs(), cars_fn(), dataclasses.replace(DEF, first=(B,), second=(A,)))
+    assert forward.status is swapped.status
+    assert forward.duplicate_inference_blockers == swapped.duplicate_inference_blockers
+    assert forward.paired_capture_count == swapped.paired_capture_count
+    assert (forward.first_capture_count, forward.first_unpaired_capture_count) == (
+        swapped.second_capture_count, swapped.second_unpaired_capture_count)
+    assert (forward.temporal_overlap, forward.scope_baseline) == (swapped.temporal_overlap, swapped.scope_baseline)
+
+
+@pytest.mark.parametrize("pairs, expected", [(2, S.COMPARISON_INCONCLUSIVE), (3, S.LIKELY_DUPLICATE_STREAMS)])
+def test_minimum_paired_capture_boundary(pairs, expected):
+    three = dataclasses.replace(DEF, minimum_paired_captures=3)
+    jobs = (J1, J2, J3)[:pairs]
+    r = compare_location_streams(_jobs(), same_both(jobs=jobs, extra=_baseline_rows(jobs)), three)
+    assert r.status is expected and r.minimum_paired_captures == 3
+    assert (DB.INSUFFICIENT_PAIRED_CAPTURES in r.duplicate_inference_blockers) is (pairs < 3)
+
+
+@pytest.mark.parametrize("value", [0, -1, 1, 2.0, "2", True, None])
+def test_minimum_paired_captures_must_be_an_integer_of_at_least_two(value):
+    with pytest.raises(LocationCoverageConfigurationError):
+        dataclasses.replace(DEF, minimum_paired_captures=value)
+
+
+def test_project_minimum_is_central_and_conservative():
+    from ql2_sixt_canada_analysis.schemas import MINIMUM_DUPLICATE_PAIRED_CAPTURES
+    assert LOCATION_STREAM_COMPARISON.minimum_paired_captures == MINIMUM_DUPLICATE_PAIRED_CAPTURES >= 2
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        LOCATION_STREAM_COMPARISON.minimum_paired_captures = 1  # type: ignore[misc]
+
+
+def test_blocker_values_are_stable_and_name_no_source_columns():
+    assert [b.value for b in DB] == [
+        "no_paired_captures", "insufficient_paired_captures", "incomplete_temporal_overlap",
+        "temporal_overlap_unavailable", "ambiguous_pairing", "unassessable_observations",
+        "baseline_unavailable", "baseline_non_discriminative", "differing_paired_captures"]
+    columns = set(contract_columns(CARS)) | set(contract_columns(JOBS))
+    assert not any(c in b.value for b in DB for c in columns)

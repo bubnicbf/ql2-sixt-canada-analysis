@@ -563,6 +563,32 @@ Evidence is kept in three layers and never mixed:
 2. **Interpretation** - `LIKELY_DUPLICATE_STREAMS`, `LIKELY_DISTINCT_STREAMS`,
    `COMPARISON_INCONCLUSIVE`, `INSUFFICIENT_COMPARABLE_CAPTURES`, or presence
    failures `ONE_STREAM_ABSENT` / `BOTH_STREAMS_ABSENT`.
+   `LIKELY_DUPLICATE_STREAMS` needs affirmative evidence for **every**
+   prerequisite; each missing one is a `DuplicateInferenceBlocker` in
+   `duplicate_inference_blockers`, and the result is then
+   `COMPARISON_INCONCLUSIVE` (insufficient duplicate evidence is never read
+   as distinctness):
+   - at least `minimum_paired_captures` independent paired capture events
+     (`MINIMUM_DUPLICATE_PAIRED_CAPTURES = 2`, validated as an integer of at
+     least two). A capture is one collection event: duplicate rows and the
+     many vehicle offers inside one capture are one observation, so they
+     never add temporal evidence (`insufficient_paired_captures`);
+   - `COMPLETE` temporal overlap - any capture present in only one stream
+     means the streams diverge somewhere, so partial overlap is
+     `incomplete_temporal_overlap` (no tolerance policy exists);
+   - a `DISCRIMINATIVE` scope baseline (an allowlist): with `UNAVAILABLE`
+     nothing shows that identical behaviour is unusual for the source, and
+     with `NON_DISCRIMINATIVE` it is normal (`baseline_unavailable` /
+     `baseline_non_discriminative`);
+   - identical price-aware offers in every paired capture - one differing
+     capture outweighs any number of matching ones and is kept as evidence
+     (`differing_paired_captures`);
+   - every stream row identifiable as a capture (rows without a capture key,
+     or with an unresolvable capture time under time pairing, are counted as
+     unassessable instead of being dropped) and unambiguous pairing.
+   The report exposes the denominator: captures per stream, paired,
+   unpaired per stream, matching and differing paired captures, unassessable
+   rows and the minimum. The rule is symmetric in the two streams.
 3. **Confirmation** - only from authoritative identity columns:
    `CONFIRMED_DISTINCT_LOCATIONS`, `CONFIRMED_ALIAS`,
    `DUPLICATED_COLLECTION_CONFIGURATION` or `LOCATION_MAPPING_DEFECT`.
@@ -590,6 +616,9 @@ validate_confirmed_location_alias(jobs_df, cars_df)   # raises LocationAliasNotC
   comparison can reach at most a *likely* conclusion; confirmation requires
   supplier or collection-configuration evidence. See
   `docs/investigations/location_stream_comparison.md` (sanitized).
+- Even a valid `LIKELY_DUPLICATE_STREAMS` is behavioural evidence only: it
+  never creates an alias, merges streams, resolves the Vancouver location
+  policy or enables pricing.
 - The comparison is **evidence only**. `alias_authority_sufficient` refers to
   identity metadata in the data (none exists here) and does not decide
   anything downstream: whether the two labels may be merged or compared is

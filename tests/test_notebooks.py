@@ -65,7 +65,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
 REPORTING_STEPS = ("assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
-                   "assess_pricing_readiness(")
+                   "assess_pricing_readiness(", "compare_location_streams(")
 
 
 def _is_reporting(cell: nbformat.NotebookNode) -> bool:
@@ -551,7 +551,7 @@ def test_ingestion_notebook_checks_coverage_on_cleaned_frames_before_join() -> N
     for pattern in (r"\.unique\(", r"\.nunique\(", r"\.drop_duplicates\(", r"\bset\(", r"\.difference\(",
                     r"\.isin\(", r"expected_locations", r"location_columns", r"\.str\.strip"):
         assert not re.search(pattern, code), f"notebook reimplements coverage: {pattern}"
-    assert not re.search(r"print\([^\n]*(location_coverage_report|_ratio|_count\b|_passed)", code)
+    assert not re.search(r"print\([^\n]*(location_coverage_report|_ratio|_count\b|_passed)", _quiet_code(notebook))
 
 
 def test_ingestion_notebook_coverage_step_fails_closed_on_synthetic_inputs(
@@ -685,8 +685,53 @@ def test_ingestion_notebook_comparison_step_runs_on_synthetic_inputs(synthetic_r
     outputs = _step_output(result, "compare_location_streams(")  # this step's own cell only
     assert "Related-stream comparison step completed." in outputs
     assert not any(part in outputs for key in COMPARED_LOCATION_STREAMS for part in key)
-    assert not re.search(r"\b(duplicate|distinct|alias|identical|absent|True|False)\b", outputs, re.I)
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Behavioural comparison result"].strip() == "both_streams_absent"
+    assert lines["Duplicate inference blocked by"].strip().startswith("no_paired_captures")
+    assert "not authoritative alias confirmation" in outputs
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+def test_ingestion_notebook_reports_inconclusive_single_pair_partial_overlap(tmp_path: Path) -> None:
+    # Regression: one identical shared capture plus an unpaired capture and no baseline
+    # was reported as likely_duplicate_streams.
+    from ql2_sixt_canada_analysis.comparison import DuplicateInferenceBlocker as DB
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, LOCATION_STREAM_COMPARISON as D
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    loc, = D.coverage.location_columns
+    scope, = D.coverage.stream_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (first,), (second,) = COMPARED_LOCATION_STREAMS
+    same = {c: f"SYNTH-{c.upper()}" for c in (*D.product_columns, *D.price_columns)} | {scope: "SYNTH-CITY"}
+    cars = [same | {rel.detail_key_columns[0]: "SYNTH-JOB-001", loc: first, position: "0"},
+            same | {rel.detail_key_columns[0]: "SYNTH-JOB-001", loc: second, position: "1"},
+            same | {rel.detail_key_columns[0]: "SYNTH-JOB-002", loc: first, position: "0"}]   # unpaired
+    jobs = [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "2"},
+            {rel.parent_key_columns[0]: "SYNTH-JOB-002", rel.expected_detail_count_column: "1"}]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    outputs = _step_output(result, "compare_location_streams(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Behavioural comparison result"].strip() == "comparison_inconclusive"
+    assert lines["Paired captures"].strip() == "1 | minimum required: 2"
+    assert lines["Unpaired captures - first stream"].strip() == "1 | second stream: 0"
+    assert lines["Matching paired captures"].strip() == "1 | differing: 0"
+    assert lines["Temporal overlap"].strip() == "partial" and lines["Scope baseline"].strip() == "unavailable"
+    assert lines["Duplicate inference blocked by"].strip() == ", ".join(
+        b.value for b in (DB.INSUFFICIENT_PAIRED_CAPTURES, DB.INCOMPLETE_TEMPORAL_OVERLAP, DB.BASELINE_UNAVAILABLE))
+    assert first not in outputs and second not in outputs and "SYNTH" not in outputs
+    policy = _step_output(result, "assess_pricing_readiness(")
+    assert "Vancouver identity policy state: unresolved" in policy and "Pricing analysis ready: False" in policy
 
 
 # ---------------------------------------------------- vehicle-attribute stability

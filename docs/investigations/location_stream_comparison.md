@@ -68,6 +68,11 @@ identical offers and identical prices do not prove physical identity.
   breadth) without flagging the duplication.
 - Regression control: `compare_location_streams` in the ingestion notebook
   (`location_comparison_report`) and `tests/test_comparison.py`.
+- Evidence rule (tightened later): a likely duplicate now requires at least
+  two independent paired captures, complete temporal overlap, a
+  discriminative baseline and identical offers in every paired capture; the
+  report shows the evidence counts and any blocking gaps. The categorical
+  conclusion above still holds under the stricter rule.
 - Policy gate (added later): the identity decision is recorded only in the
   authority-backed `VANCOUVER_LOCATION_POLICY`, which stays `UNRESOLVED`;
   pricing readiness is blocked until an authority confirms an alias (with a

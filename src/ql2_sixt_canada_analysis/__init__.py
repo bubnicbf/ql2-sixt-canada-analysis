@@ -2,6 +2,7 @@
 
 from ql2_sixt_canada_analysis.comparison import (
     ComparisonPreconditionError,
+    DuplicateInferenceBlocker,
     IdentityEvidence,
     LocationAliasNotConfirmedError,
     LocationStreamComparisonReport,
@@ -65,6 +66,7 @@ from ql2_sixt_canada_analysis.schemas import (
     IDENTIFIER_DTYPE,
     INVESTIGATED_LOCATION_STREAM,
     VANCOUVER_LOCATION_POLICY,
+    MINIMUM_DUPLICATE_PAIRED_CAPTURES,
     LocationIdentityPolicy,
     LocationPolicyAuthority,
     LocationPolicyConfigurationError,
@@ -166,6 +168,8 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "DuplicateInferenceBlocker",
+    "MINIMUM_DUPLICATE_PAIRED_CAPTURES",
     "VehicleEntityHistory",
     "classify_vehicle_entities",
     "JobDetailJoinBlocker",
