@@ -63,8 +63,10 @@ assessable rather than inferred from observed rows.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import datetime as dt
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
@@ -79,6 +81,16 @@ __all__ = [
     "JOB_DETAIL_RELATIONSHIP",
     "JobDetailRelationshipDefinition",
     "COLLECTION_SCHEDULE",
+    "TEMPORAL_RECONCILIATION",
+    "ReportingDateRule",
+    "TemporalAwareness",
+    "TemporalConfigurationError",
+    "TemporalDateCheck",
+    "TemporalFieldDefinition",
+    "TemporalKind",
+    "TemporalReconciliationDefinition",
+    "TemporalReplicationRule",
+    "TimestampOrderingRule",
     "CollectionScheduleDefinition",
     "EXPECTED_LOCATION_COVERAGE",
     "INVESTIGATED_LOCATION_STREAM",
@@ -639,3 +651,290 @@ def get_dataset_definition(key: DatasetKey | str) -> DatasetDefinition:
         return DATASET_DEFINITIONS[DatasetKey(key)]
     except ValueError as exc:
         raise KeyError(f"Unknown dataset key: {key!r}") from exc
+
+
+# ------------------------------------------------------------------ temporal
+
+
+class TemporalConfigurationError(ValueError):
+    """A temporal definition is invalid, incomplete or cannot be applied."""
+
+
+class TemporalKind(StrEnum):
+    """Whether a field holds an instant/wall time or a calendar date."""
+
+    TIMESTAMP = "timestamp"
+    DATE = "date"
+
+
+class TemporalAwareness(StrEnum):
+    """How a timestamp field states its time zone in the source text.
+
+    * ``NAIVE`` - no zone information; resolvable to an instant only through
+      an authoritative ``source_timezone`` (never the machine's zone).
+    * ``OFFSET`` - each value carries a numeric UTC offset or ``Z``.
+    * ``DESIGNATOR`` - each value ends with a zone abbreviation that is
+      mapped to a fixed UTC offset by ``designator_offsets``.
+    * ``NOT_APPLICABLE`` - calendar dates.
+    """
+
+    NAIVE = "naive"
+    OFFSET = "offset"
+    DESIGNATOR = "designator"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalFieldDefinition:
+    """One source temporal field and how to parse it.
+
+    Attributes:
+        dataset: Logical dataset holding the column.
+        column: Source column name.
+        kind: Timestamp or calendar date.
+        required: Whether a missing value is a completeness failure.
+        source_format: ``strftime``-style format of the value *without* any
+            offset or designator, or ``"ISO8601"`` (offset-aware fields).
+        awareness: See :class:`TemporalAwareness`.
+        source_timezone: Authoritative IANA zone for ``NAIVE`` values, or
+            ``None`` when no authority exists (values are then unresolved for
+            instant comparisons, never guessed).
+        designator_offsets: For ``DESIGNATOR`` fields, the authoritative
+            fixed UTC offset of each accepted abbreviation.
+    """
+
+    dataset: DatasetKey
+    column: str
+    kind: TemporalKind
+    required: bool
+    source_format: str
+    awareness: TemporalAwareness
+    source_timezone: str | None = None
+    designator_offsets: Mapping[str, dt.timedelta] = dataclass_field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, TemporalKind) or not isinstance(self.awareness, TemporalAwareness):
+            raise TemporalConfigurationError("kind and awareness must be enum members")
+        if not isinstance(self.column, str) or not self.column:
+            raise TemporalConfigurationError("column must be a non-empty string")
+        if not isinstance(self.source_format, str) or not self.source_format:
+            raise TemporalConfigurationError("source_format must be a non-empty string")
+        if (self.kind is TemporalKind.DATE) != (self.awareness is TemporalAwareness.NOT_APPLICABLE):
+            raise TemporalConfigurationError("dates (and only dates) have no time-zone awareness")
+        if self.source_timezone is not None:
+            if self.awareness is not TemporalAwareness.NAIVE:
+                raise TemporalConfigurationError("source_timezone applies to naive timestamps only")
+            _zone(self.source_timezone)
+        offsets = dict(self.designator_offsets)
+        if (self.awareness is TemporalAwareness.DESIGNATOR) != bool(offsets):
+            raise TemporalConfigurationError("designator offsets are required for (and only for) DESIGNATOR fields")
+        for name, offset in offsets.items():
+            if not (isinstance(name, str) and name.isalpha() and name.isupper()):
+                raise TemporalConfigurationError("designators must be upper-case letters")
+            if not isinstance(offset, dt.timedelta) or abs(offset) > dt.timedelta(hours=14):
+                raise TemporalConfigurationError("designator offsets must be timedeltas within +/-14h")
+        object.__setattr__(self, "designator_offsets", MappingProxyType(offsets))
+
+    @property
+    def ref(self) -> tuple[DatasetKey, str]:
+        return (self.dataset, self.column)
+
+    @property
+    def resolvable_to_instant(self) -> bool:
+        """True when values can become absolute instants without guessing."""
+        if self.kind is not TemporalKind.TIMESTAMP:
+            return False
+        return self.awareness is not TemporalAwareness.NAIVE or self.source_timezone is not None
+
+
+@dataclass(frozen=True, slots=True)
+class TimestampOrderingRule:
+    """``earlier`` must not be after ``later`` (per linked detail row).
+
+    ``later - earlier`` must be ``>= -tolerance`` (inclusive) or
+    ``> -tolerance`` (exclusive). ``tolerance`` must be explicitly authorised,
+    is non-negative and is never derived from observed data.
+    """
+
+    earlier: tuple[DatasetKey, str]
+    later: tuple[DatasetKey, str]
+    inclusive: bool = True
+    tolerance: dt.timedelta = dt.timedelta(0)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tolerance, dt.timedelta) or self.tolerance < dt.timedelta(0):
+            raise TemporalConfigurationError("tolerance must be a non-negative timedelta")
+        if self.earlier == self.later:
+            raise TemporalConfigurationError("ordering compares two different fields")
+
+
+@dataclass(frozen=True, slots=True)
+class ReportingDateRule:
+    """The date equals the calendar date of ``source`` in ``reporting_timezone``.
+
+    The source instant is converted to the reporting zone *before* its date is
+    taken. Dates are compared semantically (parsed), not as strings.
+    """
+
+    source: tuple[DatasetKey, str]
+    reporting_timezone: str
+
+    def __post_init__(self) -> None:
+        _zone(self.reporting_timezone)
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalDateCheck:
+    """A date field and its derivation rule; ``rule=None`` means unavailable.
+
+    An unavailable rule is reported and makes strict validation fail closed.
+    """
+
+    target: tuple[DatasetKey, str]
+    rule: ReportingDateRule | None
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalReplicationRule:
+    """``replica`` (a copy carried on detail rows) must equal ``source`` on its parent.
+
+    Instants are compared when both sides resolve; two naive fields with the
+    same time-zone basis are compared as wall times.
+    """
+
+    source: tuple[DatasetKey, str]
+    replica: tuple[DatasetKey, str]
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalReconciliationDefinition:
+    """The single temporal contract for the jobs/cars datasets.
+
+    Attributes:
+        fields: Every temporal field definition.
+        canonical_timezone: Zone in which instants are compared (``UTC``).
+        ordering: The ordering rule, or ``None`` when no authority defines it
+            (reported as unavailable; strict validation fails closed).
+        date_checks: One entry per date field with its derivation rule or
+            ``None`` (unavailable).
+        replications: Detail-row copies of parent temporal fields.
+        relationship: Parent/detail relationship used to link rows.
+    """
+
+    fields: tuple[TemporalFieldDefinition, ...]
+    canonical_timezone: str
+    ordering: TimestampOrderingRule | None
+    date_checks: tuple[TemporalDateCheck, ...]
+    replications: tuple[TemporalReplicationRule, ...]
+    relationship: JobDetailRelationshipDefinition
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.fields, tuple) or not self.fields:
+            raise TemporalConfigurationError("fields must be a non-empty tuple")
+        refs = [f.ref for f in self.fields]
+        if len(set(refs)) != len(refs):
+            raise TemporalConfigurationError("each field may be defined once")
+        registry = self.relationship.definitions
+        for field in self.fields:
+            if field.dataset not in (self.relationship.parent, self.relationship.detail):
+                raise TemporalConfigurationError("temporal fields must belong to the relationship datasets")
+            if field.column not in registry[field.dataset].columns:
+                raise TemporalConfigurationError(
+                    f"a '{field.dataset}' temporal column is not in its contract"
+                )
+        _zone(self.canonical_timezone)
+        if self.ordering is not None:
+            for ref in (self.ordering.earlier, self.ordering.later):
+                if self.field(ref).kind is not TemporalKind.TIMESTAMP:
+                    raise TemporalConfigurationError("ordering compares timestamp fields")
+        targets = [c.target for c in self.date_checks]
+        if len(set(targets)) != len(targets):
+            raise TemporalConfigurationError("each date field may be checked once")
+        for check in self.date_checks:
+            if self.field(check.target).kind is not TemporalKind.DATE:
+                raise TemporalConfigurationError("date checks target date fields")
+            if check.rule is not None and self.field(check.rule.source).kind is not TemporalKind.TIMESTAMP:
+                raise TemporalConfigurationError("reporting dates derive from timestamp fields")
+        for rule in self.replications:
+            source, replica = self.field(rule.source), self.field(rule.replica)
+            if (source.dataset, replica.dataset) != (self.relationship.parent, self.relationship.detail):
+                raise TemporalConfigurationError("replicas are detail-row copies of parent fields")
+            if source.kind is not replica.kind:
+                raise TemporalConfigurationError("a replica has the same temporal kind as its source")
+
+    def field(self, ref: tuple[DatasetKey, str]) -> TemporalFieldDefinition:
+        for candidate in self.fields:
+            if candidate.ref == tuple(ref):
+                return candidate
+        raise TemporalConfigurationError("a rule refers to an undefined temporal field")
+
+    @property
+    def unavailable_rules(self) -> tuple[str, ...]:
+        """Safe names of required rules that lack authoritative semantics."""
+        names = [] if self.ordering is not None else ["timestamp_ordering"]
+        names += [f"date_derivation:{c.target[0]}.{c.target[1]}" for c in self.date_checks if c.rule is None]
+        return tuple(names)
+
+
+def _zone(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+        raise TemporalConfigurationError("unknown IANA time zone") from exc
+
+
+_ISO_DATE: Final = "%Y-%m-%d"
+
+#: The temporal contract. Established facts (source formats and provenance):
+#:
+#: * ``finished_at`` (jobs) - when the collection job finished; a *naive*
+#:   timestamp. No authoritative time zone is documented, so it is NOT
+#:   resolved to an instant (never assumed UTC or machine-local).
+#: * ``job_finished_at`` (cars) - the parent job's ``finished_at`` repeated on
+#:   each detail row (``job_*`` columns repeat parent-job attributes), so it
+#:   must equal its parent's value (replication rule).
+#: * ``scraped_at`` (cars) - when each detail row was scraped; every value
+#:   ends with the designator ``MST``. Per the IANA/POSIX definition ``MST``
+#:   is fixed UTC-07:00 (no daylight time). It labels the collector's clock -
+#:   it appears year-round and for markets in other zones - so it is *not* a
+#:   market-local time. If the source meant daylight-adjusted Mountain time,
+#:   this mapping must be corrected by the data owner.
+#: * ``scrape_date`` (jobs and cars) and ``date_clean`` (cars) - ISO calendar
+#:   dates supplied by the source (not generated by repository code).
+#:
+#: Not established (no repository documentation or source authority), hence
+#: unavailable and failing closed: the ordering between ``finished_at`` and
+#: ``scraped_at`` (and a time zone for ``finished_at``), which timestamp and
+#: reporting time zone define ``scrape_date``, and which define ``date_clean``.
+#: The markets span several time zones and no authoritative location-to-zone
+#: mapping exists. No tolerance is authorised.
+TEMPORAL_RECONCILIATION: Final = TemporalReconciliationDefinition(
+    fields=(
+        TemporalFieldDefinition(DatasetKey.JOBS, 'finished_at', TemporalKind.TIMESTAMP, True,
+                                "%Y-%m-%d %H:%M:%S.%f", TemporalAwareness.NAIVE),
+        TemporalFieldDefinition(DatasetKey.JOBS, 'scrape_date', TemporalKind.DATE, True,
+                                _ISO_DATE, TemporalAwareness.NOT_APPLICABLE),
+        TemporalFieldDefinition(DatasetKey.CARS, 'job_finished_at', TemporalKind.TIMESTAMP, True,
+                                "%Y-%m-%d %H:%M:%S.%f", TemporalAwareness.NAIVE),
+        TemporalFieldDefinition(DatasetKey.CARS, 'scraped_at', TemporalKind.TIMESTAMP, True,
+                                "%Y-%m-%d %H:%M:%S", TemporalAwareness.DESIGNATOR,
+                                designator_offsets={"MST": dt.timedelta(hours=-7)}),
+        TemporalFieldDefinition(DatasetKey.CARS, 'scrape_date', TemporalKind.DATE, True,
+                                _ISO_DATE, TemporalAwareness.NOT_APPLICABLE),
+        TemporalFieldDefinition(DatasetKey.CARS, 'date_clean', TemporalKind.DATE, True,
+                                _ISO_DATE, TemporalAwareness.NOT_APPLICABLE),
+    ),
+    canonical_timezone="UTC",
+    ordering=None,
+    date_checks=(
+        TemporalDateCheck((DatasetKey.JOBS, 'scrape_date'), None),
+        TemporalDateCheck((DatasetKey.CARS, 'scrape_date'), None),
+        TemporalDateCheck((DatasetKey.CARS, 'date_clean'), None),
+    ),
+    replications=(
+        TemporalReplicationRule((DatasetKey.JOBS, 'finished_at'), (DatasetKey.CARS, 'job_finished_at')),
+    ),
+    relationship=JOB_DETAIL_RELATIONSHIP,
+)

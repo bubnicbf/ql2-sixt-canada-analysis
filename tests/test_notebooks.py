@@ -32,6 +32,7 @@ from ql2_sixt_canada_analysis.schemas import (
     EXPECTED_LOCATION_COVERAGE,
     INVESTIGATED_LOCATION_STREAM,
     JOB_DETAIL_RELATIONSHIP,
+    TEMPORAL_RECONCILIATION,
     DatasetKey,
 )
 
@@ -515,6 +516,42 @@ def test_ingestion_notebook_stream_step_runs_on_synthetic_inputs(synthetic_raw_d
     assert "Expected-stream investigation step completed." in outputs
     assert not any(part in outputs for part in INVESTIGATED_LOCATION_STREAM)
     assert not re.search(r"\b(absent|partial|healthy|alias|raw_stream|True|False)\b", outputs, re.I)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------ temporal reconciliation
+
+
+def test_ingestion_notebook_reconciles_temporal_fields_through_the_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("assess_temporal_reconciliation", "TEMPORAL_RECONCILIATION"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
+    assert relate < temporal
+    assert re.search(r"temporal_report\s*=\s*assess_temporal_reconciliation\(\s*jobs_df\s*,\s*cars_df\s*,"
+                     r"\s*TEMPORAL_RECONCILIATION\s*\)", sources[temporal])
+    assert re.search(r"temporal_fields_trusted\s*=", sources[temporal])
+    # No duplicated field lists, parsing rules or repairs in the notebook.
+    fields = {f.column for f in TEMPORAL_RECONCILIATION.fields}
+    assert not any(re.search(rf"[\"']{re.escape(f)}[\"']", code) for f in fields)
+    for pattern in (r"to_datetime", r"tz_localize", r"tz_convert", r"strptime", r"\.dt\.", r"fillna",
+                    r"validate_temporal_reconciliation", r"parse_temporal_field"):
+        assert not re.search(pattern, code), f"notebook duplicates temporal logic: {pattern}"
+    assert not re.search(r"print\([^\n]*(temporal_report|_trusted|_count)", code)
+
+
+def test_ingestion_notebook_temporal_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "Temporal reconciliation step completed." in outputs
+    assert not re.search(r"\b(\d{4}-\d{2}-\d{2}|unavailable|invalid|True|False)\b", outputs)
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 
 

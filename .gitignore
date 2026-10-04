@@ -127,6 +127,44 @@ data/processed/*
 *key_profile*.txt
 *key_profile*.html
 *key_profile*.md
+# Temporal reconciliation outputs: mismatch reports, invalid-date extracts,
+# timeline profiles and derived timestamp exports.
+*temporal_mismatch*.json
+*temporal_mismatch*.txt
+*temporal_mismatch*.html
+*temporal_mismatch*.md
+*temporal_mismatch*.csv
+*temporal_mismatch*.parquet
+*temporal_report*.json
+*temporal_report*.txt
+*temporal_report*.html
+*temporal_report*.md
+*temporal_report*.csv
+*temporal_report*.parquet
+*invalid_date*.json
+*invalid_date*.txt
+*invalid_date*.html
+*invalid_date*.md
+*invalid_date*.csv
+*invalid_date*.parquet
+*timeline_profile*.json
+*timeline_profile*.txt
+*timeline_profile*.html
+*timeline_profile*.md
+*timeline_profile*.csv
+*timeline_profile*.parquet
+*derived_timestamp*.json
+*derived_timestamp*.txt
+*derived_timestamp*.html
+*derived_timestamp*.md
+*derived_timestamp*.csv
+*derived_timestamp*.parquet
+*parsed_timestamp*.json
+*parsed_timestamp*.txt
+*parsed_timestamp*.html
+*parsed_timestamp*.md
+*parsed_timestamp*.csv
+*parsed_timestamp*.parquet
 # Stream investigation outputs: stream profiles, investigation exports and
 # missing-stream diagnostics (tracked sanitized notes live in docs/investigations/).
 *stream_profile*.json

@@ -196,6 +196,11 @@ QUALITY_OUTPUT_PATHS = [
     "synthetic_investigation_export.md",
     "notebooks/synthetic_stream_diagnostics.txt",
     "synthetic_location_extract.csv",
+    "reports/synthetic_temporal_mismatch.json",
+    "synthetic_invalid_dates.csv",
+    "notebooks/synthetic_timeline_profile.md",
+    f"{PROCESSED}/synthetic_derived_timestamps.parquet",
+    "synthetic_temporal_report.txt",
 ]
 
 
@@ -215,7 +220,8 @@ def test_quality_outputs_and_tooling_artifacts_are_ignored(relative_path: str) -
      f"src/{PACKAGE_NAME}/relationships.py", "tests/test_relationships.py", "tests/test_joined_rows.py",
      f"src/{PACKAGE_NAME}/coverage.py", "tests/test_coverage.py", "tests/test_missing_locations.py",
      f"src/{PACKAGE_NAME}/streams.py", "tests/test_streams.py",
-     "docs/investigations/missing_expected_location_stream.md"],
+     "docs/investigations/missing_expected_location_stream.md",
+     f"src/{PACKAGE_NAME}/temporal.py", "tests/test_temporal.py"],
 )
 def test_quality_source_tests_and_docs_are_not_ignored(relative_path: str) -> None:
     assert not _git_is_ignored(relative_path)
