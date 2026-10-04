@@ -368,7 +368,11 @@ class JobDetailRelationshipDefinition:
         detail_key_columns: Detail foreign-key components, positionally
             matching ``parent_key_columns``.
         expected_detail_count_column: Parent column declaring how many detail
-            rows the parent should have.
+            rows the parent should have (the primary declaration).
+        additional_expected_count_columns: Further parent columns that also
+            declare the detail count. Each is reconciled independently against
+            the observed rows, and all declarations must agree with each
+            other; reconciliation passes only when every one matches.
         parent_suffix, detail_suffix: Stable suffixes a validated join adds
             to same-named non-key columns from each side (never to columns
             whose names do not collide).
@@ -381,6 +385,7 @@ class JobDetailRelationshipDefinition:
     parent_key_columns: tuple[str, ...]
     detail_key_columns: tuple[str, ...]
     expected_detail_count_column: str
+    additional_expected_count_columns: tuple[str, ...] = ()
     parent_suffix: str = "_job"
     detail_suffix: str = "_detail"
     definitions: Mapping[DatasetKey, DatasetDefinition] = dataclass_field(
@@ -434,6 +439,24 @@ class JobDetailRelationshipDefinition:
             raise RelationshipConfigurationError(
                 "expected-count column must be a measure, not a key or identifier", (count,)
             )
+        extra = self.additional_expected_count_columns
+        if not isinstance(extra, tuple) or not all(isinstance(c, str) and c for c in extra):
+            raise RelationshipConfigurationError("additional_expected_count_columns must be a tuple of names")
+        all_counts = (count, *extra)
+        if len(set(all_counts)) != len(all_counts):
+            raise RelationshipConfigurationError("expected-count columns must be distinct", all_counts)
+        for column in extra:
+            if column not in parent.columns:
+                raise RelationshipConfigurationError(
+                    f"expected-count column must be a '{parent.key}' column", (column,))
+            if column in parent.identifier_columns or column in self.parent_key_columns:
+                raise RelationshipConfigurationError(
+                    "expected-count column must be a measure, not a key or identifier", (column,))
+
+    @property
+    def expected_detail_count_columns(self) -> tuple[str, ...]:
+        """Every declared-count column, primary first."""
+        return (self.expected_detail_count_column, *self.additional_expected_count_columns)
 
     @property
     def parent_definition(self) -> DatasetDefinition:
@@ -447,10 +470,11 @@ class JobDetailRelationshipDefinition:
 #: The jobs -> cars relationship. Each cars row carries its parent job's
 #: identifier. Evidence: matching identifier semantics on both sides and the
 #: cars contract's ``job_*`` columns, which repeat parent-job attributes.
-#: Expected count: ``record_count`` is the number of offer records the job
-#: itself reports, i.e. the declaration to reconcile. ``actual_car_rows`` is
-#: a downstream tally of rows written, not a declaration, so it is not used
-#: here (comparing the two fields would be a separate consistency control).
+#: Expected counts: ``record_count`` is the number of offer records the job
+#: itself reports (primary declaration) and ``actual_car_rows`` the job's
+#: tally of detail rows written. Both declare the detail count, so each is
+#: reconciled independently against the observed rows and they must agree;
+#: neither can stand in for the other.
 #: Identifiers are compared verbatim, so the textual-form difference noted on
 #: the cars identifier above is reported as orphans/under-counts until an
 #: explicit normalisation step reconciles the two forms.
@@ -460,6 +484,7 @@ JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
     parent_key_columns=('job_id',),
     detail_key_columns=('job_id',),
     expected_detail_count_column='record_count',
+    additional_expected_count_columns=('actual_car_rows',),
 )
 
 
@@ -484,6 +509,15 @@ class LocationCoverageDefinition:
             collection scope a location belongs to (e.g. its city). Used only
             by stream investigation to group collection events; they add
             nothing to the expectations.
+        parent_scope_columns: The parent (jobs) columns carrying the same
+            scope, positionally matching ``stream_scope_columns``. Stream
+            continuity counts every in-scope *job* - including jobs with no
+            detail rows - from these columns; without them continuity is
+            unassessable.
+        label_column: The location-label component of a composite key (e.g.
+            ``location`` in ``(city, location)``). When set, a label observed
+            under more than one value of the other components is a
+            conflicting assignment and fails the contract.
         definitions: Registry the columns are validated against (the project
             registry by default; tests may pass a synthetic one).
 
@@ -503,6 +537,8 @@ class LocationCoverageDefinition:
         default_factory=lambda: MappingProxyType({})
     )
     stream_scope_columns: tuple[str, ...] = ()
+    parent_scope_columns: tuple[str, ...] = ()
+    label_column: str | None = None
     definitions: Mapping[DatasetKey, DatasetDefinition] = dataclass_field(
         default=None, compare=False, repr=False  # type: ignore[arg-type]
     )
@@ -512,6 +548,16 @@ class LocationCoverageDefinition:
             object.__setattr__(self, "definitions", DATASET_DEFINITIONS)
         if self.dataset not in self.definitions:
             raise LocationCoverageConfigurationError("coverage dataset must be registered")
+        parent_scope = self.parent_scope_columns
+        if not isinstance(parent_scope, tuple) or not all(isinstance(c, str) and c for c in parent_scope) \
+                or len(set(parent_scope)) != len(parent_scope):
+            raise LocationCoverageConfigurationError("parent_scope_columns must be a tuple of unique names")
+        if parent_scope and len(parent_scope) != len(self.stream_scope_columns):
+            raise LocationCoverageConfigurationError(
+                "parent_scope_columns must match stream_scope_columns positionally")
+        if self.label_column is not None and (not isinstance(self.location_columns, tuple)
+                                              or self.label_column not in self.location_columns):
+            raise LocationCoverageConfigurationError("label_column must be one of the location columns")
         scope = self.stream_scope_columns
         if not isinstance(scope, tuple) or not all(isinstance(c, str) and c for c in scope) \
                 or len(set(scope)) != len(scope):
@@ -591,16 +637,20 @@ class LocationCoverageDefinition:
 #: An expected branch-level location stream, identified as expected by the
 #: project owner (the authority for this entry). Defined once here; code,
 #: notebooks and tests refer to this constant, never to the literal.
-INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('Calgary Downtown',)
+INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('calgary', 'Calgary Downtown')
 
 #: Two expected branch-level streams the project owner asked to compare
 #: (authority for their expectation). Defined once; referenced by constant.
 COMPARED_LOCATION_STREAMS: Final[tuple[tuple[str, ...], tuple[str, ...]]] = (
-    ('Vancouver Downtown',),
-    ('Vancouver Thurlow',),
+    ('vancouver', 'Vancouver Downtown'),
+    ('vancouver', 'Vancouver Thurlow'),
 )
 
-#: The expected-location contract. Locations are branch-level pickup
+#: The expected-location contract. Keys are authoritative (city, location)
+#: pairs - the source ``city`` label and the branch ``location`` label - so a
+#: branch label observed under another city never satisfies coverage, and a
+#: label observed under several cities is a conflicting assignment. Source
+#: values are compared exactly and never rewritten. Locations are branch-level pickup
 #: locations, carried only by detail rows (``location``); jobs are city-level
 #: collection runs, so a jobs-level contract cannot represent a branch stream
 #: (an earlier jobs-``city`` structure would have reported a permanent false
@@ -612,10 +662,12 @@ COMPARED_LOCATION_STREAMS: Final[tuple[tuple[str, ...], tuple[str, ...]]] = (
 #: for stream-continuity investigation only.
 EXPECTED_LOCATION_COVERAGE: Final = LocationCoverageDefinition(
     dataset=DatasetKey.CARS,
-    location_columns=('location',),
+    location_columns=('city', 'location'),
     expected_locations=(INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS),
     mode=LocationCoverageMode.MINIMUM_REQUIRED,
     stream_scope_columns=('city',),
+    parent_scope_columns=('city',),
+    label_column='location',
 )
 
 

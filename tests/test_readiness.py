@@ -62,7 +62,7 @@ UNSTABLE = assess_vehicle_attribute_stability(two(**{V.attribute_columns[0]: "SY
 PARTIAL = assess_vehicle_attribute_stability(stability_frame([obs(V1, T[0]), obs(V1, T[1]), obs(V2, T[0])]))
 UNSTABLE_AND_PARTIAL = assess_vehicle_attribute_stability(stability_frame([
     obs(V1, T[0]), obs(V1, T[1], **{V.attribute_columns[0]: "SYNTH-CLASS-B"}), obs(V2, T[0])]))
-GATES = dict(key_contracts_valid=True, expected_coverage_passed=True, expected_stream_healthy=True,
+GATES = dict(source_complete=True, key_contracts_valid=True, expected_coverage_passed=True, expected_stream_healthy=True,
              job_detail_counts_reconciled=True, one_to_many_contract_valid=True,
              temporal_fields_trusted=True, vehicle_stability=STABLE)
 FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE}

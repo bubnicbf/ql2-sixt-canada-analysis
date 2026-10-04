@@ -253,7 +253,7 @@ def _check_relationship_inputs(
     if not isinstance(relationship, JobDetailRelationshipDefinition):
         raise TypeError(f"expected a JobDetailRelationshipDefinition, got {type(relationship).__name__}")
     parent_keys, detail_keys = relationship.parent_key_columns, relationship.detail_key_columns
-    extra_parent_columns = (relationship.expected_detail_count_column,) if require_expected_count else ()
+    extra_parent_columns = relationship.expected_detail_count_columns if require_expected_count else ()
     if len(parent_keys) != len(detail_keys):  # guards definitions altered after construction
         raise RelationshipConfigurationError("parent and detail keys must have equal length")
     for frame, columns, role in ((jobs, (*parent_keys, *extra_parent_columns), relationship.parent),

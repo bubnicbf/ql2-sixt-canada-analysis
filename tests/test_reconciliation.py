@@ -71,7 +71,9 @@ def _jobs(keys: list[object], expected: list[object], rel: JobDetailRelationship
         if column in rel.parent_key_columns:
             pos = rel.parent_key_columns.index(column)
             data[column] = pd.array([None if r[pos] is MISSING else r[pos] for r in rows], dtype=IDENTIFIER_DTYPE)
-        elif column == rel.expected_detail_count_column:
+        elif column in rel.expected_detail_count_columns:
+            # Every declared-count column gets the same values (they must agree);
+            # tests that need them to differ build frames explicitly.
             values = [None if v is MISSING else v for v in expected]
             data[column] = pd.Series(values, dtype=count_dtype if count_dtype is not None else
                                      ("int64" if all(type(v) is int for v in values) else object))
@@ -396,6 +398,10 @@ def test_report_holds_plain_aggregate_scalars_only() -> None:
     report = _assess(_jobs([J1, J2], [1, 2]), _cars([J1, "SYNTH-JOB-404"]))
     for f in dataclasses.fields(report):
         value = getattr(report, f.name)
+        if f.name == "count_fields":                    # per-declaration aggregates (contract names, ints)
+            assert all(all(type(getattr(x, g.name)) is (str if g.name == "column" else int)
+                           for g in dataclasses.fields(x)) for x in value)
+            continue
         assert type(value) in (int, bool), f.name
     assert J1 not in repr(report) and "SYNTH-JOB-404" not in repr(report)
     with pytest.raises(dataclasses.FrozenInstanceError):

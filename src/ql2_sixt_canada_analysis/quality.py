@@ -92,6 +92,9 @@ class RawDatasetBlankRowResults:
 
     jobs: BlankRowResult
     cars: BlankRowResult
+    #: Carried over from the loaded :class:`RawDatasets` (blank-row removal
+    #: removes only completely blank rows and cannot make a source complete).
+    complete_source: bool = False
 
     @property
     def by_key(self) -> Mapping[DatasetKey, BlankRowResult]:
@@ -106,7 +109,7 @@ class RawDatasetBlankRowResults:
     @property
     def cleaned(self) -> RawDatasets:
         """Both cleaned frames in the ingestion container type."""
-        return RawDatasets(jobs=self.jobs.cleaned, cars=self.cars.cleaned)
+        return RawDatasets(jobs=self.jobs.cleaned, cars=self.cars.cleaned, complete_source=self.complete_source)
 
 
 # ------------------------------------------------------------------- public API
@@ -175,6 +178,7 @@ def remove_blank_rows_from_raw_datasets(datasets: RawDatasets) -> RawDatasetBlan
     return RawDatasetBlankRowResults(
         jobs=remove_completely_blank_rows(datasets.jobs),
         cars=remove_completely_blank_rows(datasets.cars),
+        complete_source=datasets.complete_source,
     )
 
 

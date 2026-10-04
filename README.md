@@ -109,6 +109,29 @@ cars_df = raw.cars                      # pandas.DataFrame
   small synthetic CSVs generated in temporary directories and never read the
   real files.
 
+### Complete-source loader policy
+
+`load_raw_datasets` returns **every** record of each file or fails; it never
+samples. Before any file is opened it rejects, with
+`IncompleteSourceOptionError` (naming the option and why), every
+`read_csv_options` entry that could omit or reshape records:
+
+| Option | Why it is prohibited |
+| --- | --- |
+| `nrows` | limits the number of records read |
+| `skiprows`, `skipfooter` | omit leading/selected or trailing records |
+| `comment` | truncates lines and drops comment-only records |
+| `chunksize`, `iterator` | return partial readers instead of one complete frame |
+| `usecols`, `index_col`, `header`, `names` | project away or reshape contract columns |
+| `on_bad_lines` other than `"error"` | `"skip"`, `"warn"` or a callable discard malformed records |
+
+`on_bad_lines="error"` (the parser default) is allowed, so malformed records
+fail the load (`RawDataLoadError`). Remaining options only change tokenising
+or value interpretation. `RawDatasets.complete_source` is `True` only when the
+loader enforced this policy with blank lines preserved (blank-row removal
+carries the flag through); frames assembled any other way are not proven
+complete.
+
 ## Identifier fields
 
 Identifier fields are labels (e.g. the scrape-job identity shared by `jobs`
@@ -301,6 +324,25 @@ validate_expected_location_coverage(cleaned.cars)      # raises LocationCoverage
   removes or alters rows. Tests use fabricated locations. Real location lists
   and coverage reports must not be committed.
 
+### City-branch pairs
+
+The project contract keys expected locations on authoritative
+**(city, branch)** pairs (`location_columns=('city', 'location')`,
+`label_column='location'`), compared exactly as given:
+
+- a branch label observed under another city is a different, *unexpected*
+  pair and never covers the expected pair (e.g. a Vancouver branch label
+  under Calgary leaves the Vancouver pair missing);
+- a label observed under more than one city is a *conflicting assignment*
+  (`conflicting_location_label_count`) and fails the contract; city is never
+  inferred from the label and labels are never merged;
+- the report lists the configured expected pairs (`expected_pairs`) and the
+  missing ones (`missing_expected_locations`); observed pairs are source
+  values and are available only in memory through `location_pair_evidence`.
+
+These controls do not decide Vancouver identity (see the location policy
+below) and do not establish timestamp authority.
+
 ## Expected location stream investigation
 
 `investigate_location_stream(jobs_df, cars_df, target)` traces one expected
@@ -338,6 +380,23 @@ present and healthy.
 - It never creates, repairs, filters or writes records. Tests use fabricated
   locations and identifiers. Proprietary diagnostics and extracts must not be
   committed; sanitized, metric-free notes live in `docs/investigations/`.
+
+### Zero-detail jobs and continuity
+
+Continuity is counted over **jobs**, not detail rows: every job whose city
+(`parent_scope_columns`) matches the stream's city is in the denominator,
+including jobs with no detail rows. `event_accounting`
+(`StreamEventAccounting`) reconciles
+`total_jobs = scope_excluded + scope_unassignable + in_scope` and
+`in_scope = with the branch + other branches only + zero-offer + missing details`.
+Jobs carry only a city, so a job without linked detail rows cannot be
+assigned to a branch: a **zero-offer** capture (both declared counts valid
+and zero - evidence that the capture happened and returned an empty
+assortment) and a job whose declared details are **missing** both make
+branch continuity `UNASSESSABLE` (`CONTINUITY_UNASSESSABLE`) rather than
+disappearing. In-scope jobs whose details lack the branch make it `PARTIAL`.
+No branch is invented, and orphan detail rows never enter the job
+denominator (they remain relationship failures).
 
 ## Job-to-detail count reconciliation
 
@@ -386,6 +445,37 @@ validate_job_detail_reconciliation(jobs_df, cars_df)          # raises JobDetail
   valid zero.
 - Tests use fabricated identifiers and counts. Real reconciliation reports,
   mismatch, orphan or missing-link extracts must never be committed.
+
+### Every declared count
+
+`JOB_DETAIL_RELATIONSHIP.expected_detail_count_columns` is
+`('record_count', 'actual_car_rows')`. Each declaration is reconciled
+**independently** against the observed detail rows of the job (jobs with
+none are observed `0`) - `count_fields` holds one `DeclaredCountFieldReport`
+per column - and the declarations must agree with each other
+(`declared_counts_disagree_job_count`). Missing, non-numeric, negative,
+fractional or non-finite declarations are invalid and never coerced. A job is
+reconciled only when every declaration is valid and matches; `is_reconciled`
+(used by the notebook, the stream investigation and the trusted join)
+requires every job reconciled and every detail row linked. A job with two
+detail rows and declarations `2` / `999` (or `999` / `2`) fails.
+`job_detail_count_results` gives the per-job evidence (`observed_detail_count`,
+each declaration, `<column>_matches`, `declared_counts_agree`,
+`job_reconciled`) in memory only, sorted by key. Duplicate detail keys remain
+a separate key-integrity failure; nothing is deduplicated.
+
+### Aggregate completeness
+
+`assess_completeness(datasets=..., coverage=..., streams=(...), reconciliation=...)`
+is complete only when the source is complete, the city-branch coverage
+passes, every stream has complete, healthy continuity and every declared
+count reconciles; a missing report blocks. Each failure is a
+`CompletenessBlocker` (`source_not_complete`, `expected_pairs_missing`,
+`conflicting_pair_assignment`, `stream_continuity_unassessable`,
+`declared_count_unreconciled`, `declared_counts_disagree`, ...).
+`assess_pricing_readiness` also requires `source_complete`. Completeness is
+one prerequisite only: it does not resolve timestamp authority, Vancouver
+location identity, key validity or stability.
 
 ## One-to-many relationship and relationship-checked join
 

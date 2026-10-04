@@ -40,7 +40,9 @@ def _frame(definition, rows: list[dict]) -> pd.DataFrame:  # type: ignore[no-unt
 
 def jobs(*declared: tuple[object, int]) -> pd.DataFrame:
     """(job key, declared detail count) per job."""
-    return _frame(JOBS_DEF, [{PK: key, COUNT: count} for key, count in declared])
+    # Every declared-count column states the same count (they must agree).
+    return _frame(JOBS_DEF, [{PK: key, **{c: count for c in REL.expected_detail_count_columns}}
+                             for key, count in declared])
 
 
 def cars(*details: tuple[object, int]) -> pd.DataFrame:

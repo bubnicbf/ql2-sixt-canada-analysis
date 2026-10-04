@@ -127,7 +127,8 @@ def test_project_policies():
     assert V.minimum_observations >= 2
     assert all(isinstance(a.missing_policy, MP) for a in V.attributes)
     assert all(a.comparison is AttributeComparisonPolicy.EXACT and not a.mapping for a in V.attributes)
-    assert V.context_columns == EXPECTED_LOCATION_COVERAGE.location_columns   # scope: source location
+    # Scope: the source location label (the coverage contract's label component).
+    assert V.context_columns == (EXPECTED_LOCATION_COVERAGE.label_column,)
     assert V.canonical_location_grouping is False and not EXPECTED_LOCATION_COVERAGE.aliases
     assert {a.missing_policy for a in V.attributes} <= set(MP)
 
@@ -457,7 +458,10 @@ def test_delimiter_like_values_do_not_collide():
 # ------------------------------------------------------------- aliases
 
 
-ALIAS_COV = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=((L1,),), aliases={(L1,): ((L2,),)})
+# Synthetic single-label contracts (the project contract keys on (city, location)).
+LABEL_COV = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, location_columns=(CTX,), label_column=CTX,
+                                expected_locations=((L1,),))
+ALIAS_COV = dataclasses.replace(LABEL_COV, expected_locations=((L1,),), aliases={(L1,): ((L2,),)})
 SPLIT = [obs(loc=L1, t=T[0]), obs(loc=L2, t=T[1])]
 
 
@@ -468,7 +472,7 @@ def test_no_confirmed_alias_keeps_source_locations():
 
 def test_unverified_alias_not_applied():
     # An alias is not used unless the stability contract enables canonical grouping.
-    unconfigured = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=((L1,),))
+    unconfigured = dataclasses.replace(LABEL_COV, expected_locations=((L1,),))
     assert not unconfigured.aliases
     assert assess(frame(SPLIT)).distinct_entities == 2
 

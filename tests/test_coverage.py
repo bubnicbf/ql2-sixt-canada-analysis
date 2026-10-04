@@ -44,12 +44,19 @@ from ql2_sixt_canada_analysis.schemas import (
 JOBS, CARS = DatasetKey.JOBS, DatasetKey.CARS
 EXH, MIN = LocationCoverageMode.EXHAUSTIVE, LocationCoverageMode.MINIMUM_REQUIRED
 A, B, C, X = "SYNTH-CITY-A", "SYNTH-CITY-B", "SYNTH-CITY-C", "SYNTH-CITY-X"
-LOCATION_COLUMN = EXPECTED_LOCATION_COVERAGE.location_columns[0]
+LOCATION_COLUMN = EXPECTED_LOCATION_COVERAGE.label_column   # synthetic single-label contracts below
+
+
+# Synthetic single-label contract over the real detail label column (unconfigured).
+LABEL_COVERAGE = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, location_columns=(LOCATION_COLUMN,),
+                                     label_column=LOCATION_COLUMN, expected_locations=None, mode=None)
 
 
 def _single(expected: list[str], mode: LocationCoverageMode = EXH) -> LocationCoverageDefinition:
     """The real jobs location column with a synthetic expected set."""
-    return dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=tuple((e,) for e in expected), mode=mode)
+    return dataclasses.replace(EXPECTED_LOCATION_COVERAGE, location_columns=(LOCATION_COLUMN,),
+                               label_column=LOCATION_COLUMN, expected_locations=tuple((e,) for e in expected),
+                               mode=mode)
 
 
 # Synthetic composite contract (city + site) over a synthetic jobs schema.
@@ -67,7 +74,7 @@ def _composite(expected: list[tuple[str, str]], mode: LocationCoverageMode = EXH
 
 def _jobs(locations: list[object], coverage: LocationCoverageDefinition | None = None, dtype: object = "string") -> pd.DataFrame:
     """Jobs frame with the coverage columns set; neutral placeholders elsewhere."""
-    coverage = coverage or EXPECTED_LOCATION_COVERAGE
+    coverage = coverage or LABEL_COVERAGE
     rows = [loc if isinstance(loc, tuple) else (loc,) for loc in locations]
     data: dict[str, object] = {}
     for i, column in enumerate(coverage.source_definition.columns):
@@ -88,7 +95,8 @@ def _assess(jobs: pd.DataFrame, coverage: LocationCoverageDefinition) -> Locatio
     assert r.coverage_ratio == r.covered_expected_location_count / r.expected_location_count
     assert (r.missing_expected_location_count == 0) == r.all_expected_covered
     assert r.observed_location_count == r.covered_expected_location_count + r.unexpected_location_count
-    expected_valid = r.all_expected_covered and r.all_rows_assigned and (r.mode is MIN or r.unexpected_location_count == 0)
+    expected_valid = (r.all_expected_covered and r.all_rows_assigned and r.conflicting_location_label_count == 0
+                      and (r.mode is MIN or r.unexpected_location_count == 0))
     assert r.is_valid == expected_valid and bool(r.violations) != r.is_valid
     return r
 
@@ -98,10 +106,13 @@ def _assess(jobs: pd.DataFrame, coverage: LocationCoverageDefinition) -> Locatio
 
 def test_real_contract_is_branch_level_minimum_with_the_investigated_stream() -> None:
     cov = EXPECTED_LOCATION_COVERAGE
-    # Branch-level locations exist only in the detail dataset.
-    assert cov.dataset == CARS and isinstance(cov.location_columns, tuple) and cov.location_columns
+    # Keys are (city, branch label) pairs; branch labels exist only in the detail dataset.
+    assert cov.dataset == CARS and isinstance(cov.location_columns, tuple) and len(cov.location_columns) == 2
     assert set(cov.location_columns) <= set(DATASET_DEFINITIONS[CARS].columns)
-    assert not set(cov.location_columns) & set(DATASET_DEFINITIONS[JOBS].columns)
+    assert cov.label_column == cov.location_columns[-1]
+    assert cov.label_column not in DATASET_DEFINITIONS[JOBS].columns
+    assert cov.location_columns[:-1] == cov.stream_scope_columns     # the city component is the scope
+    assert set(cov.parent_scope_columns) <= set(DATASET_DEFINITIONS[JOBS].columns)
     assert cov.is_configured and cov.mode is MIN          # authority covers a minimum, not a universe
     assert INVESTIGATED_LOCATION_STREAM in cov.expected_locations
     assert len(INVESTIGATED_LOCATION_STREAM) == len(cov.location_columns)
@@ -110,7 +121,7 @@ def test_real_contract_is_branch_level_minimum_with_the_investigated_stream() ->
 
 
 def test_unconfigured_contract_fails_closed() -> None:
-    unconfigured = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=None, mode=None)
+    unconfigured = LABEL_COVERAGE
     for call in (assess_expected_location_coverage, validate_expected_location_coverage):
         with pytest.raises(LocationCoverageConfigurationError) as info:
             call(_jobs([A]), unconfigured)
@@ -134,7 +145,7 @@ def test_definition_is_immutable_and_well_formed() -> None:
     [
         {"expected_locations": (), "mode": EXH},                               # empty set
         {"expected_locations": (("A",), ("A",)), "mode": EXH},                 # duplicate
-        {"expected_locations": (("A", "B"),), "mode": EXH},                    # wrong arity
+        {"expected_locations": (("A", "B", "C"),), "mode": EXH},               # wrong arity
         {"expected_locations": ("A",), "mode": EXH},                           # not a tuple key
         {"expected_locations": ((None,),), "mode": EXH},                       # missing component
         {"expected_locations": (("  ",),), "mode": EXH},                       # blank component
@@ -318,10 +329,14 @@ def test_report_holds_only_aggregates() -> None:
     r = _assess(_jobs([A, X, None]), _single([A, B]))
     for f in dataclasses.fields(r):
         value = getattr(r, f.name)
+        if f.name in ("missing_expected_locations", "expected_pairs"):
+            continue                                   # configured expected keys only (checked below)
         assert type(value) is int or isinstance(value, LocationCoverageMode), f.name
     assert isinstance(r.coverage_ratio, float)
-    text = repr(r)
-    assert A not in text and X not in text and "SYNTH" not in text
+    # Missing keys come from the configuration; observed values never appear.
+    assert r.missing_expected_locations == ((B,),)
+    assert r.expected_pairs == ((A,), (B,))            # configuration echoed for display
+    assert X not in repr(r)                            # observed (unexpected) values never appear
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.row_count = 0  # type: ignore[misc]
     with pytest.raises(AssertionError):

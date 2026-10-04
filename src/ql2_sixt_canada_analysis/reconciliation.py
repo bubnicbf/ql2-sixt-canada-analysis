@@ -9,7 +9,17 @@ The relationship is :data:`~ql2_sixt_canada_analysis.schemas.JOB_DETAIL_RELATION
 * **difference** = observed - expected.
 
 A job is *matched* when they are equal, *under-counted* when observed is
-smaller and *over-counted* when larger. The comparison is per job, starting
+smaller and *over-counted* when larger.
+
+Every declared-count column of the relationship
+(``expected_detail_count_columns``: ``record_count`` and ``actual_car_rows``
+for the project) is reconciled **independently** against the same observed
+count (:class:`DeclaredCountFieldReport` per column); the declarations must
+also agree with each other. A job is reconciled only when every declaration
+is valid and matches; the contract passes only when every job is reconciled
+and every detail row is linked. The original aggregate fields describe the
+primary column. :func:`job_detail_count_results` gives the per-job evidence
+(in memory only; identifiers are confidential). The comparison is per job, starting
 from the jobs side, so equal global totals can never hide offsetting errors.
 
 Detail rows fall into exactly one of: **linked** (complete key matching a
@@ -77,6 +87,8 @@ from ql2_sixt_canada_analysis.schemas import (
 )
 
 __all__ = [
+    "DeclaredCountFieldReport",
+    "job_detail_count_results",
     "JobDetailReconciliationError",
     "JobDetailReconciliationReport",
     "ReconciliationPreconditionError",
@@ -89,6 +101,30 @@ _MISSING, _NON_NUMERIC, _NON_FINITE, _FRACTIONAL, _NEGATIVE, _VALID = range(6)
 
 
 # ----------------------------------------------------------------------- report
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredCountFieldReport:
+    """Reconciliation of one declared-count column (contract name and counts only)."""
+
+    column: str
+    valid_job_count: int
+    missing_job_count: int
+    invalid_job_count: int
+    matched_job_count: int
+    under_counted_job_count: int
+    over_counted_job_count: int
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable name of the declaration (for reports and notebooks)."""
+        return self.column.replace("_", " ")
+
+    @property
+    def reconciled(self) -> bool:
+        """Every job's declaration is valid and equals its observed detail count."""
+        return (self.missing_job_count == 0 and self.invalid_job_count == 0
+                and self.under_counted_job_count == 0 and self.over_counted_job_count == 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +168,9 @@ class JobDetailReconciliationReport:
     distinct_orphan_key_count: int
     absolute_discrepancy_total: int
     net_discrepancy: int
+    count_fields: tuple[DeclaredCountFieldReport, ...] = ()
+    declared_counts_disagree_job_count: int = 0
+    reconciled_job_count: int = 0
     preconditions_satisfied: bool = True
 
     def __post_init__(self) -> None:
@@ -140,6 +179,8 @@ class JobDetailReconciliationReport:
             value = getattr(self, f.name)
             if f.name == "preconditions_satisfied":
                 assert isinstance(value, bool)
+            elif f.name == "count_fields":
+                assert isinstance(value, tuple) and value, f.name
             else:
                 assert type(value) is int, f.name
                 if f.name != "net_discrepancy":
@@ -158,6 +199,13 @@ class JobDetailReconciliationReport:
         assert abs(self.net_discrepancy) <= self.absolute_discrepancy_total
         assert (self.absolute_discrepancy_total == 0) == (
             self.under_counted_job_count == 0 and self.over_counted_job_count == 0)
+        for field_report in self.count_fields:
+            assert self.job_count == (field_report.valid_job_count + field_report.missing_job_count
+                                      + field_report.invalid_job_count)
+            assert field_report.valid_job_count == (field_report.matched_job_count
+                                                    + field_report.under_counted_job_count
+                                                    + field_report.over_counted_job_count)
+        assert self.reconciled_job_count <= self.job_count
 
     @property
     def invalid_expected_count_job_count(self) -> int:
@@ -177,19 +225,32 @@ class JobDetailReconciliationReport:
         return self.linked_detail_row_count == self.detail_row_count
 
     @property
+    def declared_counts_agree(self) -> bool:
+        """No job has valid declarations that disagree with each other."""
+        return self.declared_counts_disagree_job_count == 0
+
+    @property
+    def all_count_fields_reconciled(self) -> bool:
+        return all(f.reconciled for f in self.count_fields)
+
+    @property
     def is_reconciled(self) -> bool:
-        """The full contract: valid counts, every job matched, every detail linked."""
+        """The full contract: every declaration valid and matched, agreeing, every detail linked."""
         return (self.preconditions_satisfied and self.all_expected_counts_valid
-                and self.all_valid_jobs_reconciled and self.all_details_linked)
+                and self.all_valid_jobs_reconciled and self.all_count_fields_reconciled
+                and self.declared_counts_agree and self.reconciled_job_count == self.job_count
+                and self.all_details_linked)
 
     @property
     def violations(self) -> tuple[str, ...]:
-        """Safe violation categories present (empty when reconciled)."""
+        """Safe violation categories present across every declared count (empty when reconciled)."""
+        fields_ = self.count_fields
         checks = (
-            ("missing_expected_count", self.missing_expected_count_job_count),
-            ("invalid_expected_count", self.invalid_expected_count_job_count),
-            ("under_count", self.under_counted_job_count),
-            ("over_count", self.over_counted_job_count),
+            ("missing_expected_count", sum(f.missing_job_count for f in fields_)),
+            ("invalid_expected_count", sum(f.invalid_job_count for f in fields_)),
+            ("under_count", sum(f.under_counted_job_count for f in fields_)),
+            ("over_count", sum(f.over_counted_job_count for f in fields_)),
+            ("declared_counts_disagree", self.declared_counts_disagree_job_count),
             ("missing_link", self.missing_link_detail_row_count),
             ("orphan_detail", self.orphan_detail_row_count),
         )
@@ -252,6 +313,7 @@ def assess_job_detail_reconciliation(
     linkage = _link_detail_rows(jobs, cars, relationship)
     observed = linkage.observed_per_parent  # left from jobs: every job, zero when none
     difference = observed[valid] - expected[valid]
+    per_job = _per_job(jobs, observed, relationship)
 
     return JobDetailReconciliationReport(
         job_count=len(jobs),
@@ -273,7 +335,39 @@ def assess_job_detail_reconciliation(
         distinct_orphan_key_count=linkage.distinct_orphan_keys,
         absolute_discrepancy_total=int(np.abs(difference).sum()),
         net_discrepancy=int(difference.sum()),
+        count_fields=per_job.field_reports,
+        declared_counts_disagree_job_count=int((~per_job.agree & per_job.all_valid).sum()),
+        reconciled_job_count=int(per_job.reconciled.sum()),
     )
+
+
+def job_detail_count_results(
+    jobs: pd.DataFrame,
+    cars: pd.DataFrame,
+    relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
+) -> pd.DataFrame:
+    """Per-job evidence, in memory only (a new frame on every call).
+
+    One row per job (zero-detail jobs included, observed ``0``), sorted by the
+    parent key: the key columns, ``observed_detail_count``, each declared-count
+    column as given, ``<column>_valid`` and ``<column>_matches`` per
+    declaration, ``declared_counts_agree`` and ``job_reconciled``. Holds
+    confidential identifiers: never print, log or persist it.
+    """
+    _check_relationship_inputs(jobs, cars, relationship, ReconciliationPreconditionError,
+                               require_expected_count=True)
+    observed = _link_detail_rows(jobs, cars, relationship).observed_per_parent
+    per_job = _per_job(jobs, observed, relationship)
+    frame = jobs.loc[:, list(relationship.parent_key_columns)].copy()
+    frame["observed_detail_count"] = observed
+    for column in relationship.expected_detail_count_columns:
+        frame[column] = jobs[column].to_numpy(copy=True)
+        frame[f"{column}_valid"] = per_job.valid[column]
+        frame[f"{column}_matches"] = per_job.matches[column]
+    frame["declared_counts_agree"] = per_job.agree
+    frame["job_reconciled"] = per_job.reconciled
+    keys = list(relationship.parent_key_columns)
+    return frame.sort_values(keys, kind="mergesort", na_position="last").reset_index(drop=True)
 
 
 def validate_job_detail_reconciliation(
@@ -289,6 +383,42 @@ def validate_job_detail_reconciliation(
 
 
 # ---------------------------------------------------------------------- helpers
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _PerJob:
+    valid: dict
+    matches: dict
+    all_valid: np.ndarray
+    agree: np.ndarray
+    reconciled: np.ndarray
+    field_reports: tuple[DeclaredCountFieldReport, ...]
+
+
+def _per_job(jobs: pd.DataFrame, observed: np.ndarray, relationship: JobDetailRelationshipDefinition) -> _PerJob:
+    """Independent per-declaration validity/match flags, agreement and job result."""
+    valid, matches, values, reports = {}, {}, [], []
+    for column in relationship.expected_detail_count_columns:
+        category, expected = _classify_expected_counts(jobs[column])
+        ok = category == _VALID
+        difference = observed - expected
+        valid[column] = ok
+        matches[column] = ok & (difference == 0)
+        values.append(np.where(ok, expected, -1))
+        reports.append(DeclaredCountFieldReport(
+            column=column, valid_job_count=int(ok.sum()),
+            missing_job_count=int((category == _MISSING).sum()),
+            invalid_job_count=int((~ok & (category != _MISSING)).sum()),
+            matched_job_count=int((ok & (difference == 0)).sum()),
+            under_counted_job_count=int((ok & (difference < 0)).sum()),
+            over_counted_job_count=int((ok & (difference > 0)).sum()),
+        ))
+    all_valid = np.logical_and.reduce([valid[c] for c in valid]) if valid else np.ones(len(jobs), bool)
+    stacked = np.vstack(values) if values else np.zeros((1, len(jobs)), dtype=np.int64)
+    agree = all_valid & (stacked == stacked[0]).all(axis=0)
+    reconciled = np.logical_and.reduce([matches[c] for c in matches]) & agree
+    return _PerJob(valid=valid, matches=matches, all_valid=all_valid, agree=agree, reconciled=reconciled,
+                   field_reports=tuple(reports))
 
 
 def _classify_expected_counts(series: pd.Series) -> tuple[np.ndarray, np.ndarray]:

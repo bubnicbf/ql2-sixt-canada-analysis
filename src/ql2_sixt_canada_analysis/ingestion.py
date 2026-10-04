@@ -84,6 +84,24 @@ to both the header read and the full read, value-interpretation options only
 to the full read, options that reshape the header or result are rejected, and
 any option not listed here is rejected rather than risk the two reads
 disagreeing.
+
+Complete-source policy
+----------------------
+The loader returns **every** record of each file or fails. Options that can
+sample, skip, filter, project or stream part of a source are rejected before
+any file is opened with :class:`IncompleteSourceOptionError` (naming the
+option and the reason), never silently dropped: ``nrows`` (row limit),
+``skiprows`` (leading/selected rows), ``skipfooter`` (trailing rows),
+``comment`` (truncates lines and drops comment-only lines), ``chunksize`` /
+``iterator`` (partial reads unless every chunk is consumed), ``usecols``
+(column projection), ``header`` / ``names`` / ``index_col`` (reshape the
+validated header) and ``on_bad_lines`` other than ``"error"`` (``"skip"``,
+``"warn"`` or a callable discard malformed records; ``"error"`` - the parser
+default - is allowed, so malformed rows fail fast). Remaining options only
+change tokenisation or value interpretation and cannot remove records.
+:class:`RawDatasets` from :func:`load_raw_datasets` carries
+``complete_source=True`` only when this policy held *and* blank physical
+lines were preserved.
 """
 
 from __future__ import annotations
@@ -112,6 +130,8 @@ from ql2_sixt_canada_analysis.schemas import (
 
 __all__ = [
     "RAW_CSV_READ_DEFAULTS",
+    "SAFE_ON_BAD_LINES",
+    "IncompleteSourceOptionError",
     "AmbiguousDatasetError",
     "DatasetNotFoundError",
     "IngestionError",
@@ -137,14 +157,25 @@ _TOKEN_SPLIT: Final = re.compile(r"[^a-z0-9]+")
 RAW_CSV_READ_DEFAULTS: Final[Mapping[str, Any]] = MappingProxyType({"skip_blank_lines": False})
 # read_csv options governed by project policy rather than by callers.
 _POLICY_READ_OPTIONS: Final = frozenset(RAW_CSV_READ_DEFAULTS)
-# read_csv options that would stop the loader returning one complete
-# DataFrame whose columns are exactly the validated header.
-_FORBIDDEN_READ_OPTIONS: Final = frozenset(
-    {
-        "filepath_or_buffer", "chunksize", "iterator",
-        "header", "names", "usecols", "index_col", "skiprows", "comment",
-    }
-)
+# Complete-source policy: read_csv options that would stop the loader
+# returning one complete DataFrame of every source record whose columns are
+# exactly the validated header, with the reason reported to the caller.
+_INCOMPLETE_SOURCE_OPTIONS: Final[Mapping[str, str]] = MappingProxyType({
+    "filepath_or_buffer": "the source path is chosen by discovery",
+    "nrows": "limits the number of records read",
+    "skiprows": "omits source records",
+    "skipfooter": "omits trailing source records",
+    "comment": "truncates lines and drops comment-only records",
+    "chunksize": "returns a partial, chunked reader instead of every record",
+    "iterator": "returns an iterator that may be consumed partially",
+    "usecols": "projects away contract columns",
+    "header": "reshapes the validated header",
+    "names": "replaces the validated header",
+    "index_col": "moves contract columns into the index",
+})
+_FORBIDDEN_READ_OPTIONS: Final = frozenset(_INCOMPLETE_SOURCE_OPTIONS)
+#: The only accepted ``on_bad_lines`` value: malformed records fail the load.
+SAFE_ON_BAD_LINES: Final = "error"
 # Options that change how text is decoded or split into fields. They are
 # forwarded to the header read as well as the full read so both tokenize the
 # file identically.
@@ -165,7 +196,7 @@ _DATA_READ_OPTIONS: Final = frozenset(
         "parse_dates", "date_format", "dayfirst", "cache_dates",
         "keep_date_col", "date_parser", "infer_datetime_format",
         "thousands", "decimal", "float_precision", "dtype_backend",
-        "low_memory", "nrows", "skipfooter", "verbose",
+        "low_memory", "verbose",
     }
 )
 
@@ -177,6 +208,19 @@ StrPath = str | os.PathLike[str]
 
 class IngestionError(Exception):
     """Base class for raw-data discovery, validation and loading failures."""
+
+
+class IncompleteSourceOptionError(IngestionError, ValueError):
+    """A ``read_csv`` option could omit source records (complete-source policy).
+
+    ``option`` names the prohibited option; ``reason`` says why.
+    """
+
+    def __init__(self, option: str, reason: str) -> None:
+        super().__init__(f"read_csv option '{option}' is not allowed: it {reason} "
+                         "(the raw loader must return every source record).")
+        self.option = option
+        self.reason = reason
 
 
 class RawDataDiscoveryError(IngestionError):
@@ -286,6 +330,10 @@ class RawDatasets:
 
     jobs: pd.DataFrame
     cars: pd.DataFrame
+    #: True only when :func:`load_raw_datasets` read every source record under
+    #: the complete-source policy with blank lines preserved. False (not
+    #: proven) for frames assembled any other way.
+    complete_source: bool = False
 
 
 # ------------------------------------------------------------------- public API
@@ -388,6 +436,7 @@ def load_raw_datasets(
     return RawDatasets(
         jobs=_load(DATASET_DEFINITIONS[DatasetKey.JOBS], paths.jobs, per_dataset[DatasetKey.JOBS]),
         cars=_load(DATASET_DEFINITIONS[DatasetKey.CARS], paths.cars, per_dataset[DatasetKey.CARS]),
+        complete_source=bool(preserve_blank_lines),
     )
 
 
@@ -556,10 +605,12 @@ def _is_text_dtype(value: object) -> bool:
 
 
 def _check_read_options(options: Mapping[str, Any]) -> None:
-    """Reject options that reshape the result or are not classified above."""
-    forbidden = sorted(_FORBIDDEN_READ_OPTIONS.intersection(options))
-    if forbidden:
-        raise ValueError(f"Unsupported read_csv option(s): {', '.join(forbidden)}")
+    """Reject options that could omit records, reshape the result or are unclassified."""
+    for option in sorted(_FORBIDDEN_READ_OPTIONS.intersection(options)):
+        raise IncompleteSourceOptionError(option, _INCOMPLETE_SOURCE_OPTIONS[option])
+    if "on_bad_lines" in options and not (isinstance(options["on_bad_lines"], str)
+                                          and options["on_bad_lines"] == SAFE_ON_BAD_LINES):
+        raise IncompleteSourceOptionError("on_bad_lines", "would skip or reroute malformed records")
     policy = sorted(_POLICY_READ_OPTIONS.intersection(options))
     if policy:
         raise ValueError(

@@ -48,7 +48,7 @@ from ql2_sixt_canada_analysis.schemas import (
 JOBS, CARS = DatasetKey.JOBS, DatasetKey.CARS
 REL = JOB_DETAIL_RELATIONSHIP
 PK, DK, COUNT = REL.parent_key_columns[0], REL.detail_key_columns[0], REL.expected_detail_count_column
-LOC = EXPECTED_LOCATION_COVERAGE.location_columns[0]
+LOC = EXPECTED_LOCATION_COVERAGE.label_column        # synthetic single-label contracts below
 SCOPE = EXPECTED_LOCATION_COVERAGE.stream_scope_columns[0]
 D0 = LOCATION_STREAM_COMPARISON
 PRODUCT, PRICE = D0.product_columns, D0.price_columns
@@ -61,7 +61,8 @@ TECHNICAL = {*REL.detail_key_columns, *REL.detail_definition.identifier_columns,
              *REL.detail_definition.unique_key_columns, LOC, SCOPE,
              *(f.column for f in D0.temporal.fields if f.dataset == CARS)}
 ID_COL = next(c for c in contract_columns(CARS) if c not in TECHNICAL | set(PRODUCT) | set(PRICE))
-COV = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=((A,), (B,), (C,)))
+COV = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, location_columns=(LOC,), label_column=LOC,
+                          expected_locations=((A,), (B,), (C,)))
 DEF = dataclasses.replace(D0, first=(A,), second=(B,), coverage=COV)
 
 
@@ -119,7 +120,8 @@ def test_project_definition_is_immutable_and_has_no_alias_or_identity():
 
 def test_target_literals_appear_only_in_schemas():
     root = Path(__file__).resolve().parents[1]
-    names = [part for key in COMPARED_LOCATION_STREAMS for part in key]
+    # Branch labels identify the streams; the city component is a common word (e.g. in names).
+    names = [key[-1] for key in COMPARED_LOCATION_STREAMS]
     hits = {p.relative_to(root).as_posix() for p in (root / "src").rglob("*.py")
             if any(n in p.read_text(encoding="utf-8") for n in names)}
     assert hits == {"src/ql2_sixt_canada_analysis/schemas.py"}

@@ -33,7 +33,11 @@ from enum import StrEnum
 import pandas as pd
 
 from ql2_sixt_canada_analysis.comparison import LocationStreamComparisonReport, LocationStreamComparisonStatus
+from ql2_sixt_canada_analysis.coverage import LocationCoverageReport
+from ql2_sixt_canada_analysis.ingestion import RawDatasets
+from ql2_sixt_canada_analysis.reconciliation import JobDetailReconciliationReport
 from ql2_sixt_canada_analysis.stability import VehicleStabilityReport
+from ql2_sixt_canada_analysis.streams import LocationStreamInvestigationReport, StreamContinuity
 from ql2_sixt_canada_analysis.schemas import (
     VANCOUVER_LOCATION_POLICY,
     LocationIdentityPolicy,
@@ -43,6 +47,9 @@ from ql2_sixt_canada_analysis.schemas import (
 )
 
 __all__ = [
+    "CompletenessBlocker",
+    "CompletenessReport",
+    "assess_completeness",
     "AnalyticalLocationKeys",
     "LocationPolicyReport",
     "PricingBlocker",
@@ -58,6 +65,7 @@ __all__ = [
 class PricingBlocker(StrEnum):
     """Why pricing analysis is not ready (values avoid source column names)."""
 
+    SOURCE_NOT_COMPLETE = "source_not_complete"
     KEY_CONTRACTS_INVALID = "key_contracts_invalid"
     EXPECTED_COVERAGE_FAILED = "expected_coverage_failed"
     EXPECTED_STREAM_UNHEALTHY = "expected_stream_unhealthy"
@@ -228,6 +236,7 @@ def assess_location_policy(
 def assess_pricing_readiness(
     *,
     location_policy: LocationPolicyReport,
+    source_complete: bool,
     key_contracts_valid: bool,
     expected_coverage_passed: bool,
     expected_stream_healthy: bool,
@@ -249,6 +258,7 @@ def assess_pricing_readiness(
     if vehicle_stability is not None and not isinstance(vehicle_stability, VehicleStabilityReport):
         raise TypeError("vehicle_stability must be a VehicleStabilityReport or None")
     gates = (
+        (source_complete, PricingBlocker.SOURCE_NOT_COMPLETE),
         (key_contracts_valid, PricingBlocker.KEY_CONTRACTS_INVALID),
         (expected_coverage_passed, PricingBlocker.EXPECTED_COVERAGE_FAILED),
         (expected_stream_healthy, PricingBlocker.EXPECTED_STREAM_UNHEALTHY),
@@ -276,6 +286,104 @@ def _stability_blockers(report: VehicleStabilityReport | None) -> list[PricingBl
     if not report.is_valid and not blockers:          # fail closed on any unforeseen non-pass
         blockers.append(PricingBlocker.VEHICLE_ATTRIBUTES_UNSTABLE)
     return blockers
+
+
+class CompletenessBlocker(StrEnum):
+    """Why data completeness is not proven (values avoid source column names)."""
+
+    SOURCE_NOT_COMPLETE = "source_not_complete"
+    COVERAGE_UNAVAILABLE = "coverage_unavailable"
+    EXPECTED_PAIRS_MISSING = "expected_pairs_missing"
+    UNEXPECTED_PAIRS = "unexpected_pairs"
+    UNASSIGNED_LOCATIONS = "unassigned_pairs"
+    CONFLICTING_LOCATION_ASSIGNMENT = "conflicting_pair_assignment"
+    STREAM_UNAVAILABLE = "stream_unavailable"
+    STREAM_CONTINUITY_PARTIAL = "stream_continuity_partial"
+    STREAM_CONTINUITY_UNASSESSABLE = "stream_continuity_unassessable"
+    STREAM_UNHEALTHY = "stream_unhealthy"
+    RECONCILIATION_UNAVAILABLE = "reconciliation_unavailable"
+    DECLARED_COUNT_UNRECONCILED = "declared_count_unreconciled"
+    DECLARED_COUNTS_DISAGREE = "declared_counts_disagree"
+    DETAIL_ROWS_UNLINKED = "detail_rows_unlinked"
+
+
+_COVERAGE_BLOCKERS = {
+    "missing_expected_location": CompletenessBlocker.EXPECTED_PAIRS_MISSING,
+    "unexpected_location": CompletenessBlocker.UNEXPECTED_PAIRS,
+    "missing_location_assignment": CompletenessBlocker.UNASSIGNED_LOCATIONS,
+    "conflicting_location_assignment": CompletenessBlocker.CONFLICTING_LOCATION_ASSIGNMENT,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class CompletenessReport:
+    """Fail-closed completeness: ``complete`` only with no blocking reasons.
+
+    Completeness is one prerequisite only; it says nothing about timestamp
+    authority, location identity, keys or stability.
+    """
+
+    blocking_reasons: tuple[CompletenessBlocker, ...]
+
+    @property
+    def complete(self) -> bool:
+        return not self.blocking_reasons
+
+
+def assess_completeness(
+    *,
+    datasets: RawDatasets,
+    coverage: LocationCoverageReport | None,
+    streams: tuple[LocationStreamInvestigationReport | None, ...],
+    reconciliation: JobDetailReconciliationReport | None,
+) -> CompletenessReport:
+    """Combine source completeness, city-location coverage, stream continuity and counts.
+
+    Every input must be present and pass; a missing report (``None``) or an
+    empty ``streams`` tuple blocks. Each failure is reported.
+    """
+    B = CompletenessBlocker
+    if not isinstance(datasets, RawDatasets):
+        raise TypeError("datasets must be RawDatasets")
+    if coverage is not None and not isinstance(coverage, LocationCoverageReport):
+        raise TypeError("coverage must be a LocationCoverageReport or None")
+    if reconciliation is not None and not isinstance(reconciliation, JobDetailReconciliationReport):
+        raise TypeError("reconciliation must be a JobDetailReconciliationReport or None")
+    if not isinstance(streams, tuple) or not all(
+            s is None or isinstance(s, LocationStreamInvestigationReport) for s in streams):
+        raise TypeError("streams must be a tuple of LocationStreamInvestigationReport or None")
+    reasons: list[CompletenessBlocker] = []
+    if datasets.complete_source is not True:
+        reasons.append(B.SOURCE_NOT_COMPLETE)
+    if coverage is None:
+        reasons.append(B.COVERAGE_UNAVAILABLE)
+    else:
+        reasons.extend(_COVERAGE_BLOCKERS[v] for v in coverage.violations)
+        if not coverage.is_valid and not coverage.violations:
+            reasons.append(B.COVERAGE_UNAVAILABLE)
+    if not streams or any(s is None for s in streams):
+        reasons.append(B.STREAM_UNAVAILABLE)
+    for stream in (s for s in streams if s is not None):
+        if stream.stream_continuity is StreamContinuity.PARTIAL:
+            reasons.append(B.STREAM_CONTINUITY_PARTIAL)
+        elif stream.stream_continuity is not StreamContinuity.COMPLETE:
+            reasons.append(B.STREAM_CONTINUITY_UNASSESSABLE)
+        if not stream.is_healthy:
+            reasons.append(B.STREAM_UNHEALTHY)
+    if reconciliation is None:
+        reasons.append(B.RECONCILIATION_UNAVAILABLE)
+    else:
+        if not all(f.reconciled for f in reconciliation.count_fields) or not reconciliation.count_fields:
+            reasons.append(B.DECLARED_COUNT_UNRECONCILED)
+        if not reconciliation.declared_counts_agree:
+            reasons.append(B.DECLARED_COUNTS_DISAGREE)
+        if not reconciliation.all_details_linked:
+            reasons.append(B.DETAIL_ROWS_UNLINKED)
+        if not reconciliation.is_reconciled and not any(
+                r in reasons for r in (B.DECLARED_COUNT_UNRECONCILED, B.DECLARED_COUNTS_DISAGREE,
+                                       B.DETAIL_ROWS_UNLINKED)):
+            reasons.append(B.DECLARED_COUNT_UNRECONCILED)     # fail closed on any other non-pass
+    return CompletenessReport(blocking_reasons=tuple(dict.fromkeys(reasons)))
 
 
 def validate_pricing_readiness(**gates: object) -> PricingReadinessReport:

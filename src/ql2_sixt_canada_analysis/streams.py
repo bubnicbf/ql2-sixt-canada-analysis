@@ -17,10 +17,16 @@ single primary :class:`LocationStreamStatus`:
    variant is *not* applied (only aliases declared centrally are matched) and
    its value is never reported.
 4. ``SOURCE_CONTINUITY`` - for a contract with ``stream_scope_columns``, the
-   collection events of the target's scope (distinct detail relationship keys
-   sharing the target rows' scope values) that lack the target. Some missing
-   -> ``RAW_STREAM_PARTIAL``. This compares actual collection events; it does
-   not infer a cadence.
+   denominator is every **job** of the target's scope, taken from the jobs
+   frame through ``parent_scope_columns`` - jobs with zero detail rows
+   included - never from the detail rows alone (:class:`StreamEventAccounting`).
+   In-scope jobs whose linked details lack the target -> ``RAW_STREAM_PARTIAL``.
+   In-scope jobs with no linked detail rows cannot be assigned to a branch
+   (jobs carry only a city): a declared zero-offer capture or a job whose
+   details are missing makes branch continuity unprovable ->
+   ``CONTINUITY_UNASSESSABLE``; no branch is invented for them. No in-scope
+   job, or no ``parent_scope_columns``, is also unassessable. This compares
+   actual jobs; it does not infer a cadence.
 5. ``TIME_COVERAGE`` - only with an authoritative
    :class:`~ql2_sixt_canada_analysis.schemas.CollectionScheduleDefinition`;
    otherwise temporal completeness is ``NOT_ASSESSED``. Observed collection
@@ -53,11 +59,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ql2_sixt_canada_analysis.identifiers import is_identifier_dtype
 from ql2_sixt_canada_analysis.ingestion import RawDatasets
-from ql2_sixt_canada_analysis.reconciliation import assess_job_detail_reconciliation
+from ql2_sixt_canada_analysis.reconciliation import _VALID, _classify_expected_counts, assess_job_detail_reconciliation
 from ql2_sixt_canada_analysis.relationships import assess_one_to_many_join
 from ql2_sixt_canada_analysis.schemas import (
     COLLECTION_SCHEDULE,
@@ -82,6 +89,7 @@ __all__ = [
     "LocationStreamStatus",
     "PipelineStage",
     "StreamContinuity",
+    "StreamEventAccounting",
     "TimeCoverageStatus",
     "investigate_location_stream",
     "resolve_expected_location",
@@ -103,6 +111,7 @@ class LocationStreamStatus(StrEnum):
     RELATIONSHIP_LINK_FAILURE = "relationship_link_failure"
     JOBS_PRESENT_DETAILS_ABSENT = "jobs_present_details_absent"
     JOB_DETAIL_COUNT_MISMATCH = "job_detail_count_mismatch"
+    CONTINUITY_UNASSESSABLE = "continuity_unassessable"
     SCHEDULED_TIME_ABSENT = "scheduled_time_absent"
     SCHEDULED_TIME_UNASSESSABLE = "scheduled_time_unassessable"
     STREAM_PRESENT_AND_HEALTHY = "stream_present_and_healthy"
@@ -131,6 +140,43 @@ class StreamContinuity(StrEnum):
     NOT_APPLICABLE = "not_applicable"   # no scope configured, or target absent
     COMPLETE = "complete"
     PARTIAL = "partial"
+    UNASSESSABLE = "unassessable"       # in-scope jobs cannot be assigned to the branch
+
+
+@dataclass(frozen=True, slots=True)
+class StreamEventAccounting:
+    """Job-level continuity denominator for one stream (counts only, no identifiers).
+
+    ``total_jobs = scope_excluded_jobs + scope_unassignable_jobs + in_scope_jobs``
+    and ``in_scope_jobs = jobs_with_target_details + jobs_with_other_details_only
+    + zero_offer_jobs + missing_detail_jobs``. Zero-offer jobs declare zero
+    detail rows (a capture that returned no offers); missing-detail jobs
+    declare a positive or invalid count but have no linked detail rows. Both
+    have no branch identity and stay in the denominator.
+    """
+
+    total_jobs: int
+    scope_excluded_jobs: int
+    scope_unassignable_jobs: int
+    in_scope_jobs: int
+    jobs_with_target_details: int
+    jobs_with_other_details_only: int
+    zero_offer_jobs: int
+    missing_detail_jobs: int
+
+    def __post_init__(self) -> None:
+        assert self.total_jobs == self.scope_excluded_jobs + self.scope_unassignable_jobs + self.in_scope_jobs
+        assert self.in_scope_jobs == (self.jobs_with_target_details + self.jobs_with_other_details_only
+                                      + self.zero_offer_jobs + self.missing_detail_jobs)
+
+    @property
+    def zero_detail_jobs(self) -> int:
+        return self.zero_offer_jobs + self.missing_detail_jobs
+
+    @property
+    def branch_unassignable_jobs(self) -> int:
+        """In-scope jobs without linked details: no branch identity is available."""
+        return self.zero_detail_jobs
 
 
 class TimeCoverageStatus(StrEnum):
@@ -151,7 +197,7 @@ _UPSTREAM_STATUSES = frozenset({
     LocationStreamStatus.RAW_STREAM_ABSENT, LocationStreamStatus.RAW_STREAM_PARTIAL,
     LocationStreamStatus.PARENT_KEY_VIOLATION, LocationStreamStatus.RELATIONSHIP_LINK_FAILURE,
     LocationStreamStatus.JOBS_PRESENT_DETAILS_ABSENT, LocationStreamStatus.JOB_DETAIL_COUNT_MISMATCH,
-    LocationStreamStatus.SCHEDULED_TIME_ABSENT,
+    LocationStreamStatus.SCHEDULED_TIME_ABSENT, LocationStreamStatus.CONTINUITY_UNASSESSABLE,
 })
 
 
@@ -182,6 +228,7 @@ class LocationStreamInvestigationReport:
     target_details_all_linked: bool | None
     reconciliation_passes: bool | None
     relationship_passes: bool | None
+    event_accounting: StreamEventAccounting | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -340,9 +387,10 @@ def investigate_location_stream(
                                       else TimeCoverageStatus.NOT_ASSESSED))
 
     # --- source continuity across the scope's collection events
-    continuity = _continuity(frame, mask, coverage, relationship)
-    if continuity is StreamContinuity.PARTIAL:
-        fail(PipelineStage.SOURCE_CONTINUITY, LocationStreamStatus.RAW_STREAM_PARTIAL)
+    continuity, accounting = _continuity(jobs, frame, mask, coverage, relationship)
+    continuity_failure = _CONTINUITY_FAILURES.get(continuity)
+    if continuity_failure is not None:
+        fail(PipelineStage.SOURCE_CONTINUITY, continuity_failure)
 
     # --- relationship preconditions
     dtypes_ok = all(is_identifier_dtype(jobs[c].dtype) for c in relationship.parent_key_columns
@@ -377,7 +425,8 @@ def investigate_location_stream(
             related = False
 
     failing.sort(key=list(PipelineStage).index)        # pipeline order
-    by_stage = {**_STATUS_BY_STAGE, PipelineStage.TIME_COVERAGE: time_failure}
+    by_stage = {**_STATUS_BY_STAGE, PipelineStage.TIME_COVERAGE: time_failure,
+                PipelineStage.SOURCE_CONTINUITY: continuity_failure}
     status = by_stage[failing[0]] if failing else LocationStreamStatus.STREAM_PRESENT_AND_HEALTHY
     return _report(
         status, failing,
@@ -387,7 +436,7 @@ def investigate_location_stream(
         schedule_available=schedule is not None, time_coverage=time_status,
         identifier_dtypes_valid=dtypes_ok, parent_keys_valid=keys_ok,
         target_details_present=details_present, target_details_all_linked=all_linked,
-        reconciliation_passes=reconciled, relationship_passes=related,
+        reconciliation_passes=reconciled, relationship_passes=related, event_accounting=accounting,
     )
 
 
@@ -409,6 +458,11 @@ _TIME_FAILURES = {
     TimeCoverageStatus.NEVER_PRESENT: LocationStreamStatus.SCHEDULED_TIME_ABSENT,
     TimeCoverageStatus.PARTIAL: LocationStreamStatus.RAW_STREAM_PARTIAL,
     TimeCoverageStatus.UNASSESSABLE: LocationStreamStatus.SCHEDULED_TIME_UNASSESSABLE,
+}
+
+_CONTINUITY_FAILURES = {
+    StreamContinuity.PARTIAL: LocationStreamStatus.RAW_STREAM_PARTIAL,
+    StreamContinuity.UNASSESSABLE: LocationStreamStatus.CONTINUITY_UNASSESSABLE,
 }
 
 _STATUS_BY_STAGE = {
@@ -474,19 +528,62 @@ def _raw_contains(path: Path, columns: tuple[str, ...], keys: tuple[tuple[str, .
         return any(tuple(row[c] for c in columns) in wanted for row in reader)
 
 
-def _continuity(frame: pd.DataFrame, mask: pd.Series, coverage: LocationCoverageDefinition,
-                relationship: JobDetailRelationshipDefinition) -> StreamContinuity:
-    """Share of the scope's collection events (detail relationship keys) containing the target."""
+def _continuity(jobs: pd.DataFrame, frame: pd.DataFrame, mask: pd.Series, coverage: LocationCoverageDefinition,
+                relationship: JobDetailRelationshipDefinition,
+                ) -> tuple[StreamContinuity, StreamEventAccounting | None]:
+    """Presence of the target across every in-scope *job* (zero-detail jobs included)."""
     scope = coverage.stream_scope_columns
     if not scope or coverage.dataset != relationship.detail:
-        return StreamContinuity.NOT_APPLICABLE
-    event_columns = list(relationship.detail_key_columns)
-    target_scope = pd.MultiIndex.from_frame(frame.loc[mask.to_numpy(), list(scope)].astype(object))
-    in_scope = pd.MultiIndex.from_frame(frame.loc[:, list(scope)].astype(object)).isin(target_scope)
-    events = frame.loc[in_scope, event_columns].dropna().drop_duplicates()
-    target_events = frame.loc[mask.to_numpy(), event_columns].dropna().drop_duplicates()
-    covered = pd.MultiIndex.from_frame(events).isin(pd.MultiIndex.from_frame(target_events))
-    return StreamContinuity.COMPLETE if bool(covered.all()) else StreamContinuity.PARTIAL
+        return StreamContinuity.NOT_APPLICABLE, None
+    parent_scope = coverage.parent_scope_columns
+    if not parent_scope:
+        return StreamContinuity.UNASSESSABLE, None           # no job-level denominator available
+    absent = tuple(c for c in parent_scope if c not in jobs.columns)
+    if absent:
+        raise LocationCoverageConfigurationError(
+            f"The '{relationship.parent}' frame lacks {len(absent)} scope column(s).", absent)
+    parent_keys, detail_keys = list(relationship.parent_key_columns), list(relationship.detail_key_columns)
+    names = [f"scope_{i}" for i in range(len(scope))]
+    target_scope = pd.MultiIndex.from_frame(
+        frame.loc[mask.to_numpy(), list(scope)].astype(object).dropna().drop_duplicates(), names=names)
+    job_scope = jobs.loc[:, list(parent_scope)].astype(object)
+    scope_missing = job_scope.isna().any(axis=1).to_numpy()
+    in_scope = pd.MultiIndex.from_frame(job_scope, names=names).isin(target_scope) & ~scope_missing
+
+    keys = [f"key_{i}" for i in range(len(parent_keys))]
+    job_index = pd.MultiIndex.from_frame(jobs.loc[:, parent_keys].astype(object), names=keys)
+    detail_frame = frame.loc[:, detail_keys].astype(object)
+    complete = detail_frame.notna().all(axis=1).to_numpy()
+    all_events = pd.MultiIndex.from_frame(detail_frame.loc[complete], names=keys)
+    target_events = pd.MultiIndex.from_frame(detail_frame.loc[complete & mask.to_numpy()], names=keys)
+    has_details = job_index.isin(all_events)
+    has_target = job_index.isin(target_events)
+
+    declared_zero = np.ones(len(jobs), dtype=bool)
+    for column in relationship.expected_detail_count_columns:
+        if column not in jobs.columns:
+            declared_zero[:] = False
+            break
+        category, expected = _classify_expected_counts(jobs[column])
+        declared_zero &= (category == _VALID) & (expected == 0)
+
+    accounting = StreamEventAccounting(
+        total_jobs=len(jobs),
+        scope_excluded_jobs=int((~in_scope & ~scope_missing).sum()),
+        scope_unassignable_jobs=int(scope_missing.sum()),
+        in_scope_jobs=int(in_scope.sum()),
+        jobs_with_target_details=int((in_scope & has_target).sum()),
+        jobs_with_other_details_only=int((in_scope & has_details & ~has_target).sum()),
+        zero_offer_jobs=int((in_scope & ~has_details & declared_zero).sum()),
+        missing_detail_jobs=int((in_scope & ~has_details & ~declared_zero).sum()),
+    )
+    if accounting.jobs_with_other_details_only:
+        status = StreamContinuity.PARTIAL                     # proven absence in an observed event
+    elif accounting.in_scope_jobs == 0 or accounting.zero_detail_jobs:
+        status = StreamContinuity.UNASSESSABLE                # branch presence unprovable
+    else:
+        status = StreamContinuity.COMPLETE
+    return status, accounting
 
 
 def _target_rows(jobs: pd.DataFrame, cars: pd.DataFrame, mask: pd.Series,

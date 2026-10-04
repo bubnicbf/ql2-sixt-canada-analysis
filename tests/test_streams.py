@@ -39,6 +39,7 @@ from ql2_sixt_canada_analysis.streams import (
     LocationStreamStatus as S,
     PipelineStage as P,
     StreamContinuity,
+    StreamEventAccounting,
     TimeCoverageStatus,
     investigate_location_stream,
     resolve_expected_location,
@@ -48,12 +49,13 @@ from ql2_sixt_canada_analysis.streams import (
 JOBS, CARS = DatasetKey.JOBS, DatasetKey.CARS
 REL = JOB_DETAIL_RELATIONSHIP
 PK, DK, COUNT = REL.parent_key_columns[0], REL.detail_key_columns[0], REL.expected_detail_count_column
-LOC = EXPECTED_LOCATION_COVERAGE.location_columns[0]
+LOC = EXPECTED_LOCATION_COVERAGE.label_column        # synthetic single-label contracts below
 SCOPE = EXPECTED_LOCATION_COVERAGE.stream_scope_columns[0]
 DOWNTOWN, AIRPORT, CITY = "SYNTH-DOWNTOWN", "SYNTH-AIRPORT", "SYNTH-CITY-A"
 J1, J2 = "SYNTH-JOB-001", "SYNTH-JOB-002"
 TARGET = (DOWNTOWN,)
-COV = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=((DOWNTOWN,), (AIRPORT,)),
+COV = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, location_columns=(LOC,), label_column=LOC,
+                          expected_locations=((DOWNTOWN,), (AIRPORT,)),
                           mode=LocationCoverageMode.MINIMUM_REQUIRED)
 # A jobs-level column used as the location for jobs-level synthetic contracts.
 JOB_LOCATION = next(c for c in contract_columns(JOBS)
@@ -61,10 +63,15 @@ JOB_LOCATION = next(c for c in contract_columns(JOBS)
 TS = JOB_LOCATION  # a jobs column reused as the synthetic schedule's timestamp column
 
 
+PARENT_SCOPE, = EXPECTED_LOCATION_COVERAGE.parent_scope_columns
+
+
 def _jobs(rows: list[dict]) -> pd.DataFrame:
-    data = {c: [r.get(c, f"jobs-{c}") for r in rows] for c in contract_columns(JOBS)}
+    """Jobs in the synthetic city by default; every declared count mirrors COUNT."""
+    data = {c: [r.get(c, CITY if c == PARENT_SCOPE else f"jobs-{c}") for r in rows] for c in contract_columns(JOBS)}
     frame = pd.DataFrame(data, columns=list(contract_columns(JOBS)))
-    frame[COUNT] = pd.Series([r.get(COUNT, 0) for r in rows], dtype="int64")
+    for column in REL.expected_detail_count_columns:
+        frame[column] = pd.Series([r.get(column, r.get(COUNT, 0)) for r in rows], dtype="int64")
     return frame.astype(dict(REL.parent_definition.identifier_dtypes))
 
 
@@ -108,7 +115,7 @@ def test_unknown_or_malformed_targets_are_rejected_safely(target: object) -> Non
         resolve_expected_location(target, COV)  # type: ignore[arg-type]
     message = str(info.value)
     assert DOWNTOWN not in message and AIRPORT not in message
-    assert not any(part in message for part in INVESTIGATED_LOCATION_STREAM)
+    assert not any(part in message for part in INVESTIGATED_LOCATION_STREAM)  # neither city nor branch
 
 
 def test_resolution_needs_a_configured_contract_and_no_data() -> None:
@@ -156,7 +163,8 @@ def test_partial_stream_across_collection_events() -> None:
 
 
 def test_other_scopes_do_not_affect_continuity() -> None:
-    jobs = _jobs([{PK: J1, COUNT: 1}, {PK: J2, COUNT: 1}])
+    # J2 is another city's job (jobs carry the scope too), so it is outside the denominator.
+    jobs = _jobs([{PK: J1, COUNT: 1}, {PK: J2, COUNT: 1, PARENT_SCOPE: "SYNTH-CITY-B"}])
     cars = _cars([(J1, DOWNTOWN, CITY), (J2, AIRPORT, "SYNTH-CITY-B")])
     assert _investigate(jobs, cars).stream_continuity is StreamContinuity.COMPLETE
 
@@ -206,7 +214,8 @@ def test_count_mismatch() -> None:
 
 
 def test_jobs_present_details_absent_for_jobs_level_stream() -> None:
-    jobs_cov = dataclasses.replace(COV, dataset=JOBS, location_columns=(JOB_LOCATION,), stream_scope_columns=())
+    jobs_cov = dataclasses.replace(COV, dataset=JOBS, location_columns=(JOB_LOCATION,), stream_scope_columns=(),
+                                   parent_scope_columns=(), label_column=None)
     jobs = _jobs([{PK: J1, JOB_LOCATION: DOWNTOWN, COUNT: 2}])
     report = investigate_location_stream(jobs, _cars([]), TARGET, coverage=jobs_cov)
     assert (report.status, report.earliest_failing_stage) == (S.JOBS_PRESENT_DETAILS_ABSENT, P.DETAIL_PRESENCE)
@@ -376,7 +385,8 @@ def test_exact_match_recognised_and_airport_downtown_distinct() -> None:
 
 def test_component_order_error_is_not_a_match() -> None:
     composite = dataclasses.replace(COV, location_columns=(SCOPE, LOC),
-                                    expected_locations=((CITY, DOWNTOWN),), stream_scope_columns=())
+                                    expected_locations=((CITY, DOWNTOWN),), stream_scope_columns=(),
+                                    parent_scope_columns=(), label_column=None)
     cars = _cars([(J1, CITY, DOWNTOWN)])        # components swapped between the two columns
     report = investigate_location_stream(_jobs([{PK: J1, COUNT: 1}]), cars, (CITY, DOWNTOWN), coverage=composite)
     assert report.status is S.UNVERIFIED_ALIAS and report.present_after_cleaning is False
@@ -404,7 +414,8 @@ def test_pipeline_blank_rows_and_partial_rows(tmp_path: Path) -> None:
     def row(key: DatasetKey, values: dict[str, str]) -> str:
         return ",".join(values.get(c, "") for c in contract_columns(key))
 
-    write(JOBS, [row(JOBS, {PK: "000001", COUNT: "2"}), ""])
+    write(JOBS, [row(JOBS, {PK: "000001", PARENT_SCOPE: CITY,
+                            **{c: "2" for c in REL.expected_detail_count_columns}}), ""])
     write(CARS, [
         row(CARS, {DK: "000001", LOC: DOWNTOWN, SCOPE: CITY}),    # mostly empty, but not blank
         "", "," * (len(contract_columns(CARS)) - 1),               # completely blank -> removed
@@ -431,7 +442,8 @@ def test_report_is_categorical_and_safe() -> None:
     report = _investigate(*_healthy_inputs())
     for field in dataclasses.fields(report):
         value = getattr(report, field.name)
-        assert value is None or isinstance(value, (bool, S, P, StreamContinuity, TimeCoverageStatus, tuple)), field.name
+        assert value is None or isinstance(
+            value, (bool, S, P, StreamContinuity, TimeCoverageStatus, tuple, StreamEventAccounting)), field.name
         if isinstance(value, tuple):
             assert all(isinstance(v, P) for v in value)
     text = repr(report)

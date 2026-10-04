@@ -23,15 +23,24 @@ Comparison is exact (case-sensitive, no stripping, no fuzzy matching) and
 composite keys are compared as tuples, never concatenated. Only aliases
 declared in the central contract (``aliases``) also count, matched exactly.
 
-The contract passes when every expected location is covered and every job has
-a complete location; in ``EXHAUSTIVE`` mode it additionally requires zero
+Composite keys are pairs such as ``(city, location)``: a location label
+observed under a different city is a different, *unexpected* key and never
+covers the expected pair. With ``label_column`` configured, a label observed
+under more than one combination of the other components is a **conflicting
+assignment** (``conflicting_location_label_count``) and fails the contract;
+city is never inferred from the label.
+
+The contract passes when every expected location is covered, no label has a
+conflicting assignment and every job has a complete location; in ``EXHAUSTIVE`` mode it additionally requires zero
 unexpected locations, while ``MINIMUM_REQUIRED`` mode only reports them.
 
 Coverage is checked on the cleaned frame of the contract's dataset (after
 blank-row removal) and before any one-to-many join. Branch-level locations
 live in the detail dataset; a location counts once however many rows show it. Assessment
 never modifies, sorts or removes rows and writes nothing; reports and errors
-hold aggregate numbers and booleans only - never location values.
+hold aggregate numbers and booleans plus the *configured* expected keys that
+are missing (configuration, not source values) - never observed values.
+:func:`location_pair_evidence` returns observed keys in memory only.
 """
 
 from __future__ import annotations
@@ -54,6 +63,7 @@ __all__ = [
     "LocationCoverageError",
     "LocationCoverageReport",
     "assess_expected_location_coverage",
+    "location_pair_evidence",
     "validate_expected_location_coverage",
 ]
 
@@ -70,12 +80,16 @@ class LocationCoverageReport:
     missing_expected_location_count: int
     unexpected_location_count: int
     missing_location_row_count: int
+    conflicting_location_label_count: int = 0
+    missing_expected_locations: tuple[tuple[str, ...], ...] = ()
+    expected_pairs: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         # Programmer invariants; a violation is a bug in this module.
         assert isinstance(self.mode, LocationCoverageMode)
+        assert len(self.missing_expected_locations) == self.missing_expected_location_count
         for f in fields(self):
-            if f.name != "mode":
+            if f.name not in ("mode", "missing_expected_locations", "expected_pairs"):
                 value = getattr(self, f.name)
                 assert type(value) is int and value >= 0, f.name
         assert self.expected_location_count > 0
@@ -105,9 +119,19 @@ class LocationCoverageReport:
         return self.missing_location_row_count == 0
 
     @property
+    def missing_pairs(self) -> tuple[tuple[str, ...], ...]:
+        """Configured expected keys not observed (configuration values, not source values)."""
+        return self.missing_expected_locations
+
+    @property
+    def no_conflicting_assignments(self) -> bool:
+        return self.conflicting_location_label_count == 0
+
+    @property
     def is_valid(self) -> bool:
         """The configured coverage contract holds."""
-        return self.all_expected_covered and self.all_rows_assigned and self.unexpected_locations_acceptable
+        return (self.all_expected_covered and self.all_rows_assigned and self.unexpected_locations_acceptable
+                and self.no_conflicting_assignments)
 
     @property
     def violations(self) -> tuple[str, ...]:
@@ -116,6 +140,7 @@ class LocationCoverageReport:
             ("missing_expected_location", not self.all_expected_covered),
             ("unexpected_location", not self.unexpected_locations_acceptable),
             ("missing_location_assignment", not self.all_rows_assigned),
+            ("conflicting_location_assignment", not self.no_conflicting_assignments),
         )
         return tuple(name for name, failed in checks if failed)
 
@@ -162,24 +187,18 @@ def assess_expected_location_coverage(
         )
     assert coverage.mode is not None and coverage.expected_locations is not None
 
-    keys = jobs.loc[:, list(columns)]                              # location columns only
-    unassigned = keys.isna().to_numpy(dtype=bool, copy=True)
-    for position, (_, column) in enumerate(keys.items()):
-        # Only text can be empty/whitespace-only; other scalars never render
-        # as blank text, so a vectorised strip on a temporary string view
-        # suffices. The source column is untouched.
-        blank = column.astype("string").str.strip().eq("").fillna(False)
-        unassigned[:, position] |= blank.to_numpy(dtype=bool)
-    assigned = ~unassigned.any(axis=1)
-
+    keys, assigned = _assigned_keys(jobs, columns)
     names = [f"component_{i}" for i in range(len(columns))]
     observed = pd.MultiIndex.from_frame(keys.loc[assigned].drop_duplicates(), names=names)
     expected = pd.MultiIndex.from_tuples(list(coverage.expected_locations), names=names)
     # An expected location is covered by its own key or an authoritative alias.
-    covered = sum(
+    covered_flags = [
         bool(pd.MultiIndex.from_tuples(list(coverage.match_keys(key)), names=names).isin(observed).any())
         for key in coverage.expected_locations
-    )
+    ]
+    covered = sum(covered_flags)
+    missing = tuple(key for key, hit in zip(coverage.expected_locations, covered_flags) if not hit)
+    conflicts = len(_conflicting_labels(keys.loc[assigned].drop_duplicates(), coverage))
     accepted = pd.MultiIndex.from_tuples(
         [k for key in coverage.expected_locations for k in coverage.match_keys(key)], names=names
     )
@@ -194,7 +213,60 @@ def assess_expected_location_coverage(
         missing_expected_location_count=len(expected) - covered,
         unexpected_location_count=unexpected,
         missing_location_row_count=int((~assigned).sum()),
+        conflicting_location_label_count=conflicts,
+        missing_expected_locations=missing,
+        expected_pairs=tuple(coverage.expected_locations),
     )
+
+
+def location_pair_evidence(
+    frame: pd.DataFrame,
+    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+) -> pd.DataFrame:
+    """Distinct observed complete keys with ``expected`` and ``conflicting_label`` flags.
+
+    In memory only (a new frame on every call), sorted by key; observed source
+    values are confidential - never print, log or persist them.
+    """
+    if not isinstance(frame, pd.DataFrame) or not isinstance(coverage, LocationCoverageDefinition):
+        raise TypeError("frame must be a DataFrame and coverage a LocationCoverageDefinition")
+    columns = coverage.location_columns
+    absent = tuple(c for c in columns if c not in frame.columns)
+    if absent:
+        raise LocationCoverageConfigurationError(
+            f"The '{coverage.dataset}' frame lacks {len(absent)} location column(s).", absent)
+    keys, assigned = _assigned_keys(frame, columns)
+    observed = keys.loc[assigned].drop_duplicates().astype(object).reset_index(drop=True)
+    accepted = {k for key in (coverage.expected_locations or ()) for k in coverage.match_keys(key)}
+    tuples = list(map(tuple, observed.itertuples(index=False)))
+    observed["expected"] = [t in accepted for t in tuples]
+    conflicting = _conflicting_labels(observed.loc[:, list(columns)], coverage)
+    observed["conflicting_label"] = (observed[coverage.label_column].isin(conflicting)
+                                     if coverage.label_column else False)
+    return observed.sort_values(list(columns), kind="mergesort").reset_index(drop=True)
+
+
+def _assigned_keys(frame: pd.DataFrame, columns: tuple[str, ...]) -> tuple[pd.DataFrame, "pd.Series"]:
+    """Location columns and a mask of rows whose every component is present and non-blank."""
+    keys = frame.loc[:, list(columns)]                             # location columns only
+    unassigned = keys.isna().to_numpy(dtype=bool, copy=True)
+    for position, (_, column) in enumerate(keys.items()):
+        # Only text can be empty/whitespace-only; other scalars never render
+        # as blank text, so a vectorised strip on a temporary string view
+        # suffices. The source column is untouched.
+        blank = column.astype("string").str.strip().eq("").fillna(False)
+        unassigned[:, position] |= blank.to_numpy(dtype=bool)
+    return keys, ~unassigned.any(axis=1)
+
+
+def _conflicting_labels(distinct_keys: pd.DataFrame, coverage: LocationCoverageDefinition) -> set:
+    """Labels observed under more than one combination of the other key components."""
+    label = coverage.label_column
+    others = [c for c in coverage.location_columns if c != label]
+    if label is None or not others or distinct_keys.empty:
+        return set()
+    counts = distinct_keys.groupby(label, dropna=False, sort=False).size()
+    return set(counts.index[counts > 1])
 
 
 def assess_dataset_location_coverage(

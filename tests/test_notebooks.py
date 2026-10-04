@@ -65,7 +65,9 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
 REPORTING_STEPS = ("assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
-                   "assess_pricing_readiness(", "compare_location_streams(")
+                   "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
+                   "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
+                   "investigate_location_stream(", "assess_completeness(")
 
 
 def _is_reporting(cell: nbformat.NotebookNode) -> bool:
@@ -388,9 +390,9 @@ def test_ingestion_notebook_has_no_relationship_fields_or_own_reconciliation() -
                     r"\.reindex\(", r"\.isin\(", r"\.sum\(", r"parent_key_columns", r"detail_key_columns",
                     r"expected_detail_count_column"):
         assert not re.search(pattern, code), f"notebook reimplements reconciliation: {pattern}"
-    # The reconciliation step itself prints no results (the join gate reports pass/fail explicitly).
-    step = next(c.source for c in _code_cells(notebook) if "assess_job_detail_reconciliation(" in c.source)
-    assert not re.search(r"print\([^\n]*(reconciliation_report|_count|discrepancy|reconciled)", step)
+    # Reporting cells print aggregate results only; the quiet steps print none.
+    assert not re.search(r"print\([^\n]*(reconciliation_report|_count|discrepancy|reconciled)",
+                         _quiet_code(notebook))
 
 
 def test_ingestion_notebook_reconciliation_runs_on_synthetic_mismatches(tmp_path: Path) -> None:
@@ -413,9 +415,11 @@ def test_ingestion_notebook_reconciliation_runs_on_synthetic_mismatches(tmp_path
     )
     outputs = _step_output(result, "assess_job_detail_reconciliation(")  # this step's own cell only
     assert "reconciliation step completed" in outputs
-    assert "SYNTH-JOB" not in outputs and "000001" not in outputs
-    assert not re.search(r"\b[0-9]+\b", outputs)
-    assert not re.search(r"\b(True|False|orphan|mismatch|under|over)\b", outputs, re.I)
+    assert "SYNTH-JOB" not in outputs and "000001" not in outputs        # no identifiers, aggregates only
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    for column in rel.expected_detail_count_columns:
+        assert lines[f"Declared {column.replace('_', ' ')} reconciled"].split("|")[0].strip() == "False"
+    assert lines["Combined reconciliation passed"].split("|")[0].strip() == "False"
     assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before
     assert _snapshot(PROJECT_ROOT) == repo_before
 
@@ -500,7 +504,7 @@ def test_ingestion_notebook_reports_blocked_join_on_duplicate_detail_keys(tmp_pa
     position, = rel.detail_definition.non_identifier_key_columns
     directory = tmp_path / "raw"
     directory.mkdir()
-    rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "2"}],
+    rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", **{c: "2" for c in rel.expected_detail_count_columns}}],
             DatasetKey.CARS: [{rel.detail_key_columns[0]: "SYNTH-JOB-001", position: "0"}] * 2}  # duplicate key
     for key, key_rows in rows.items():
         columns = DATASET_DEFINITIONS[key].columns
@@ -564,8 +568,11 @@ def test_ingestion_notebook_coverage_step_fails_closed_on_synthetic_inputs(
                                    env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
     outputs = _step_output(result, "assess_dataset_location_coverage(")  # this step's own cell only
     assert "Expected-coverage step completed." in outputs
-    assert "synthetic_r" not in outputs and not re.search(r"\b[0-9]+\b", outputs)
-    assert not re.search(r"\b(True|False|None|missing|unexpected|configured)\b", outputs, re.I)
+    assert "synthetic_r" not in outputs                                   # observed values never shown
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Observed pair values"].strip() == "withheld (confidential)"
+    assert lines["Coverage contract passed"].strip() == "False"
+    assert lines["Missing expected pairs"].strip() != "none"           # configured pairs, not source values
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 
 
@@ -586,7 +593,7 @@ def test_ingestion_notebook_investigates_stream_via_central_target() -> None:
     assert re.search(r"location_stream_report\s*=\s*investigate_location_stream\(", cell)
     # The target literal lives only in the central contract.
     text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
-    assert not any(part in text for part in INVESTIGATED_LOCATION_STREAM)
+    assert INVESTIGATED_LOCATION_STREAM[-1] not in text   # branch label (the city is a common word)
     for pattern in (r"\.query\(", r"\.loc\[", r"\.merge\(", r"\.groupby\(", r"==\s*stream_target",
                     r"\.isin\(", r"\.str\.", r"validate_location_stream"):
         assert not re.search(pattern, code), f"one-off stream logic in notebook: {pattern}"
@@ -602,8 +609,8 @@ def test_ingestion_notebook_stream_step_runs_on_synthetic_inputs(synthetic_raw_d
                                    env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
     outputs = _step_output(result, "investigate_location_stream(")  # this step's own cell only
     assert "Expected-stream investigation step completed." in outputs
-    assert not any(part in outputs for part in INVESTIGATED_LOCATION_STREAM)
-    assert not re.search(r"\b(absent|partial|healthy|alias|raw_stream|True|False)\b", outputs, re.I)
+    assert INVESTIGATED_LOCATION_STREAM[-1] not in outputs
+    assert "Stream continuity:" in outputs and "synthetic_r" not in outputs
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 
 
@@ -662,7 +669,7 @@ def test_ingestion_notebook_compares_related_streams_through_the_api() -> None:
     # The ambiguous boolean handoff is gone: identity comes from the policy gate.
     assert "location_alias_confirmed" not in code and "alias_authority_sufficient" not in code
     # Pair, columns and aliasing live in the central definition only.
-    names = [part for key in COMPARED_LOCATION_STREAMS for part in key]
+    names = [key[-1] for key in COMPARED_LOCATION_STREAMS]   # branch labels
     full = "\n".join(c.source for c in notebook.cells)
     assert not any(n in full for n in names)
     columns = {*LOCATION_STREAM_COMPARISON.product_columns, *LOCATION_STREAM_COMPARISON.price_columns}
@@ -684,7 +691,7 @@ def test_ingestion_notebook_comparison_step_runs_on_synthetic_inputs(synthetic_r
                                    env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
     outputs = _step_output(result, "compare_location_streams(")  # this step's own cell only
     assert "Related-stream comparison step completed." in outputs
-    assert not any(part in outputs for key in COMPARED_LOCATION_STREAMS for part in key)
+    assert not any(key[-1] in outputs for key in COMPARED_LOCATION_STREAMS)
     lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
     assert lines["Behavioural comparison result"].strip() == "both_streams_absent"
     assert lines["Duplicate inference blocked by"].strip().startswith("no_paired_captures")
@@ -699,11 +706,11 @@ def test_ingestion_notebook_reports_inconclusive_single_pair_partial_overlap(tmp
     from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, LOCATION_STREAM_COMPARISON as D
 
     rel = JOB_DETAIL_RELATIONSHIP
-    loc, = D.coverage.location_columns
+    loc = D.coverage.label_column
     scope, = D.coverage.stream_scope_columns
     position, = rel.detail_definition.non_identifier_key_columns
-    (first,), (second,) = COMPARED_LOCATION_STREAMS
-    same = {c: f"SYNTH-{c.upper()}" for c in (*D.product_columns, *D.price_columns)} | {scope: "SYNTH-CITY"}
+    (city, first), (_, second) = COMPARED_LOCATION_STREAMS
+    same = {c: f"SYNTH-{c.upper()}" for c in (*D.product_columns, *D.price_columns)} | {scope: city}
     cars = [same | {rel.detail_key_columns[0]: "SYNTH-JOB-001", loc: first, position: "0"},
             same | {rel.detail_key_columns[0]: "SYNTH-JOB-001", loc: second, position: "1"},
             same | {rel.detail_key_columns[0]: "SYNTH-JOB-002", loc: first, position: "0"}]   # unpaired
@@ -890,6 +897,47 @@ def test_ingestion_notebook_reports_unresolved_policy_and_blocked_pricing(
     assert PricingBlocker.LOCATION_POLICY_UNRESOLVED.value in lines["Pricing blocked by"]
     assert "SYNTH" not in outputs and "synthetic_r" not in outputs and not re.search(r"\d", outputs)
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------------ data completeness
+
+
+def test_ingestion_notebook_gates_completeness_through_the_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    assert re.search(r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bassess_completeness\b", code, re.S)
+    cell = next(s for s in sources if "assess_completeness(" in s)
+    for argument in ("datasets=cleaned", "coverage=location_coverage_report", "streams=(location_stream_report,)",
+                     "reconciliation=reconciliation_report"):
+        assert argument in cell
+    pricing = next(s for s in sources if "assess_pricing_readiness(" in s)
+    assert "source_complete=bool(cleaned.complete_source)" in pricing
+    for forbidden in ("nrows", "skipfooter", "skiprows", "on_bad_lines", "chunksize", "usecols"):
+        assert forbidden not in code
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert "data_complete" in guidance
+
+
+def test_ingestion_notebook_reports_completeness_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    from ql2_sixt_canada_analysis.readiness import CompletenessBlocker
+
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    loaded = _step_output(result, "load_raw_datasets(raw_dir)")
+    assert "Complete-source ingestion rules enforced: True" in loaded
+    outputs = _step_output(result, "assess_completeness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Overall completeness"].strip() == "not proven"
+    blocked = lines["Completeness blocked by"]
+    assert CompletenessBlocker.EXPECTED_PAIRS_MISSING.value in blocked
+    assert CompletenessBlocker.SOURCE_NOT_COMPLETE.value not in blocked
+    reconcile = _step_output(result, "assess_job_detail_reconciliation(")
+    assert len(re.findall(r"^Declared .* reconciled:", reconcile, re.M)) == len(
+        JOB_DETAIL_RELATIONSHIP.expected_detail_count_columns)
+    assert list(workdir.iterdir()) == []
 
 
 # ----------------------------------------------------------------- execution

@@ -15,6 +15,7 @@ from ql2_sixt_canada_analysis.comparison import (
     validate_confirmed_location_alias,
 )
 from ql2_sixt_canada_analysis.coverage import (
+    location_pair_evidence,
     LocationCoverageError,
     LocationCoverageReport,
     assess_dataset_location_coverage,
@@ -31,6 +32,8 @@ from ql2_sixt_canada_analysis.identifiers import (
     validate_raw_dataset_identifier_dtypes,
 )
 from ql2_sixt_canada_analysis.ingestion import (
+    SAFE_ON_BAD_LINES,
+    IncompleteSourceOptionError,
     RawDatasetPaths,
     RawDatasets,
     discover_raw_csvs,
@@ -43,6 +46,8 @@ from ql2_sixt_canada_analysis.quality import (
     remove_completely_blank_rows,
 )
 from ql2_sixt_canada_analysis.reconciliation import (
+    DeclaredCountFieldReport,
+    job_detail_count_results,
     JobDetailReconciliationError,
     JobDetailReconciliationReport,
     ReconciliationPreconditionError,
@@ -105,6 +110,7 @@ from ql2_sixt_canada_analysis.schemas import (
     get_dataset_definition,
 )
 from ql2_sixt_canada_analysis.streams import (
+    StreamEventAccounting,
     LocationStreamError,
     LocationStreamInvestigationReport,
     LocationStreamStatus,
@@ -123,6 +129,9 @@ from ql2_sixt_canada_analysis.join_readiness import (
     require_trusted_job_detail_join,
 )
 from ql2_sixt_canada_analysis.readiness import (
+    CompletenessBlocker,
+    CompletenessReport,
+    assess_completeness,
     AnalyticalLocationKeys,
     LocationPolicyReport,
     PricingBlocker,
@@ -168,6 +177,15 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "SAFE_ON_BAD_LINES",
+    "IncompleteSourceOptionError",
+    "location_pair_evidence",
+    "DeclaredCountFieldReport",
+    "job_detail_count_results",
+    "StreamEventAccounting",
+    "CompletenessBlocker",
+    "CompletenessReport",
+    "assess_completeness",
     "DuplicateInferenceBlocker",
     "MINIMUM_DUPLICATE_PAIRED_CAPTURES",
     "VehicleEntityHistory",
