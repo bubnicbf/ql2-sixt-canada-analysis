@@ -1,4 +1,7 @@
-"""Tests for the jobs-to-cars one-to-many relationship control and trusted join.
+"""Tests for the jobs-to-cars one-to-many relationship control and relationship-checked join.
+
+Analytical trust (keys, declared counts and relationship together) is tested
+in ``test_join_readiness.py``.
 
 All identifiers are fabricated (``SYNTH-JOB-001``, ``000001``, ...). Frames
 are built from the centralized column, identifier, key and relationship
@@ -437,7 +440,7 @@ def test_pipeline_interaction(tmp_path: Path) -> None:
     assert not report.is_valid and report.violations == ("missing_link",)
     with pytest.raises(OneToManyRelationshipError):
         join_jobs_to_details(cleaned.jobs, cleaned.cars)
-    # Without the unlinked row the join is trusted; identifiers keep their dtype.
+    # Without the unlinked row the relationship-checked join succeeds; identifiers keep their dtype.
     linked_only = cleaned.cars[cleaned.cars[dk].notna()]
     joined = join_jobs_to_details(cleaned.jobs, linked_only).joined
     assert len(joined) == 3 and is_identifier_dtype(joined[pk].dtype)

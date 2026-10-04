@@ -387,7 +387,7 @@ validate_job_detail_reconciliation(jobs_df, cars_df)          # raises JobDetail
 - Tests use fabricated identifiers and counts. Real reconciliation reports,
   mismatch, orphan or missing-link extracts must never be committed.
 
-## One-to-many relationship and trusted join
+## One-to-many relationship and relationship-checked join
 
 Jobs are the **one** side and cars the **many** side of the centrally defined
 relationship (`JOB_DETAIL_RELATIONSHIP`). This control answers whether jobs
@@ -401,7 +401,7 @@ from ql2_sixt_canada_analysis import assess_one_to_many_join, join_jobs_to_detai
 report = assess_one_to_many_join(jobs_df, cars_df)   # aggregate report, in memory
 report.is_valid, report.violations
 validate_one_to_many_join(jobs_df, cars_df)          # raises OneToManyRelationshipError
-result = join_jobs_to_details(jobs_df, cars_df)      # ValidatedJoinResult(joined, report) or raises
+result = join_jobs_to_details(jobs_df, cars_df)      # relationship-checked only - NOT analytical trust
 ```
 
 - **Contract:** parent keys must be complete and unique (otherwise
@@ -416,10 +416,13 @@ result = join_jobs_to_details(jobs_df, cars_df)      # ValidatedJoinResult(joine
   `linked detail rows + parents without details` rows, with every linked
   detail once and every detail-less parent once. Equal input totals are never
   accepted as proof.
-- **Trusted join:** `join_jobs_to_details` strictly validates first, merges
-  with `how="left"`, `validate="one_to_many"`, `sort=False`, re-checks the row
-  count and raises `OneToManyRelationshipError` / `ValidatedJoinError` (pandas
-  `MergeError` as the cause) instead of returning a partially trusted frame.
+- **Relationship-checked join:** `join_jobs_to_details` strictly validates
+  the relationship first, merges with `how="left"`, `validate="one_to_many"`,
+  `sort=False`, re-checks the row count and raises `OneToManyRelationshipError`
+  / `ValidatedJoinError` (pandas `MergeError` as the cause) instead of
+  returning a relationship-invalid frame. It does **not** check business keys
+  or declared counts, so it is not an analytically trusted join; use the
+  trusted job-detail join gate below.
   Parent order and, within a parent, detail order are preserved; the result
   has a fresh `RangeIndex`. It never repairs, drops or deduplicates
   violations, and the joined frame stays in memory.
@@ -433,6 +436,54 @@ result = join_jobs_to_details(jobs_df, cars_df)      # ValidatedJoinResult(joine
   still fail if they declared non-zero counts).
 - Tests use fabricated identifiers. Joined proprietary data and relationship
   reports must never be written to tracked locations or committed.
+
+## Trusted job-detail join
+
+A relationship-valid join is not necessarily analytically trustworthy: a
+duplicated detail business key, a duplicated or incomplete jobs key, or
+declared job-level counts that disagree with the detail rows can all coexist
+with a passing one-to-many relationship, and pandas will still merge. A
+non-`None` DataFrame is never proof of analytical validity.
+
+```python
+from ql2_sixt_canada_analysis import assess_job_detail_join_readiness, require_trusted_job_detail_join
+
+join = assess_job_detail_join_readiness(jobs_df, cars_df)
+join.join_ready, join.blocking_reasons
+join.trusted_jobs_with_details        # DataFrame only when join_ready, else None
+join.diagnostic_jobs_with_details     # UNTRUSTED investigation frame, or None
+require_trusted_job_detail_join(jobs_df, cars_df)   # trusted frame or UntrustedJoinError
+```
+
+- **Prerequisites (all must explicitly pass, on the same frames that are
+  joined, in one call):** the jobs business-key contract
+  (`jobs_key_contract_valid`), the detail business-key contract
+  (`details_key_contract_valid`; together `all_key_contracts_valid`),
+  declared-count reconciliation (`declared_counts_reconciled`) and the
+  one-to-many relationship contract (`relationship_contract_valid`: no orphan
+  or missing-link details, validated cardinality and row conservation).
+- **Fail closed:** a report that cannot be produced (identifier-type, blank
+  row or parent-key preconditions) is unavailable and blocks
+  (`required_report_unavailable`); the absence of a violation is never read
+  as a pass. `join_ready` is true only with no `JobDetailJoinBlocker`
+  (`jobs_key_contract_failed`, `details_key_contract_failed`,
+  `declared_counts_not_reconciled`, `relationship_contract_failed`,
+  `orphan_details_present`, `missing_link_details_present`,
+  `join_construction_failed`). Every applicable reason is reported.
+- **Trusted vs diagnostic:** `trusted_jobs_with_details` is the only frame
+  downstream analysis may use. `diagnostic_jobs_with_details` is the
+  relationship-checked join kept for investigation when the relationship
+  passes but another contract fails; it must never feed pricing, aggregation
+  or conclusions. Orphans are never dropped silently into either frame.
+- Frames are returned as fresh copies; mutating the inputs or a returned
+  frame cannot change the held result. Nothing is deduplicated, repaired or
+  written.
+- **Migration:** the notebook variable `jobs_with_details` (previously set
+  whenever the relationship passed) is replaced by `trusted_jobs_with_details`
+  / `job_detail_join_ready`, with `diagnostic_jobs_with_details` clearly
+  labelled untrusted.
+- A trusted join is one prerequisite only; it does not establish pricing
+  readiness (`assess_pricing_readiness` keeps every other gate).
 
 ## Temporal reconciliation
 

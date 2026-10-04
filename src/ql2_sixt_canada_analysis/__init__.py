@@ -113,6 +113,13 @@ from ql2_sixt_canada_analysis.streams import (
     resolve_expected_location,
     validate_location_stream,
 )
+from ql2_sixt_canada_analysis.join_readiness import (
+    JobDetailJoinBlocker,
+    JobDetailJoinReadiness,
+    UntrustedJoinError,
+    assess_job_detail_join_readiness,
+    require_trusted_job_detail_join,
+)
 from ql2_sixt_canada_analysis.readiness import (
     AnalyticalLocationKeys,
     LocationPolicyReport,
@@ -157,6 +164,11 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "JobDetailJoinBlocker",
+    "JobDetailJoinReadiness",
+    "UntrustedJoinError",
+    "assess_job_detail_join_readiness",
+    "require_trusted_job_detail_join",
     "VANCOUVER_LOCATION_POLICY",
     "LocationIdentityPolicy",
     "LocationPolicyAuthority",

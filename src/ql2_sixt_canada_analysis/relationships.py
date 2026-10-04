@@ -1,4 +1,4 @@
-"""Validate the jobs-to-cars one-to-many relationship and perform trusted joins.
+"""Validate the jobs-to-cars one-to-many relationship and build relationship-checked joins.
 
 The relationship is :data:`~ql2_sixt_canada_analysis.schemas.JOB_DETAIL_RELATIONSHIP`.
 ``jobs`` is the **one** (parent) side and ``cars`` the **many** (detail) side.
@@ -32,8 +32,15 @@ both sides' key columns use the nullable string identifier dtype; the jobs
 key is complete and unique (duplicate parents are never collapsed, chosen
 arbitrarily or merged); completely blank rows have been removed.
 
-Trusted join
-------------
+Relationship-checked join (not analytical trust)
+------------------------------------------------
+:func:`join_jobs_to_details` checks **only the relationship contract**. It does
+not check either dataset's business key or declared-count reconciliation, so
+its result is not an analytically trusted join. Analytical consumers must use
+:func:`ql2_sixt_canada_analysis.join_readiness.assess_job_detail_join_readiness`
+(``trusted_jobs_with_details``, available only when ``join_ready``), which
+uses this function internally after every other contract has passed.
+
 :func:`join_jobs_to_details` strictly validates first, then merges jobs (left)
 with cars (right) using ``how="left"``, ``validate="one_to_many"`` and
 ``sort=False``, and re-checks the row count. Parent order is preserved and,
@@ -44,7 +51,7 @@ without details). Same-named non-key columns get the relationship's
 ``parent_suffix`` / ``detail_suffix`` (``_job`` / ``_detail``); other columns
 keep their names. No merge-indicator column is exposed. Failures raise
 :class:`OneToManyRelationshipError` or :class:`ValidatedJoinError`; no
-partially trusted frame is ever returned.
+relationship-invalid frame is ever returned.
 
 Empty-data policy
 -----------------
@@ -132,7 +139,7 @@ class OneToManyRelationshipError(Exception):
 
 
 class ValidatedJoinError(Exception):
-    """The trusted join could not be produced safely (e.g. a pandas ``MergeError``).
+    """The relationship-checked join could not be produced safely (e.g. a pandas ``MergeError``).
 
     The original exception, if any, is the ``__cause__``; the message holds
     no identifiers or row contents.
@@ -208,9 +215,11 @@ class OneToManyJoinReport:
 
 @dataclass(frozen=True, slots=True)
 class ValidatedJoinResult:
-    """A trusted parent-left join and the report that validated it.
+    """A relationship-checked parent-left join and the relationship report.
 
-    ``joined`` is an ordinary (mutable) DataFrame held in memory only.
+    Not analytical trust: business keys and declared counts are not checked
+    here (see :mod:`ql2_sixt_canada_analysis.join_readiness`). ``joined`` is an
+    ordinary (mutable) DataFrame held in memory only.
     """
 
     joined: pd.DataFrame
@@ -353,7 +362,10 @@ def join_jobs_to_details(
     cars: pd.DataFrame,
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
 ) -> ValidatedJoinResult:
-    """Return the trusted parent-left join of jobs to cars, or raise.
+    """Return the relationship-checked parent-left join of jobs to cars, or raise.
+
+    This is **not** the trusted analytical join: use
+    :func:`~ql2_sixt_canada_analysis.join_readiness.assess_job_detail_join_readiness`.
 
     Strictly validates the relationship first, then merges with
     ``validate="one_to_many"`` and verifies row conservation on the result.

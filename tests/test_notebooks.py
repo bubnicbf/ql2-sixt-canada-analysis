@@ -368,7 +368,9 @@ def test_ingestion_notebook_has_no_relationship_fields_or_own_reconciliation() -
                     r"\.reindex\(", r"\.isin\(", r"\.sum\(", r"parent_key_columns", r"detail_key_columns",
                     r"expected_detail_count_column"):
         assert not re.search(pattern, code), f"notebook reimplements reconciliation: {pattern}"
-    assert not re.search(r"print\([^\n]*(reconciliation_report|_count|discrepancy|reconciled)", code)
+    # The reconciliation step itself prints no results (the join gate reports pass/fail explicitly).
+    step = next(c.source for c in _code_cells(notebook) if "assess_job_detail_reconciliation(" in c.source)
+    assert not re.search(r"print\([^\n]*(reconciliation_report|_count|discrepancy|reconciled)", step)
 
 
 def test_ingestion_notebook_reconciliation_runs_on_synthetic_mismatches(tmp_path: Path) -> None:
@@ -404,7 +406,7 @@ def test_ingestion_notebook_reconciliation_runs_on_synthetic_mismatches(tmp_path
 def test_ingestion_notebook_validates_relationship_before_trusted_join() -> None:
     sources = [c.source for c in _code_cells(read_notebook(INGESTION_NOTEBOOK))]
     code = "\n".join(sources)
-    for name in ("assess_one_to_many_join", "join_jobs_to_details", "JOB_DETAIL_RELATIONSHIP"):
+    for name in ("assess_one_to_many_join", "assess_job_detail_join_readiness", "JOB_DETAIL_RELATIONSHIP"):
         assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
     reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
     relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
@@ -412,12 +414,13 @@ def test_ingestion_notebook_validates_relationship_before_trusted_join() -> None
     cell = sources[relate]
     assert re.search(r"relationship_report\s*=\s*assess_one_to_many_join\(\s*jobs_df\s*,\s*cars_df\s*,"
                      r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", cell)
-    # The join only runs when the contract passes; otherwise no joined frame.
-    assert re.search(r"join_jobs_to_details\([^)]*\)\.joined\s*if\s+one_to_many_contract_valid\s+else\s+None", cell, re.S)
+    # The relationship alone never yields a joined frame: the notebook does not
+    # call the relationship-checked join directly (the join gate does).
+    assert "join_jobs_to_details" not in code and not re.search(r"^jobs_with_details\s*=", code, re.M)
     assert not re.search(r"(pd\.merge|\.merge\(|\.join\(\s*(jobs|cars))", code), "no unvalidated direct merge"
     keys = {*JOB_DETAIL_RELATIONSHIP.parent_key_columns, *JOB_DETAIL_RELATIONSHIP.detail_key_columns}
     assert not any(re.search(rf"\b{re.escape(k)}\b", code) for k in keys)
-    assert not re.search(r"print\([^\n]*(relationship_report|jobs_with_details|_count\b|_valid\b|is_valid)", code)
+    assert not re.search(r"print\([^\n]*(relationship_report|jobs_with_details|_count\b|_valid\b|is_valid)", cell)
 
 
 def test_ingestion_notebook_relationship_step_runs_on_synthetic_inputs(tmp_path: Path) -> None:
@@ -446,6 +449,63 @@ def test_ingestion_notebook_relationship_step_runs_on_synthetic_inputs(tmp_path:
         assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 
 
+# ---------------------------------------------------- trusted job-detail join
+
+
+def test_ingestion_notebook_gates_the_trusted_join_through_the_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    gate = next(i for i, s in enumerate(sources) if "assess_job_detail_join_readiness(" in s)
+    assert relate < gate
+    cell = sources[gate]
+    assert re.search(r"job_detail_join\s*=\s*assess_job_detail_join_readiness\(\s*jobs_df\s*,\s*cars_df\s*,"
+                     r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", cell)
+    assert re.search(r"^trusted_jobs_with_details\s*=\s*job_detail_join\.trusted_jobs_with_details", cell, re.M)
+    assert re.search(r"^job_detail_join_ready\s*=\s*job_detail_join\.join_ready", cell, re.M)
+    # The trust decision lives in production code, not in notebook boolean logic.
+    assert not re.search(r"trusted_jobs_with_details\s*=.*\bif\b", cell)
+    for later in sources[gate + 1:]:
+        assert "diagnostic_jobs_with_details" not in later, "diagnostic join consumed downstream"
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert "trusted_jobs_with_details" in guidance and "job_detail_join_ready" in guidance
+    assert "only when it is not `None`" not in guidance and "not proof" in guidance
+
+
+def test_ingestion_notebook_reports_blocked_join_on_duplicate_detail_keys(tmp_path: Path) -> None:
+    from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    position, = rel.detail_definition.non_identifier_key_columns
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", rel.expected_detail_count_column: "2"}],
+            DatasetKey.CARS: [{rel.detail_key_columns[0]: "SYNTH-JOB-001", position: "0"}] * 2}  # duplicate key
+    for key, key_rows in rows.items():
+        columns = DATASET_DEFINITIONS[key].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}_{n}") for i, c in enumerate(columns))
+                 for n, r in enumerate(key_rows)]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    outputs = _step_output(result, "assess_job_detail_join_readiness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Relationship contract passed"].strip() == "True"      # the original defect's trigger
+    assert lines["Detail business-key contract passed"].strip() == "False"
+    assert lines["Jobs business-key contract passed"].strip() == "True"
+    assert lines["Declared counts reconciled"].strip() == "True"
+    assert lines["Trusted join ready"].strip() == "False"
+    assert JobDetailJoinBlocker.DETAILS_KEY_CONTRACT_FAILED.value in lines["Trusted join blocked by"]
+    assert lines["Joined frame held"].strip().startswith("diagnostic only - UNTRUSTED")
+    assert "SYNTH" not in outputs and "synthetic_" not in outputs and not re.search(r"\d", outputs)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
 # ---------------------------------------------------- expected location coverage
 
 
@@ -458,7 +518,7 @@ def test_ingestion_notebook_checks_coverage_on_cleaned_frames_before_join() -> N
     keys = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
     cover = next(i for i, s in enumerate(sources) if "assess_dataset_location_coverage(" in s)
     reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
-    join = next(i for i, s in enumerate(sources) if "join_jobs_to_details(" in s)
+    join = next(i for i, s in enumerate(sources) if "assess_job_detail_join_readiness(" in s)
     assert keys < cover < reconcile < join
     assert re.search(r"location_coverage_report\s*=\s*assess_dataset_location_coverage\(\s*cleaned\s*,"
                      r"\s*EXPECTED_LOCATION_COVERAGE\s*\)", sources[cover])
@@ -547,7 +607,7 @@ def test_ingestion_notebook_reconciles_temporal_fields_through_the_api() -> None
     for pattern in (r"to_datetime", r"tz_localize", r"tz_convert", r"strptime", r"\.dt\.", r"fillna",
                     r"validate_temporal_reconciliation", r"parse_temporal_field"):
         assert not re.search(pattern, code), f"notebook duplicates temporal logic: {pattern}"
-    assert not re.search(r"print\([^\n]*(temporal_report|_trusted|_count)", code)
+    assert not re.search(r"print\([^\n]*(temporal_report|_trusted|_count)", sources[temporal])
 
 
 def test_ingestion_notebook_temporal_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
