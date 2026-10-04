@@ -159,30 +159,53 @@ def test_role_map_gap_closes_only_with_complete_typed_authority_backed_roles():
     assert G.LOCATION_ROLE_MAP_UNAVAILABLE not in gaps(location_role_map=complete, location_role_authority=AUTHORITY)
 
 
-def _rental_contract(*, date_fields=True, required=True, replications=True):  # type: ignore[no-untyped-def]
+J, C_ = DatasetKey.JOBS, DatasetKey.CARS
+# Synthetic approved agreements (test configuration only - the real semantics come from the
+# authority decision record): each detail rental-date field gets exactly one parent source.
+APPROVED = tuple(pb.ApprovedDateAgreement((J, src), (C_, tgt)) for src, tgt in (
+    ("pickup_date", "job_pickup_date"), ("return_date", "job_return_date"),
+    ("pickup_date", "pickup_date"), ("return_date", "return_date")))
+
+
+def _rental_contract(rules=APPROVED, *, required=True, fields=None):  # type: ignore[no-untyped-def]
     T = TEMPORAL_RECONCILIATION
-    fields = list(T.fields)
-    reps = list(T.replications)
-    if date_fields:
-        for column in pb.RENTAL_PERIOD_COLUMNS:
-            for dataset in (DatasetKey.JOBS, DatasetKey.CARS):
-                fields.append(TemporalFieldDefinition(dataset, column, TemporalKind.DATE, required,
-                                                      "%Y-%m-%d", TemporalAwareness.NOT_APPLICABLE))
-            if replications:
-                reps.append(TemporalReplicationRule((DatasetKey.JOBS, column), (DatasetKey.CARS, column)))
-    return dataclasses.replace(T, fields=tuple(fields), replications=tuple(reps))
+    refs = pb.rental_date_fields(REL) if fields is None else fields
+    defs = [TemporalFieldDefinition(ds, col, TemporalKind.DATE, required, "%Y-%m-%d", TemporalAwareness.NOT_APPLICABLE)
+            for ds, col in refs]
+    reps = [TemporalReplicationRule(a.source, a.target) for a in rules]
+    return dataclasses.replace(T, fields=(*T.fields, *defs), replications=(*T.replications, *reps))
 
 
-def test_rental_date_gap_closes_only_with_validity_agreement_and_authority():
-    def gaps(contract, authority=AUTHORITY):  # type: ignore[no-untyped-def]
-        return project_baseline_with(temporal_contract=contract, rental_period_rule_authority=authority).plan_gaps
+def test_project_distinguishes_six_rental_date_fields():
+    assert pb.rental_date_fields(REL) == (
+        (J, "pickup_date"), (J, "return_date"), (C_, "job_pickup_date"), (C_, "job_return_date"),
+        (C_, "pickup_date"), (C_, "return_date"))
 
-    for contract, authority in ((_rental_contract(), None),                         # fields+rules, no authority
-                                (_rental_contract(replications=False), AUTHORITY),  # no parent/detail agreement
-                                (_rental_contract(required=False), AUTHORITY),      # validity not required
-                                (_rental_contract(date_fields=False), AUTHORITY),   # not modeled at all
-                                (TEMPORAL_RECONCILIATION, AUTHORITY)):
-        assert G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE in gaps(contract, authority)
+
+def test_rental_date_gap_requires_exact_approved_agreements():
+    def gaps(contract, authority=AUTHORITY, approved=APPROVED):  # type: ignore[no-untyped-def]
+        return project_baseline_with(temporal_contract=contract, rental_period_rule_authority=authority,
+                                     approved_rental_date_agreements=approved).plan_gaps
+
+    unrelated = pb.ApprovedDateAgreement((J, "pickup_date"), (C_, "scrape_date"))
+    same_named_only = APPROVED[2:]                                      # job_* copies left undefined
+    swapped = (pb.ApprovedDateAgreement((J, "return_date"), (C_, "job_pickup_date")), *APPROVED[1:])
+    still_open = [
+        (_rental_contract(), None, APPROVED),                                       # no authority
+        (_rental_contract(), AUTHORITY, None),                                      # no approved agreements
+        (_rental_contract(same_named_only), AUTHORITY, same_named_only),            # job_* semantics undefined
+        (_rental_contract((*APPROVED, unrelated)), AUTHORITY, APPROVED),            # unapproved extra rule
+        (_rental_contract(APPROVED[:3]), AUTHORITY, APPROVED),                      # approved rule not configured
+        (_rental_contract(swapped), AUTHORITY, APPROVED),                           # rule on the wrong target
+        (_rental_contract((*APPROVED[:3], unrelated)), AUTHORITY, (*APPROVED[:3], unrelated)),  # unrelated target
+        (_rental_contract(required=False), AUTHORITY, APPROVED),                    # validity not required
+        (_rental_contract(fields=pb.rental_date_fields(REL)[:4], rules=APPROVED[:2]), AUTHORITY, APPROVED),
+        (TEMPORAL_RECONCILIATION, AUTHORITY, APPROVED),                             # nothing modeled
+        (_rental_contract(), AUTHORITY, (*APPROVED, APPROVED[0])),                  # duplicate approval
+        (_rental_contract(), AUTHORITY, [*APPROVED]),                               # untyped container
+    ]
+    for contract, authority, approved in still_open:
+        assert G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE in gaps(contract, authority, approved)
     assert G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE not in gaps(_rental_contract())
 
 

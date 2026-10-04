@@ -69,6 +69,8 @@ from ql2_sixt_canada_analysis.streams import _match
 from ql2_sixt_canada_analysis.temporal import TemporalReconciliationReport
 
 __all__ = [
+    "ApprovedDateAgreement",
+    "rental_date_fields",
     "LocationRole",
     "BaselineInputError",
     "ContinuityFinding",
@@ -87,6 +89,28 @@ _CODE = re.compile(r"^[a-z][a-z0-9_.:]{0,79}$")
 _LABEL = re.compile(r"^[A-Za-z][A-Za-z .'\-]{0,62}$")
 #: Rental-period columns of the detail contract the plan needs date rules for.
 RENTAL_PERIOD_COLUMNS = ("pickup_date", "return_date")
+#: Detail-side copies of the parent job's rental-period columns (distinct from the detail's own).
+JOB_RENTAL_PERIOD_COLUMNS = ("job_pickup_date", "job_return_date")
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedDateAgreement:
+    """One authority-approved parent-to-detail date agreement: ``target`` must equal ``source``.
+
+    Exact references only - the authority decision record defines which detail
+    field (``job_*`` copy or the detail's own field) agrees with which parent
+    field; code never infers it from names.
+    """
+
+    source: tuple[object, str]
+    target: tuple[object, str]
+
+
+def rental_date_fields(relationship: JobDetailRelationshipDefinition) -> tuple[tuple[object, str], ...]:
+    """The six rental-date fields whose semantics must be distinguished (parent, detail copy, detail own)."""
+    parent, detail = relationship.parent, relationship.detail
+    return (*((parent, c) for c in RENTAL_PERIOD_COLUMNS), *((detail, c) for c in JOB_RENTAL_PERIOD_COLUMNS),
+            *((detail, c) for c in RENTAL_PERIOD_COLUMNS))
 
 
 class BaselineInputError(ValueError):
@@ -185,6 +209,7 @@ def build_pricing_baseline(
     location_role_map: Mapping[tuple[str, ...], LocationRole] | None = None,
     location_role_authority: LocationPolicyAuthority | None = None,
     rental_period_rule_authority: LocationPolicyAuthority | None = None,
+    approved_rental_date_agreements: tuple[ApprovedDateAgreement, ...] | None = None,
 ) -> PricingReadinessBaseline:
     """Assemble the sanitized baseline from existing assessment results (inputs are not modified).
 
@@ -194,11 +219,16 @@ def build_pricing_baseline(
       assigning a typed :class:`LocationRole` to **every** configured expected
       and observed stream (partial maps, untyped roles or malformed keys keep
       it open);
-    * the rental-period gap closes only when both pickup/return columns are
-      required ``DATE`` fields of the temporal contract, each has a
-      parent/detail agreement (replication) rule from the parent dataset,
-      and ``rental_period_rule_authority`` vouches for the rental-period
-      rule itself (no typed pickup/return ordering rule exists yet).
+    * the rental-period gap closes only with ``rental_period_rule_authority``
+      and ``approved_rental_date_agreements`` (from the authority decision
+      record) that give **every** detail rental-date field
+      (``job_pickup_date``, ``job_return_date``, ``pickup_date``,
+      ``return_date``) exactly one approved parent source, when all six
+      rental-date fields (:func:`rental_date_fields`) are required ``DATE``
+      fields of the temporal contract and the contract's rental-date
+      replication rules are **exactly** the approved source-to-target pairs
+      (none missing, none unapproved). A rule from a parent field to an
+      unrelated detail field never counts.
 
     Raises:
         BaselineInputError: A required report is missing or of the wrong type,
@@ -225,8 +255,9 @@ def build_pricing_baseline(
         pricing_blockers=tuple(dict.fromkeys(b.value for b in pricing.blocking_reasons)),
         subordinate_blockers=subordinate,
         statuses=statuses,
-        plan_gaps=_plan_gaps(coverage, temporal_contract, cars, location_role_map, location_role_authority,
-                             rental_period_rule_authority),
+        plan_gaps=_plan_gaps(coverage, relationship, temporal_contract, cars, location_role_map,
+                             location_role_authority, rental_period_rule_authority,
+                             approved_rental_date_agreements),
         expected_population=StreamPopulation(
             population="configured_expected",
             authority=("authoritative_exhaustive" if coverage.mode is LocationCoverageMode.EXHAUSTIVE
@@ -283,9 +314,10 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
     return tuple(blockers), tuple(statuses)
 
 
-def _plan_gaps(coverage: LocationCoverageDefinition, temporal_contract: TemporalReconciliationDefinition,
-               cars: pd.DataFrame, role_map: object, role_authority: object,
-               rental_authority: object) -> tuple[PlanReadinessGap, ...]:
+def _plan_gaps(coverage: LocationCoverageDefinition, relationship: JobDetailRelationshipDefinition,
+               temporal_contract: TemporalReconciliationDefinition, cars: pd.DataFrame, role_map: object,
+               role_authority: object, rental_authority: object,
+               approved_agreements: object) -> tuple[PlanReadinessGap, ...]:
     G = PlanReadinessGap
     gaps = []
     if coverage.mode is not LocationCoverageMode.EXHAUSTIVE:
@@ -293,7 +325,7 @@ def _plan_gaps(coverage: LocationCoverageDefinition, temporal_contract: Temporal
     required_keys = {tuple(k) for k in coverage.expected_locations} | set(_observed_keys(cars, coverage))
     if not _role_map_sufficient(role_map, role_authority, required_keys, len(coverage.location_columns)):
         gaps.append(G.LOCATION_ROLE_MAP_UNAVAILABLE)
-    if not _rental_rules_sufficient(temporal_contract, coverage, rental_authority):
+    if not _rental_rules_sufficient(temporal_contract, relationship, rental_authority, approved_agreements):
         gaps.append(G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE)
     return tuple(g for g in G if g in gaps)
 
@@ -310,19 +342,30 @@ def _role_map_sufficient(role_map: object, authority: object, required: set, wid
     return required <= set(role_map)
 
 
-def _rental_rules_sufficient(contract: TemporalReconciliationDefinition, coverage: LocationCoverageDefinition,
-                             authority: object) -> bool:
-    """Validity, parent/detail agreement and an authority-backed period rule for both columns."""
+def _rental_rules_sufficient(contract: object, relationship: JobDetailRelationshipDefinition, authority: object,
+                             approved: object) -> bool:
+    """Authority, an exact approved agreement per detail rental field, validity and matching rules."""
     if not isinstance(contract, TemporalReconciliationDefinition) or not isinstance(authority, LocationPolicyAuthority):
         return False
-    parent = contract.relationship.parent
-    for column in RENTAL_PERIOD_COLUMNS:
-        field = next((f for f in contract.fields if f.ref == (coverage.dataset, column)), None)
+    if (not isinstance(approved, tuple) or not approved
+            or not all(isinstance(a, ApprovedDateAgreement) for a in approved)):
+        return False
+    fields = rental_date_fields(relationship)
+    parents = set(fields[:len(RENTAL_PERIOD_COLUMNS)])
+    details = set(fields[len(RENTAL_PERIOD_COLUMNS):])
+    pairs = [(tuple(a.source), tuple(a.target)) for a in approved]
+    if len(set(pairs)) != len(pairs) or not all(src in parents and tgt in details for src, tgt in pairs):
+        return False
+    targets = [tgt for _, tgt in pairs]
+    if sorted(targets, key=repr) != sorted(details, key=repr):         # every detail field exactly once
+        return False
+    for ref in fields:                                                  # validity of all six fields
+        field = next((f for f in contract.fields if f.ref == ref), None)
         if field is None or field.kind is not TemporalKind.DATE or field.required is not True:
-            return False                                                  # validity not modeled
-        if not any(rule.source == (parent, column) for rule in contract.replications):
-            return False                                                  # no parent/detail agreement
-    return True
+            return False
+    configured = {(tuple(r.source), tuple(r.replica)) for r in contract.replications
+                  if tuple(r.source) in set(fields) or tuple(r.replica) in set(fields)}
+    return configured == set(pairs)                                     # exactly the approved rules
 
 
 def _observed_keys(cars: pd.DataFrame, coverage: LocationCoverageDefinition) -> tuple[tuple[str, ...], ...]:

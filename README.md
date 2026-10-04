@@ -1064,9 +1064,13 @@ is fail closed: only counts, booleans, snake-case codes and digit-free
 location labels are accepted. Plan gaps close only on sufficient,
 authority-backed inputs: the role-map gap needs authority provenance
 (`location_role_authority`) and a typed `LocationRole` for every
-expected and observed stream; the rental-period gap needs required `DATE`
-fields and parent/detail agreement rules for both pickup/return columns plus
-`rental_period_rule_authority`. The current baseline is
+expected and observed stream; the rental-period gap needs
+`rental_period_rule_authority` plus `approved_rental_date_agreements` from the
+authority decision record that give each detail rental-date field
+(`cars.job_pickup_date`, `cars.job_return_date`, `cars.pickup_date`,
+`cars.return_date`) exactly one approved parent source (`jobs.pickup_date` /
+`jobs.return_date`); all six must be required `DATE` fields and the temporal
+contract's rental-date replication rules must be exactly the approved pairs. The current baseline is
 `docs/investigations/pricing_readiness_baseline.md`.
 
 ## Vehicle-attribute stability
