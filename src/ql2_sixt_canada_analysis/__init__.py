@@ -64,6 +64,12 @@ from ql2_sixt_canada_analysis.schemas import (
     EXPECTED_LOCATION_COVERAGE,
     IDENTIFIER_DTYPE,
     INVESTIGATED_LOCATION_STREAM,
+    VEHICLE_ATTRIBUTE_STABILITY,
+    AttributeComparisonPolicy,
+    MissingValueStabilityPolicy,
+    VehicleAttributeDefinition,
+    VehicleStabilityConfigurationError,
+    VehicleStabilityDefinition,
     COMPARED_LOCATION_STREAMS,
     LOCATION_STREAM_COMPARISON,
     CapturePairing,
@@ -102,6 +108,15 @@ from ql2_sixt_canada_analysis.streams import (
     resolve_expected_location,
     validate_location_stream,
 )
+from ql2_sixt_canada_analysis.stability import (
+    VehicleAttributeStabilityError,
+    VehicleAttributeStabilityReport,
+    VehicleStabilityPreconditionError,
+    VehicleStabilityReport,
+    VehicleStabilityStatus,
+    assess_vehicle_attribute_stability,
+    validate_vehicle_attribute_stability,
+)
 from ql2_sixt_canada_analysis.temporal import (
     RuleStatus,
     TemporalFieldReport,
@@ -126,6 +141,19 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "VEHICLE_ATTRIBUTE_STABILITY",
+    "AttributeComparisonPolicy",
+    "MissingValueStabilityPolicy",
+    "VehicleAttributeDefinition",
+    "VehicleStabilityConfigurationError",
+    "VehicleStabilityDefinition",
+    "VehicleAttributeStabilityError",
+    "VehicleAttributeStabilityReport",
+    "VehicleStabilityPreconditionError",
+    "VehicleStabilityReport",
+    "VehicleStabilityStatus",
+    "assess_vehicle_attribute_stability",
+    "validate_vehicle_attribute_stability",
     "COMPARED_LOCATION_STREAMS",
     "LOCATION_STREAM_COMPARISON",
     "CapturePairing",

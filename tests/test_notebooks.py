@@ -599,6 +599,48 @@ def test_ingestion_notebook_comparison_step_runs_on_synthetic_inputs(synthetic_r
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 
 
+# ---------------------------------------------------- vehicle-attribute stability
+
+
+def test_ingestion_notebook_assesses_vehicle_stability_through_the_api() -> None:
+    from ql2_sixt_canada_analysis.schemas import VEHICLE_ATTRIBUTE_STABILITY as V
+
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("assess_vehicle_attribute_stability", "VEHICLE_ATTRIBUTE_STABILITY"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
+    stability = next(i for i, s in enumerate(sources) if "assess_vehicle_attribute_stability(" in s)
+    assert relate < temporal < stability
+    assert re.search(r"vehicle_stability_report\s*=\s*assess_vehicle_attribute_stability\(\s*cars_df\s*,"
+                     r"\s*VEHICLE_ATTRIBUTE_STABILITY\s*\)", sources[stability])
+    assert re.search(r"vehicle_attributes_stable\s*=", sources[stability])
+    # No duplicated field lists or stability logic in the notebook.
+    fields = {*V.entity_key_columns, *V.context_columns, *V.attribute_columns}
+    assert not any(re.search(rf"[\"']{re.escape(f)}[\"']", code) for f in fields)
+    for pattern in (r"groupby", r"nunique", r"drop_duplicates", r"\.shift\(", r"fillna", r"factorize",
+                    r"hash", r"\.unique\(", r"value_counts", r"to_csv", r"to_parquet", r"to_json",
+                    r"validate_vehicle_attribute_stability"):
+        assert not re.search(pattern, code), f"notebook duplicates stability logic: {pattern}"
+    assert not re.search(r"print\([^\n]*(vehicle_stability_report|_stable|status)", code)
+
+
+def test_ingestion_notebook_stability_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    code_cells = _code_cells(result.executed)
+    assert not any(o.get("output_type") == "error" for c in code_cells for o in c.outputs)
+    outputs = "\n".join(o.get("text", "") for c in code_cells for o in c.outputs)
+    assert "Vehicle-attribute stability step completed." in outputs
+    assert not re.search(r"\b(\d+|passed|violations|unassessable|conflict|True|False)\b", outputs, re.I)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
 # ----------------------------------------------------------------- execution
 
 

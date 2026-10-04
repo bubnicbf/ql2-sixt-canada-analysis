@@ -74,6 +74,12 @@ from typing import Final
 import pandas as pd
 
 __all__ = [
+    "AttributeComparisonPolicy",
+    "MissingValueStabilityPolicy",
+    "VEHICLE_ATTRIBUTE_STABILITY",
+    "VehicleAttributeDefinition",
+    "VehicleStabilityConfigurationError",
+    "VehicleStabilityDefinition",
     "CARS_DEFINITION",
     "DATASET_DEFINITIONS",
     "IDENTIFIER_DTYPE",
@@ -1070,4 +1076,241 @@ LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
     pairing=CapturePairing.SHARED_COLLECTION_EVENT,
     product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
     price_columns=('price_per_day', 'price_num'),
+)
+
+
+# ----------------------------------------------------- vehicle-attribute stability
+
+
+class VehicleStabilityConfigurationError(ValueError):
+    """A vehicle-stability definition is invalid or cannot be applied.
+
+    Messages never contain source values; offending column names (from the
+    contract) are on ``columns``.
+    """
+
+    def __init__(self, message: str, columns: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.columns = columns
+
+
+class MissingValueStabilityPolicy(StrEnum):
+    """How missing values of one stable attribute are judged.
+
+    * ``REQUIRED`` - every observation must carry a value; any missing value
+      (always or intermittently missing) is a presence violation.
+    * ``PRESENCE_STABLE`` - an attribute may be absent for a vehicle, but
+      consistently: alternating between present and missing is a violation;
+      always missing is allowed and reported.
+    * ``MISSING_IGNORED`` - optional: distinct non-missing values are
+      compared; missingness is measured and reported but never fails.
+    """
+
+    REQUIRED = "required"
+    PRESENCE_STABLE = "presence_stable"
+    MISSING_IGNORED = "missing_ignored"
+
+
+class AttributeComparisonPolicy(StrEnum):
+    """How values of a stable attribute are compared.
+
+    * ``EXACT`` - source values as read (type-aware: case, whitespace,
+      punctuation and category changes are drift; ``0`` and ``False`` are
+      meaningful values; nothing is stripped, rounded or filled).
+    * ``AUTHORITATIVE_MAPPING`` - an authority-supplied mapping from source
+      value to canonical value is applied to a temporary copy; unmapped
+      values compare exactly. Requires a non-empty mapping.
+    """
+
+    EXACT = "exact"
+    AUTHORITATIVE_MAPPING = "authoritative_mapping"
+
+
+@dataclass(frozen=True, slots=True)
+class VehicleAttributeDefinition:
+    """One stable vehicle attribute: column, missing-value and comparison policy."""
+
+    column: str
+    missing_policy: MissingValueStabilityPolicy
+    comparison: AttributeComparisonPolicy = AttributeComparisonPolicy.EXACT
+    mapping: Mapping[object, object] = dataclass_field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.column, str) or not self.column:
+            raise VehicleStabilityConfigurationError("attribute column must be a non-empty string")
+        if not isinstance(self.missing_policy, MissingValueStabilityPolicy):
+            raise VehicleStabilityConfigurationError("missing_policy must be a MissingValueStabilityPolicy",
+                                                     (self.column,))
+        if not isinstance(self.comparison, AttributeComparisonPolicy):
+            raise VehicleStabilityConfigurationError("comparison must be an AttributeComparisonPolicy",
+                                                     (self.column,))
+        if not isinstance(self.mapping, Mapping):
+            raise VehicleStabilityConfigurationError("mapping must be a mapping", (self.column,))
+        object.__setattr__(self, "mapping", MappingProxyType(dict(self.mapping)))
+        if (self.comparison is AttributeComparisonPolicy.AUTHORITATIVE_MAPPING) != bool(self.mapping):
+            raise VehicleStabilityConfigurationError(
+                "a mapping is required for, and only allowed with, AUTHORITATIVE_MAPPING", (self.column,))
+        if any(pd.isna(v) for pair in self.mapping.items() for v in pair if not isinstance(v, (list, tuple))):
+            raise VehicleStabilityConfigurationError("mapping must not map missing values", (self.column,))
+
+
+@dataclass(frozen=True, slots=True)
+class VehicleStabilityDefinition:
+    """Immutable contract for vehicle-attribute stability.
+
+    The logical vehicle entity is ``(*context_columns, *entity_key_columns)``.
+    Every column of the dataset contract is classified exactly once as an
+    entity key, a context (scope) column, a stable attribute or a volatile /
+    non-structural column, so a new source column cannot silently join or
+    escape the contract.
+
+    Attributes:
+        dataset: Dataset holding the observations (detail rows).
+        entity_key_columns: Ordered product-identity columns (non-empty).
+        context_columns: Ordered scope columns; empty means global scope.
+        attributes: Stable attributes with explicit policies (non-empty).
+        price_columns: Price fields (a subset of ``volatile_columns``; never
+            identity, scope or stable attributes).
+        volatile_columns: Columns never treated as structural attributes
+            (prices, search dates, identifiers, capture timestamps, collection
+            metadata, grouping labels outside the scope).
+        temporal: Temporal contract that parses the observation time.
+        observation_time_field: Reference to a TIMESTAMP field on ``dataset``
+            whose reconciled instants order observations.
+        minimum_observations: Distinct valid observation instants an entity
+            needs before stability can be claimed (>= 2).
+        same_capture_conflicts_reported: Report conflicts at one instant as a
+            separate category (an identity ambiguity, not drift over time).
+        canonical_location_grouping: Group the location context by
+            authoritative aliases declared in ``location_coverage``; off
+            unless an alias is confirmed. Source labels are never changed.
+        location_coverage: Coverage contract supplying aliases (required
+            when ``canonical_location_grouping`` is on).
+    """
+
+    dataset: DatasetKey
+    entity_key_columns: tuple[str, ...]
+    context_columns: tuple[str, ...]
+    attributes: tuple[VehicleAttributeDefinition, ...]
+    volatile_columns: tuple[str, ...]
+    price_columns: tuple[str, ...]
+    temporal: TemporalReconciliationDefinition
+    observation_time_field: tuple[DatasetKey, str]
+    minimum_observations: int = 2
+    same_capture_conflicts_reported: bool = True
+    canonical_location_grouping: bool = False
+    location_coverage: LocationCoverageDefinition | None = None
+
+    def __post_init__(self) -> None:
+        E = VehicleStabilityConfigurationError
+        if self.dataset not in DATASET_DEFINITIONS:
+            raise E("stability dataset must be registered")
+        columns = DATASET_DEFINITIONS[self.dataset].columns
+        groups = {"entity_key_columns": self.entity_key_columns, "context_columns": self.context_columns,
+                  "volatile_columns": self.volatile_columns, "price_columns": self.price_columns}
+        for name, group in groups.items():
+            if not isinstance(group, tuple) or not all(isinstance(c, str) and c for c in group) \
+                    or len(set(group)) != len(group):
+                raise E(f"{name} must be a tuple of unique non-empty names")
+        if not set(self.price_columns) <= set(self.volatile_columns):
+            raise E("price columns are volatile and must not be identity, scope or stable attributes")
+        if not self.entity_key_columns:
+            raise E("entity_key_columns must not be empty")
+        if not isinstance(self.attributes, tuple) or not self.attributes \
+                or not all(isinstance(a, VehicleAttributeDefinition) for a in self.attributes):
+            raise E("attributes must be a non-empty tuple of VehicleAttributeDefinition")
+        stable = tuple(a.column for a in self.attributes)
+        if len(set(stable)) != len(stable):
+            raise E("stable attributes must be unique")
+        classified = (*self.entity_key_columns, *self.context_columns, *stable, *self.volatile_columns)
+        unknown = tuple(c for c in classified if c not in columns)
+        if unknown:
+            raise E(f"{len(unknown)} configured column(s) are not in the '{self.dataset}' contract", unknown)
+        if len(set(classified)) != len(classified):
+            raise E("identity, context, stable and volatile columns must be disjoint")
+        unclassified = tuple(c for c in columns if c not in classified)
+        if unclassified:
+            raise E(f"{len(unclassified)} column(s) of the '{self.dataset}' contract are unclassified",
+                    unclassified)
+        if set(DATASET_DEFINITIONS[self.dataset].identifier_columns) & set(self.entity_key_columns):
+            raise E("collection identifiers must not define the longitudinal vehicle entity")
+        if not isinstance(self.temporal, TemporalReconciliationDefinition):
+            raise E("temporal must be a TemporalReconciliationDefinition")
+        try:
+            time_field = self.temporal.field(self.observation_time_field)
+        except TemporalConfigurationError:
+            raise E("observation_time_field is not defined in the temporal contract") from None
+        if time_field.dataset != self.dataset or time_field.kind is not TemporalKind.TIMESTAMP:
+            raise E("observation_time_field must be a timestamp on the stability dataset")
+        temporal_columns = {f.column for f in self.temporal.fields if f.dataset == self.dataset}
+        if not temporal_columns <= set(self.volatile_columns):
+            raise E("timestamps and dates are volatile and must not be identity, context or attributes")
+        if isinstance(self.minimum_observations, bool) or not isinstance(self.minimum_observations, int) \
+                or self.minimum_observations < 2:
+            raise E("minimum_observations must be an integer of at least two")
+        for flag in (self.same_capture_conflicts_reported, self.canonical_location_grouping):
+            if not isinstance(flag, bool):
+                raise E("flags must be booleans")
+        if self.canonical_location_grouping:
+            cov = self.location_coverage
+            if not isinstance(cov, LocationCoverageDefinition) or cov.dataset != self.dataset \
+                    or not set(cov.location_columns) <= set(self.context_columns):
+                raise E("canonical grouping needs a coverage contract whose location columns are context")
+        elif self.location_coverage is not None:
+            raise E("location_coverage applies only with canonical_location_grouping")
+
+    @property
+    def group_columns(self) -> tuple[str, ...]:
+        """Context then entity-key columns: the complete logical entity."""
+        return (*self.context_columns, *self.entity_key_columns)
+
+    @property
+    def attribute_columns(self) -> tuple[str, ...]:
+        return tuple(a.column for a in self.attributes)
+
+
+#: Vehicle-attribute stability contract.
+#:
+#: Identity: the source has no product or vehicle identifier. The vehicle
+#: product a customer sees is the supplier's vehicle name (model label)
+#: offered at a pickup location, so the entity is (source location, vehicle
+#: name) within the single supplier in this feed. Location scope is
+#: deliberate: rental products and fleets are managed per pickup branch, so a
+#: structural difference between branches is not instability. Collection
+#: identifiers, offer positions, capture times and prices are excluded from
+#: identity. A renamed product becomes a new entity (not drift).
+#:
+#: Stable attributes: vehicle category, transmission, seat and baggage
+#: capacity - structural properties of one product. Category, transmission
+#: and seats are core listing fields (REQUIRED); baggage capacity may be
+#: unpublished for a product but should then be consistently absent
+#: (PRESENCE_STABLE). Comparison is exact: no authoritative normalisation
+#: exists.
+#:
+#: Volatile / non-structural: prices, rental search dates, collection job
+#: fields and identifiers, offer position, capture timestamps and reporting
+#: dates, collection status and mode, and city labels (the branch is the
+#: scope). Observations are ordered by the reconciled capture instant.
+#: No location alias is confirmed, so source location labels define scope.
+VEHICLE_ATTRIBUTE_STABILITY: Final = VehicleStabilityDefinition(
+    dataset=DatasetKey.CARS,
+    entity_key_columns=('car_name',),
+    context_columns=('location',),
+    attributes=(
+        VehicleAttributeDefinition('car_type', MissingValueStabilityPolicy.REQUIRED),
+        VehicleAttributeDefinition('transmission', MissingValueStabilityPolicy.REQUIRED),
+        VehicleAttributeDefinition('seats', MissingValueStabilityPolicy.REQUIRED),
+        VehicleAttributeDefinition('bags', MissingValueStabilityPolicy.PRESENCE_STABLE),
+    ),
+    volatile_columns=(
+        'job_id', 'city', 'mode', 'status', 'job_finished_at', 'scrape_date', 'job_pickup_date',
+        'job_return_date', 'row_index', 'pickup_date', 'return_date', 'price_per_day', 'scraped_at',
+        'price_num', 'city_clean', 'date_clean',
+    ),
+    price_columns=LOCATION_STREAM_COMPARISON.price_columns,
+    temporal=TEMPORAL_RECONCILIATION,
+    observation_time_field=(DatasetKey.CARS, 'scraped_at'),
+    minimum_observations=2,
+    same_capture_conflicts_reported=True,
+    canonical_location_grouping=False,
 )

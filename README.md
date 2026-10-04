@@ -535,6 +535,68 @@ validate_confirmed_location_alias(jobs_df, cars_df)   # raises LocationAliasNotC
   paired-capture and price comparison exports are ignored by Git and must
   not be committed.
 
+## Vehicle-attribute stability
+
+`VEHICLE_ATTRIBUTE_STABILITY` (`src/ql2_sixt_canada_analysis/schemas.py`) is
+the single contract for whether structural vehicle attributes stay the same
+across repeated observations of one vehicle product. Every detail column is
+classified exactly once as entity key, scope (context), stable attribute or
+volatile/non-structural, so new columns cannot silently join or escape it.
+
+- **Identity and scope:** the source has no product identifier. The entity is
+  the supplier's vehicle name offered at a source (pickup) location, within
+  the single supplier in the feed. Products and fleets are managed per
+  branch, so differences between branches are not instability. Collection
+  identifiers, offer positions, capture times and prices never define
+  identity; a renamed product is a new entity, not drift.
+- **Stable vs volatile:** stable attributes are the vehicle category,
+  transmission and seat and baggage capacity. Prices, rental search dates,
+  collection fields, timestamps, reporting dates and city labels are
+  volatile and never assessed as structural attributes.
+- **Comparison:** exact, type-aware source values (case, whitespace,
+  punctuation and category changes are drift; `0` and `False` are values).
+  An `AUTHORITATIVE_MAPPING` policy exists for authority-supplied mappings,
+  applied to a temporary copy; none is configured.
+- **Missing values** (per attribute, `MissingValueStabilityPolicy`):
+  `REQUIRED` (any missing value violates), `PRESENCE_STABLE` (consistently
+  absent is allowed, alternating presence violates) or `MISSING_IGNORED`
+  (measured, never fails). Missingness is reported separately from value
+  conflicts; missing values are never filled or turned into sentinels.
+- **History and time:** observations are ordered by the reconciled capture
+  instant from `TEMPORAL_RECONCILIATION`, never by row order. An entity needs
+  at least `minimum_observations` (2) distinct valid captures; a single
+  capture is *insufficient history*, not proof. Entities with any missing or
+  unresolvable capture time are *temporally unassessable* (set-based
+  conflicts are still detected). Distinct values at one instant are a
+  *same-capture conflict*. A change that later reverts is still a conflict.
+- **Aliases:** source location labels define the scope. Canonical grouping
+  applies only aliases declared in the coverage contract and only when
+  `canonical_location_grouping` is enabled; none is confirmed, so it is off.
+- **Empty data / no history:** no conflict is observed but stability is not
+  proven: status `UNASSESSABLE`, and strict validation fails. Presence and
+  volume are separate controls.
+
+```python
+from ql2_sixt_canada_analysis import (
+    assess_vehicle_attribute_stability, validate_vehicle_attribute_stability,
+)
+
+report = assess_vehicle_attribute_stability(cars_df)   # aggregate counts, in memory
+report.status, report.violations, report.attributes
+validate_vehicle_attribute_stability(cars_df)          # raises VehicleAttributeStabilityError
+```
+
+Assessment requires blank rows removed and identifier types applied
+(`VehicleStabilityPreconditionError`), raises
+`VehicleStabilityConfigurationError` for configuration problems and otherwise
+returns a frozen report of counts, enums and contract field names - no
+vehicles, values, timestamps or locations. Strict validation raises with
+categories (`incomplete_identity`, `temporally_unassessable`,
+`value_conflict`, `same_capture_conflict`, `presence_instability`,
+`insufficient_history`). Source values are never rewritten, filled or
+dropped. Tests use fabricated vehicles only; real stability profiles, change
+extracts and fingerprints are ignored by Git and must not be committed.
+
 ## Notebooks
 
 Notebooks live in `notebooks/` and run in numeric-prefix order, top to bottom

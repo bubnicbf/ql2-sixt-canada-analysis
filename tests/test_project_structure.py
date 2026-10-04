@@ -211,6 +211,17 @@ QUALITY_OUTPUT_PATHS = [
     "synthetic_location_profile.csv",
     "synthetic_comparison_diagnostics.txt",
     "notebooks/synthetic_investigation_diagnostic.html",
+    "reports/synthetic_vehicle_stability_profile.json",
+    "synthetic_stability_report.md",
+    f"{INTERIM}/synthetic_attribute_changes.csv",
+    "notebooks/synthetic_change_extract.parquet",
+    "synthetic_change_history.xlsx",
+    "synthetic_unstable_records.csv",
+    "synthetic_entity_fingerprints.parquet",
+    "synthetic_vehicle_profile.html",
+    "reports/synthetic_missingness_report.json",
+    "synthetic_diagnostic_export.txt",
+    f"{RAW}/synthetic_cars.csv",
 ]
 
 
@@ -233,7 +244,8 @@ def test_quality_outputs_and_tooling_artifacts_are_ignored(relative_path: str) -
      "docs/investigations/missing_expected_location_stream.md",
      f"src/{PACKAGE_NAME}/temporal.py", "tests/test_temporal.py",
      f"src/{PACKAGE_NAME}/comparison.py", "tests/test_comparison.py",
-     "docs/investigations/location_stream_comparison.md"],
+     "docs/investigations/location_stream_comparison.md",
+     f"src/{PACKAGE_NAME}/stability.py", "tests/test_vehicle_stability.py"],
 )
 def test_quality_source_tests_and_docs_are_not_ignored(relative_path: str) -> None:
     assert not _git_is_ignored(relative_path)
