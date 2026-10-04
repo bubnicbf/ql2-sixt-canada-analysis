@@ -49,9 +49,15 @@ Expected location coverage
 the collection is *supposed* to cover. Expected locations must come from an
 independent authority (a schedule, assignment or documented market scope),
 never from the extract being validated - a list derived from observed rows
-would always pass. Until such an authority is supplied the contract is
-declared but *unconfigured*, and coverage assessment fails closed with
-:class:`LocationCoverageConfigurationError`.
+would always pass. Locations are branch-level pickup locations (e.g. an
+airport or downtown branch of a city), which only the detail dataset carries;
+jobs are city-level collection runs. An unconfigured contract fails closed
+with :class:`LocationCoverageConfigurationError`.
+
+:data:`COLLECTION_SCHEDULE` is the authoritative collection cadence used to
+judge temporal completeness of a stream; it is ``None`` because no
+authoritative schedule exists, so temporal completeness is reported as not
+assessable rather than inferred from observed rows.
 """
 
 from __future__ import annotations
@@ -72,7 +78,10 @@ __all__ = [
     "JOBS_DEFINITION",
     "JOB_DETAIL_RELATIONSHIP",
     "JobDetailRelationshipDefinition",
+    "COLLECTION_SCHEDULE",
+    "CollectionScheduleDefinition",
     "EXPECTED_LOCATION_COVERAGE",
+    "INVESTIGATED_LOCATION_STREAM",
     "KeyConfigurationError",
     "LocationCoverageConfigurationError",
     "LocationCoverageDefinition",
@@ -438,6 +447,14 @@ class LocationCoverageDefinition:
             unconfigured and assessment fails closed). Never derived from data.
         mode: :class:`LocationCoverageMode`, or ``None`` while unconfigured.
             Expected locations and mode are configured together.
+        aliases: Authoritative, explicit alias keys per expected key (read-only
+            mapping ``expected key -> tuple of alias keys``). Empty unless an
+            authority confirms an alias; never built from string similarity.
+            Aliases are matched exactly and never rewrite source values.
+        stream_scope_columns: Columns of the same dataset that identify the
+            collection scope a location belongs to (e.g. its city). Used only
+            by stream investigation to group collection events; they add
+            nothing to the expectations.
         definitions: Registry the columns are validated against (the project
             registry by default; tests may pass a synthetic one).
 
@@ -453,6 +470,10 @@ class LocationCoverageDefinition:
     location_columns: tuple[str, ...]
     expected_locations: tuple[tuple[str, ...], ...] | None = None
     mode: LocationCoverageMode | None = None
+    aliases: Mapping[tuple[str, ...], tuple[tuple[str, ...], ...]] = dataclass_field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    stream_scope_columns: tuple[str, ...] = ()
     definitions: Mapping[DatasetKey, DatasetDefinition] = dataclass_field(
         default=None, compare=False, repr=False  # type: ignore[arg-type]
     )
@@ -462,6 +483,15 @@ class LocationCoverageDefinition:
             object.__setattr__(self, "definitions", DATASET_DEFINITIONS)
         if self.dataset not in self.definitions:
             raise LocationCoverageConfigurationError("coverage dataset must be registered")
+        scope = self.stream_scope_columns
+        if not isinstance(scope, tuple) or not all(isinstance(c, str) and c for c in scope) \
+                or len(set(scope)) != len(scope):
+            raise LocationCoverageConfigurationError("stream_scope_columns must be a tuple of unique names")
+        unknown_scope = tuple(c for c in scope if c not in self.definitions[self.dataset].columns)
+        if unknown_scope:
+            raise LocationCoverageConfigurationError(
+                f"{len(unknown_scope)} scope column(s) are not in the '{self.dataset}' contract", unknown_scope
+            )
         columns = self.location_columns
         if not isinstance(columns, tuple) or not columns:
             raise LocationCoverageConfigurationError("location_columns must be a non-empty tuple")
@@ -476,7 +506,12 @@ class LocationCoverageDefinition:
             raise LocationCoverageConfigurationError(
                 "expected_locations and mode must be configured together"
             )
+        if not isinstance(self.aliases, Mapping):
+            raise LocationCoverageConfigurationError("aliases must be a mapping")
+        object.__setattr__(self, "aliases", MappingProxyType(dict(self.aliases)))
         if self.expected_locations is None:
+            if self.aliases:
+                raise LocationCoverageConfigurationError("aliases require configured expected locations")
             return
         if not isinstance(self.mode, LocationCoverageMode):
             raise LocationCoverageConfigurationError("mode must be a LocationCoverageMode")
@@ -494,6 +529,25 @@ class LocationCoverageDefinition:
                 )
         if len(set(expected)) != len(expected):
             raise LocationCoverageConfigurationError("expected_locations must not contain duplicates")
+        seen: set[tuple[str, ...]] = set()
+        for key, alias_keys in self.aliases.items():
+            if key not in expected:
+                raise LocationCoverageConfigurationError("aliases may only be given for expected locations")
+            if not isinstance(alias_keys, tuple) or not alias_keys:
+                raise LocationCoverageConfigurationError("alias keys must be a non-empty tuple")
+            for alias in alias_keys:
+                if (not isinstance(alias, tuple) or len(alias) != len(columns)
+                        or not all(isinstance(v, str) and v.strip() for v in alias)):
+                    raise LocationCoverageConfigurationError("each alias must be a well-formed location key")
+                if alias in expected or alias in seen:
+                    raise LocationCoverageConfigurationError(
+                        "an alias must not be an expected key or shared between expected keys"
+                    )
+                seen.add(alias)
+
+    def match_keys(self, target: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+        """The target key followed by its authoritative aliases (exact keys only)."""
+        return (target, *self.aliases.get(target, ()))
 
     @property
     def is_configured(self) -> bool:
@@ -505,19 +559,74 @@ class LocationCoverageDefinition:
         return self.definitions[self.dataset]
 
 
-#: The jobs location contract. Each jobs row is one collection job for one
-#: market; its scheduled location is the single ``city`` field (jobs carry no
-#: branch-level field, so the key has one component). No authoritative
-#: expected-location list, schedule or market scope exists in the repository
-#: or project documentation, so expected locations and mode are deliberately
-#: left unconfigured: coverage assessment fails closed until an owner supplies
-#: the authoritative list (``expected_locations``, one 1-tuple per city, exact
-#: source spelling) and states whether it is EXHAUSTIVE or MINIMUM_REQUIRED.
-#: Never fill it from the observed extract.
+#: An expected branch-level location stream, identified as expected by the
+#: project owner (the authority for this entry). Defined once here; code,
+#: notebooks and tests refer to this constant, never to the literal.
+INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('Calgary Downtown',)
+
+#: The expected-location contract. Locations are branch-level pickup
+#: locations, carried only by detail rows (``location``); jobs are city-level
+#: collection runs, so a jobs-level contract cannot represent a branch stream
+#: (an earlier jobs-``city`` structure would have reported a permanent false
+#: absence). Expected keys come only from an authority - here the project
+#: owner's statement for the one stream above - so the set is a required
+#: MINIMUM, not an exhaustive universe. Add further locations only from an
+#: authoritative list, never from the observed extract. No aliases are
+#: authoritatively confirmed. ``city`` scopes a branch to its collection runs
+#: for stream-continuity investigation only.
 EXPECTED_LOCATION_COVERAGE: Final = LocationCoverageDefinition(
-    dataset=DatasetKey.JOBS,
-    location_columns=('city',),
+    dataset=DatasetKey.CARS,
+    location_columns=('location',),
+    expected_locations=(INVESTIGATED_LOCATION_STREAM,),
+    mode=LocationCoverageMode.MINIMUM_REQUIRED,
+    stream_scope_columns=('city',),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionScheduleDefinition:
+    """Authoritative collection cadence for temporal-completeness checks.
+
+    Attributes:
+        dataset: Dataset whose ``timestamp_column`` dates each collection.
+        timestamp_column: Column holding ISO-8601 collection timestamps.
+        expected_periods: Authoritative ISO-8601 period starts (UTC) that must
+            each contain the stream. Never inferred from observed rows.
+        period: pandas offset alias used to floor timestamps (e.g. ``"h"``).
+        definitions: Registry used for validation (tests may pass their own).
+    """
+
+    dataset: DatasetKey
+    timestamp_column: str
+    expected_periods: tuple[str, ...]
+    period: str
+    definitions: Mapping[DatasetKey, DatasetDefinition] = dataclass_field(
+        default=None, compare=False, repr=False  # type: ignore[arg-type]
+    )
+
+    def __post_init__(self) -> None:
+        if self.definitions is None:
+            object.__setattr__(self, "definitions", DATASET_DEFINITIONS)
+        if self.dataset not in self.definitions:
+            raise LocationCoverageConfigurationError("schedule dataset must be registered")
+        if self.timestamp_column not in self.definitions[self.dataset].columns:
+            raise LocationCoverageConfigurationError("schedule timestamp column is not in the contract")
+        periods = self.expected_periods
+        if not isinstance(periods, tuple) or not periods or not all(isinstance(p, str) and p for p in periods):
+            raise LocationCoverageConfigurationError("expected_periods must be a non-empty tuple of strings")
+        try:
+            parsed = pd.to_datetime(list(periods), utc=True, format="ISO8601")
+            pd.tseries.frequencies.to_offset(self.period)
+        except (ValueError, TypeError) as exc:
+            raise LocationCoverageConfigurationError("schedule periods or period alias are invalid") from exc
+        if parsed.has_duplicates:
+            raise LocationCoverageConfigurationError("expected_periods must not contain duplicates")
+
+
+#: No authoritative collection schedule exists in the repository or project
+#: documentation, so temporal completeness cannot be proven. Do not infer one
+#: from observed rows.
+COLLECTION_SCHEDULE: Final[CollectionScheduleDefinition | None] = None
 
 
 def get_dataset_definition(key: DatasetKey | str) -> DatasetDefinition:

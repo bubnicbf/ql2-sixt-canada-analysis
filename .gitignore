@@ -127,6 +127,28 @@ data/processed/*
 *key_profile*.txt
 *key_profile*.html
 *key_profile*.md
+# Stream investigation outputs: stream profiles, investigation exports and
+# missing-stream diagnostics (tracked sanitized notes live in docs/investigations/).
+*stream_profile*.json
+*stream_profile*.txt
+*stream_profile*.html
+*stream_profile*.md
+*stream_profile*.csv
+*investigation_export*.json
+*investigation_export*.txt
+*investigation_export*.html
+*investigation_export*.md
+*investigation_export*.csv
+*stream_diagnostic*.json
+*stream_diagnostic*.txt
+*stream_diagnostic*.html
+*stream_diagnostic*.md
+*stream_diagnostic*.csv
+*location_extract*.json
+*location_extract*.txt
+*location_extract*.html
+*location_extract*.md
+*location_extract*.csv
 # Location coverage outputs: coverage reports, location profiles and
 # missing / unexpected location extracts.
 *coverage_report*.json

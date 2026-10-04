@@ -260,43 +260,76 @@ validate_raw_dataset_unique_keys(cleaned)               # raises on violations
 ## Expected location coverage
 
 `ql2_sixt_canada_analysis.schemas.EXPECTED_LOCATION_COVERAGE` is the single
-expected-location contract for jobs: the location column(s), an immutable
-tuple of expected location keys (one component per column) and a mode.
-Expected locations must come from an **independent authority** (a schedule,
-assignment or documented market scope) and are never derived from the
-extract being validated - a list built from observed rows would always pass.
-No such authority exists in the repository yet, so the contract is declared
-but **unconfigured** and assessment **fails closed** with
-`LocationCoverageConfigurationError`. To enable it, the data owner supplies
-`expected_locations` (exact source spelling) and the mode in `schemas.py`.
+expected-location contract: the dataset and location column(s), an immutable
+tuple of expected location keys (one component per column), a mode, optional
+authoritative aliases and the scope columns used by stream investigation.
+Locations are **branch-level** pickup locations, which only the detail
+(`cars`) rows carry; jobs are city-level collection runs, so a jobs-level
+contract cannot represent a branch stream. Expected locations must come from
+an **independent authority** and are never derived from the extract being
+validated. The current contract holds the one stream the project owner
+identified as expected (`INVESTIGATED_LOCATION_STREAM`), so its mode is
+`MINIMUM_REQUIRED`; add further locations only from an authoritative list.
+An unconfigured contract fails closed with `LocationCoverageConfigurationError`.
 
 ```python
-from ql2_sixt_canada_analysis import assess_expected_location_coverage, validate_expected_location_coverage
+from ql2_sixt_canada_analysis import assess_dataset_location_coverage, validate_expected_location_coverage
 
-report = assess_expected_location_coverage(jobs_df)    # aggregate report, in memory
+report = assess_dataset_location_coverage(cleaned)     # uses the frame the contract names
 report.coverage_ratio, report.is_valid, report.violations
-validate_expected_location_coverage(jobs_df)           # raises LocationCoverageError
+validate_expected_location_coverage(cleaned.cars)      # raises LocationCoverageError
 ```
 
 - **Distinct coverage:** an expected location is covered when at least one
-  cleaned job has its exact key; repeated jobs at one location never
-  compensate for another missing location.
+  cleaned row has its exact key (or an authoritative alias); repeated rows at
+  one location never compensate for another missing location.
 - **Separate signals:** missing expected locations, unexpected observed
-  locations and jobs with a missing / empty / whitespace-only location
-  component are counted separately; unassigned jobs create no observed key.
+  locations and rows with a missing / empty / whitespace-only location
+  component are counted separately; unassigned rows create no observed key.
 - **Modes:** `EXHAUSTIVE` fails on any unexpected location;
   `MINIMUM_REQUIRED` only reports them. Both fail on missing expected
-  locations and on unassigned jobs. The mode must be stated by the authority.
-- **Exact comparison:** case-sensitive, no stripping, punctuation, alias,
-  abbreviation or fuzzy handling; composite keys are compared as tuples,
-  never concatenated. Source values are never modified.
+  locations and on unassigned rows. The mode must be stated by the authority.
+- **Exact comparison:** case-sensitive, no stripping, punctuation,
+  abbreviation or fuzzy handling; composite keys are compared as tuples.
+  Aliases count only when declared in the contract's `aliases` (none are
+  confirmed today) and never rewrite source values.
 - **Assessment vs strict validation:** assessment returns a frozen report of
   counts, a ratio and booleans (no location values or lists) and raises only
   configuration errors; strict validation raises `LocationCoverageError`
   listing violation categories only.
-- Coverage runs on cleaned jobs, before the one-to-many join, and never
+- Coverage runs on cleaned frames, before the one-to-many join, and never
   removes or alters rows. Tests use fabricated locations. Real location lists
   and coverage reports must not be committed.
+
+## Expected location stream investigation
+
+`investigate_location_stream(jobs_df, cars_df, target)` traces one expected
+location stream (resolved with `resolve_expected_location`, which accepts
+only an exact configured key and never builds or substitutes one from data)
+through configuration, raw source (optional header-aware scan), ingestion,
+cleaning, location matching, continuity across the collection events of its
+scope, schedule-based time coverage, identifier types, parent keys,
+relationship and reconciliation. It returns a frozen, categorical
+`LocationStreamInvestigationReport`: the **earliest failing stage**, every
+failing stage in order, one primary `LocationStreamStatus` and booleans such
+as `repository_fix_required` and `upstream_issue_indicated` - no
+identifiers, location values, timestamps, rows or counts.
+`validate_location_stream` raises `LocationStreamError` unless the stream is
+present and healthy.
+
+- An absent stream (`RAW_STREAM_ABSENT`) is distinguished from jobs present
+  with details absent (`JOBS_PRESENT_DETAILS_ABSENT`), a stream present in
+  only some collection events (`RAW_STREAM_PARTIAL`), pipeline losses
+  (`INGESTION_EXCLUSION`, `CLEANING_EXCLUSION`), key, link and count failures.
+- A case/space/punctuation/order variant is reported as `UNVERIFIED_ALIAS`
+  and never applied; only aliases declared in the contract are matched.
+- Continuity compares the collection events that actually occurred for the
+  target's scope; it does not infer a cadence. Temporal completeness needs an
+  authoritative `COLLECTION_SCHEDULE`; none exists, so it is reported as
+  `NOT_ASSESSED`.
+- It never creates, repairs, filters or writes records. Tests use fabricated
+  locations and identifiers. Proprietary diagnostics and extracts must not be
+  committed; sanitized, metric-free notes live in `docs/investigations/`.
 
 ## Job-to-detail count reconciliation
 

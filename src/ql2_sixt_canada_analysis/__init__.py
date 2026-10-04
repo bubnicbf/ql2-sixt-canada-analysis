@@ -3,6 +3,7 @@
 from ql2_sixt_canada_analysis.coverage import (
     LocationCoverageError,
     LocationCoverageReport,
+    assess_dataset_location_coverage,
     assess_expected_location_coverage,
     validate_expected_location_coverage,
 )
@@ -45,9 +46,12 @@ from ql2_sixt_canada_analysis.relationships import (
     validate_one_to_many_join,
 )
 from ql2_sixt_canada_analysis.schemas import (
+    COLLECTION_SCHEDULE,
     DATASET_DEFINITIONS,
     EXPECTED_LOCATION_COVERAGE,
     IDENTIFIER_DTYPE,
+    INVESTIGATED_LOCATION_STREAM,
+    CollectionScheduleDefinition,
     JOB_DETAIL_RELATIONSHIP,
     SHARED_IDENTIFIER_COLUMNS,
     DatasetDefinition,
@@ -60,6 +64,17 @@ from ql2_sixt_canada_analysis.schemas import (
     RelationshipConfigurationError,
     get_dataset_definition,
 )
+from ql2_sixt_canada_analysis.streams import (
+    LocationStreamError,
+    LocationStreamInvestigationReport,
+    LocationStreamStatus,
+    PipelineStage,
+    StreamContinuity,
+    TimeCoverageStatus,
+    investigate_location_stream,
+    resolve_expected_location,
+    validate_location_stream,
+)
 from ql2_sixt_canada_analysis.unique_keys import (
     RawDatasetUniqueKeyReports,
     UniqueKeyReport,
@@ -71,7 +86,20 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "COLLECTION_SCHEDULE",
+    "CollectionScheduleDefinition",
     "DATASET_DEFINITIONS",
+    "INVESTIGATED_LOCATION_STREAM",
+    "LocationStreamError",
+    "LocationStreamInvestigationReport",
+    "LocationStreamStatus",
+    "PipelineStage",
+    "StreamContinuity",
+    "TimeCoverageStatus",
+    "assess_dataset_location_coverage",
+    "investigate_location_stream",
+    "resolve_expected_location",
+    "validate_location_stream",
     "BlankRowResult",
     "DatasetDefinition",
     "DatasetKey",

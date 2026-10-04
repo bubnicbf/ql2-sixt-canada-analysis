@@ -30,6 +30,7 @@ from ql2_sixt_canada_analysis.notebook_validation import (
 from ql2_sixt_canada_analysis.schemas import (
     DATASET_DEFINITIONS,
     EXPECTED_LOCATION_COVERAGE,
+    INVESTIGATED_LOCATION_STREAM,
     JOB_DETAIL_RELATIONSHIP,
     DatasetKey,
 )
@@ -440,23 +441,25 @@ def test_ingestion_notebook_relationship_step_runs_on_synthetic_inputs(tmp_path:
 # ---------------------------------------------------- expected location coverage
 
 
-def test_ingestion_notebook_checks_coverage_on_cleaned_jobs_before_join() -> None:
+def test_ingestion_notebook_checks_coverage_on_cleaned_frames_before_join() -> None:
     notebook = read_notebook(INGESTION_NOTEBOOK)
     sources = [c.source for c in _code_cells(notebook)]
     code = "\n".join(sources)
-    for name in ("assess_expected_location_coverage", "EXPECTED_LOCATION_COVERAGE"):
+    for name in ("assess_dataset_location_coverage", "EXPECTED_LOCATION_COVERAGE"):
         assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
     keys = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
-    cover = next(i for i, s in enumerate(sources) if "assess_expected_location_coverage(" in s)
+    cover = next(i for i, s in enumerate(sources) if "assess_dataset_location_coverage(" in s)
     reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
     join = next(i for i, s in enumerate(sources) if "join_jobs_to_details(" in s)
     assert keys < cover < reconcile < join
-    assert re.search(r"location_coverage_report\s*=\s*assess_expected_location_coverage\(\s*jobs_df\s*,"
+    assert re.search(r"location_coverage_report\s*=\s*assess_dataset_location_coverage\(\s*cleaned\s*,"
                      r"\s*EXPECTED_LOCATION_COVERAGE\s*\)", sources[cover])
     assert "validate_expected_location_coverage" not in code
-    # No location literals, column names or own distinct/set logic.
-    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
-    assert not any(re.search(rf"\b{re.escape(c)}\b", text) for c in EXPECTED_LOCATION_COVERAGE.location_columns)
+    # No location column literals or own distinct/set logic. (Column names
+    # may coincide with ordinary words, so only quoted literals are checked.)
+    assert not any(re.search(rf"[\"']{re.escape(c)}[\"']", code)
+                   for c in (*EXPECTED_LOCATION_COVERAGE.location_columns,
+                             *EXPECTED_LOCATION_COVERAGE.stream_scope_columns))
     for pattern in (r"\.unique\(", r"\.nunique\(", r"\.drop_duplicates\(", r"\bset\(", r"\.difference\(",
                     r"\.isin\(", r"expected_locations", r"location_columns", r"\.str\.strip"):
         assert not re.search(pattern, code), f"notebook reimplements coverage: {pattern}"
@@ -475,6 +478,43 @@ def test_ingestion_notebook_coverage_step_fails_closed_on_synthetic_inputs(
     assert "Expected-coverage step completed." in outputs
     assert "synthetic_r" not in outputs and not re.search(r"\b[0-9]+\b", outputs)
     assert not re.search(r"\b(True|False|None|missing|unexpected|configured)\b", outputs, re.I)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ---------------------------------------------- expected stream investigation
+
+
+def test_ingestion_notebook_investigates_stream_via_central_target() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("investigate_location_stream", "resolve_expected_location", "INVESTIGATED_LOCATION_STREAM"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
+    investigate = next(i for i, s in enumerate(sources) if "investigate_location_stream(" in s)
+    assert relate < investigate
+    cell = sources[investigate]
+    assert re.search(r"stream_target\s*=\s*resolve_expected_location\(\s*INVESTIGATED_LOCATION_STREAM\b", cell)
+    assert re.search(r"location_stream_report\s*=\s*investigate_location_stream\(", cell)
+    # The target literal lives only in the central contract.
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    assert not any(part in text for part in INVESTIGATED_LOCATION_STREAM)
+    for pattern in (r"\.query\(", r"\.loc\[", r"\.merge\(", r"\.groupby\(", r"==\s*stream_target",
+                    r"\.isin\(", r"\.str\.", r"validate_location_stream"):
+        assert not re.search(pattern, code), f"one-off stream logic in notebook: {pattern}"
+    assert not re.search(r"print\([^\n]*(location_stream_report|stream_target|_healthy|status)", code)
+
+
+def test_ingestion_notebook_stream_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "Expected-stream investigation step completed." in outputs
+    assert not any(part in outputs for part in INVESTIGATED_LOCATION_STREAM)
+    assert not re.search(r"\b(absent|partial|healthy|alias|raw_stream|True|False)\b", outputs, re.I)
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 
 

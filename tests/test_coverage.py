@@ -20,6 +20,7 @@ from conftest import contract_columns
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.coverage import (
     LocationCoverageError,
+    assess_dataset_location_coverage,
     LocationCoverageReport,
     assess_expected_location_coverage,
     validate_expected_location_coverage,
@@ -31,6 +32,7 @@ from ql2_sixt_canada_analysis.relationships import assess_one_to_many_join
 from ql2_sixt_canada_analysis.schemas import (
     DATASET_DEFINITIONS,
     EXPECTED_LOCATION_COVERAGE,
+    INVESTIGATED_LOCATION_STREAM,
     JOB_DETAIL_RELATIONSHIP,
     DatasetDefinition,
     DatasetKey,
@@ -86,7 +88,7 @@ def _assess(jobs: pd.DataFrame, coverage: LocationCoverageDefinition) -> Locatio
     assert r.coverage_ratio == r.covered_expected_location_count / r.expected_location_count
     assert (r.missing_expected_location_count == 0) == r.all_expected_covered
     assert r.observed_location_count == r.covered_expected_location_count + r.unexpected_location_count
-    expected_valid = r.all_expected_covered and r.all_jobs_assigned and (r.mode is MIN or r.unexpected_location_count == 0)
+    expected_valid = r.all_expected_covered and r.all_rows_assigned and (r.mode is MIN or r.unexpected_location_count == 0)
     assert r.is_valid == expected_valid and bool(r.violations) != r.is_valid
     return r
 
@@ -94,14 +96,24 @@ def _assess(jobs: pd.DataFrame, coverage: LocationCoverageDefinition) -> Locatio
 # ------------------------------------------------------------- configuration
 
 
-def test_real_contract_is_declared_but_fails_closed() -> None:
+def test_real_contract_is_branch_level_minimum_with_the_investigated_stream() -> None:
     cov = EXPECTED_LOCATION_COVERAGE
-    assert cov.dataset == JOBS and isinstance(cov.location_columns, tuple) and cov.location_columns
-    assert set(cov.location_columns) <= set(DATASET_DEFINITIONS[JOBS].columns)
-    assert not cov.is_configured and cov.expected_locations is None and cov.mode is None
+    # Branch-level locations exist only in the detail dataset.
+    assert cov.dataset == CARS and isinstance(cov.location_columns, tuple) and cov.location_columns
+    assert set(cov.location_columns) <= set(DATASET_DEFINITIONS[CARS].columns)
+    assert not set(cov.location_columns) & set(DATASET_DEFINITIONS[JOBS].columns)
+    assert cov.is_configured and cov.mode is MIN          # authority covers a minimum, not a universe
+    assert INVESTIGATED_LOCATION_STREAM in cov.expected_locations
+    assert len(INVESTIGATED_LOCATION_STREAM) == len(cov.location_columns)
+    assert dict(cov.aliases) == {}                        # no alias is authoritatively confirmed
+    assert set(cov.stream_scope_columns) <= set(DATASET_DEFINITIONS[CARS].columns)
+
+
+def test_unconfigured_contract_fails_closed() -> None:
+    unconfigured = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=None, mode=None)
     for call in (assess_expected_location_coverage, validate_expected_location_coverage):
         with pytest.raises(LocationCoverageConfigurationError) as info:
-            call(_jobs([A]))
+            call(_jobs([A]), unconfigured)
         assert A not in str(info.value)
     assert issubclass(LocationCoverageConfigurationError, ValueError)
 
@@ -201,7 +213,9 @@ def test_strict_validation_raises_safe_error() -> None:
         validate_expected_location_coverage(_jobs([A, X, None]), cov)
     message = str(info.value)
     assert "missing_expected_location" in message and "missing_location_assignment" in message
-    for value in (A, B, X, "SYNTH", LOCATION_COLUMN):
+    assert message == ("Expected-location coverage contract failed: missing_expected_location, "
+                       "unexpected_location, missing_location_assignment.")   # fixed template, no values
+    for value in (A, B, X, "SYNTH"):
         assert value not in message
     assert not any(ch.isdigit() for ch in message)
     assert info.value.report == assess_expected_location_coverage(_jobs([A, X, None]), cov)
@@ -238,8 +252,8 @@ def test_missing_location_components_are_unassigned(missing: object, dtype: obje
     jobs = _jobs([A, missing, missing], dtype=dtype)
     snapshot = jobs.copy(deep=True)
     r = _assess(jobs, _single([A]))
-    assert r.missing_location_job_count == 2 and r.observed_location_count == 1
-    assert not r.all_jobs_assigned and r.violations == ("missing_location_assignment",)
+    assert r.missing_location_row_count == 2 and r.observed_location_count == 1
+    assert not r.all_rows_assigned and r.violations == ("missing_location_assignment",)
     with pytest.raises(LocationCoverageError):
         validate_expected_location_coverage(jobs, _single([A]))
     pd.testing.assert_frame_equal(jobs, snapshot)  # whitespace values untouched
@@ -262,7 +276,7 @@ def test_near_matches_are_not_matched(observed: str) -> None:
 
 def test_string_zero_is_a_valid_location() -> None:
     r = _assess(_jobs(["0", "0"]), _single(["0"]))
-    assert r.is_valid and r.missing_location_job_count == 0
+    assert r.is_valid and r.missing_location_row_count == 0
 
 
 def test_non_text_values_never_match_text_expectations() -> None:
@@ -285,7 +299,7 @@ def test_composite_requires_all_components() -> None:
 def test_composite_missing_component_and_order() -> None:
     cov = _composite([("SYNTH-CITY-A", "SYNTH-AIRPORT")])
     r = _assess(_jobs([("SYNTH-CITY-A", None), ("SYNTH-CITY-A", " "), ("SYNTH-AIRPORT", "SYNTH-CITY-A")], cov), cov)
-    assert r.missing_location_job_count == 2 and r.unexpected_location_count == 1
+    assert r.missing_location_row_count == 2 and r.unexpected_location_count == 1
     assert r.covered_expected_location_count == 0
 
 
@@ -309,7 +323,7 @@ def test_report_holds_only_aggregates() -> None:
     text = repr(r)
     assert A not in text and X not in text and "SYNTH" not in text
     with pytest.raises(dataclasses.FrozenInstanceError):
-        r.job_count = 0  # type: ignore[misc]
+        r.row_count = 0  # type: ignore[misc]
     with pytest.raises(AssertionError):
         dataclasses.replace(r, covered_expected_location_count=r.expected_location_count + 1)
 
@@ -328,7 +342,7 @@ def test_source_unchanged_and_idempotent() -> None:
 
 def test_empty_jobs_fail_with_zero_coverage() -> None:
     r = _assess(_jobs([]), _single([A, B]))
-    assert r.job_count == 0 and r.coverage_ratio == 0.0 and r.missing_expected_location_count == 2
+    assert r.row_count == 0 and r.coverage_ratio == 0.0 and r.missing_expected_location_count == 2
     assert not r.is_valid
 
 
@@ -336,7 +350,7 @@ def test_duplicate_jobs_are_not_removed_or_double_counted() -> None:
     jobs = _jobs([A, A])
     jobs.iloc[1] = jobs.iloc[0]   # exact duplicate job rows (unique-key control's concern)
     r = _assess(jobs, _single([A]))
-    assert r.covered_expected_location_count == 1 and r.job_count == 2 and len(jobs) == 2
+    assert r.covered_expected_location_count == 1 and r.row_count == 2 and len(jobs) == 2
 
 
 @pytest.mark.parametrize("bad", [None, [], "synthetic"])
@@ -353,6 +367,8 @@ def test_invalid_argument_types(bad: object) -> None:
 def test_pipeline_blank_rows_removed_and_coverage_before_join(tmp_path: Path) -> None:
     rel = JOB_DETAIL_RELATIONSHIP
     pk, count, dk = rel.parent_key_columns[0], rel.expected_detail_count_column, rel.detail_key_columns[0]
+    cov = _single([A])                      # branch-level contract on the detail dataset
+    assert cov.dataset == rel.detail
 
     def write(key: DatasetKey, lines: list[str]) -> None:
         text = ",".join(contract_columns(key)) + "\n" + "".join(line + "\n" for line in lines)
@@ -361,25 +377,51 @@ def test_pipeline_blank_rows_removed_and_coverage_before_join(tmp_path: Path) ->
     def row(key: DatasetKey, values: dict[str, str]) -> str:
         return ",".join(values.get(c, f"synthetic_{i}") for i, c in enumerate(contract_columns(key)))
 
-    n_jobs = len(contract_columns(JOBS))
-    write(JOBS, [
-        row(JOBS, {pk: "SYNTH-JOB-001", LOCATION_COLUMN: A, count: "3"}),
-        "",                                                      # blank -> removed, not unassigned
-        "," * (n_jobs - 1),
-        row(JOBS, {pk: "SYNTH-JOB-002", LOCATION_COLUMN: "", count: "0"}),   # partial, unassigned
+    n_cars = len(contract_columns(CARS))
+    write(JOBS, [row(JOBS, {pk: "SYNTH-JOB-001", count: "3"}), row(JOBS, {pk: "SYNTH-JOB-002", count: "0"})])
+    write(CARS, [
+        row(CARS, {dk: "SYNTH-JOB-001", LOCATION_COLUMN: A}),
+        "",                                                       # blank -> removed, not unassigned
+        "," * (n_cars - 1),
+        row(CARS, {dk: "SYNTH-JOB-001", LOCATION_COLUMN: A}),     # repeat: still one location
+        row(CARS, {dk: "SYNTH-JOB-001", LOCATION_COLUMN: ""}),    # partial row, unassigned
     ])
-    write(CARS, [row(CARS, {dk: "SYNTH-JOB-001"})] * 3)
     blank = remove_blank_rows_from_raw_datasets(load_raw_datasets(tmp_path))
-    jobs, cars = blank.cleaned.jobs, blank.cleaned.cars
-    r = _assess(jobs, _single([A]))
-    assert blank.jobs.removed_blank_row_count == 2
-    assert r.job_count == 2 and r.missing_location_job_count == 1 and r.covered_expected_location_count == 1
-    # Coverage counts jobs, not details: a three-detail job is still one job.
-    relationship = assess_one_to_many_join(jobs, cars)
-    assert relationship.actual_left_join_row_count == 4 and r.job_count == 2
-    reconciliation = assess_job_detail_reconciliation(jobs, cars)
-    assert reconciliation.matched_job_count == 2      # independent control, unaffected by coverage
-    assert len(jobs) == 2                              # nothing removed by coverage
+    cleaned = blank.cleaned
+    r = assess_dataset_location_coverage(cleaned, cov)
+    assert blank.cars.removed_blank_row_count == 2
+    assert r.row_count == 3 and r.missing_location_row_count == 1
+    assert r.covered_expected_location_count == r.observed_location_count == 1
+    # Coverage is measured on cleaned rows before any join; other controls stay independent.
+    relationship = assess_one_to_many_join(cleaned.jobs, cleaned.cars)
+    assert relationship.actual_left_join_row_count == 4
+    reconciliation = assess_job_detail_reconciliation(cleaned.jobs, cleaned.cars)
+    assert reconciliation.matched_job_count == 2
+    assert len(cleaned.cars) == 3                              # nothing removed by coverage
+
+
+def test_alias_counts_only_through_the_central_definition() -> None:
+    plain = _single([A], MIN)
+    aliased = dataclasses.replace(plain, aliases={(A,): (("SYNTH-CITY-A-ALT",),)})
+    jobs = _jobs(["SYNTH-CITY-A-ALT"])
+    assert _assess(jobs, plain).covered_expected_location_count == 0            # not applied implicitly
+    r = assess_expected_location_coverage(jobs, aliased)
+    assert r.covered_expected_location_count == 1 and r.unexpected_location_count == 0
+    assert jobs[LOCATION_COLUMN].tolist() == ["SYNTH-CITY-A-ALT"]                # source unchanged
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        aliased.aliases = {}  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        aliased.aliases[(B,)] = ((X,),)  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "aliases",
+    [{("SYNTH-UNKNOWN",): (("X",),)}, {(A,): ((B,),)}, {(A,): (("X", "Y"),)}, {(A,): ((" ",),)}, {(A,): ()}],
+    ids=["not-expected", "alias-is-expected", "arity", "blank", "empty"],
+)
+def test_invalid_aliases_are_rejected(aliases: dict) -> None:
+    with pytest.raises(LocationCoverageConfigurationError):
+        dataclasses.replace(_single([A, B]), aliases=aliases)
 
 
 def test_package_exposes_coverage_api() -> None:

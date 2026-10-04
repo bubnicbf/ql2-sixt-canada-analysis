@@ -19,15 +19,17 @@ Each jobs row's location key (one component per configured column) is:
 Coverage is measured on *distinct* complete observed keys: an expected
 location is covered when at least one job has its exact key, and repeated
 jobs at one location never compensate for another missing location.
-Comparison is exact (case-sensitive, no stripping, no alias or fuzzy
-matching) and composite keys are compared as tuples, never concatenated.
+Comparison is exact (case-sensitive, no stripping, no fuzzy matching) and
+composite keys are compared as tuples, never concatenated. Only aliases
+declared in the central contract (``aliases``) also count, matched exactly.
 
 The contract passes when every expected location is covered and every job has
 a complete location; in ``EXHAUSTIVE`` mode it additionally requires zero
 unexpected locations, while ``MINIMUM_REQUIRED`` mode only reports them.
 
-Coverage is checked on cleaned jobs (after blank-row removal) and before any
-one-to-many join, which would repeat a job once per detail row. Assessment
+Coverage is checked on the cleaned frame of the contract's dataset (after
+blank-row removal) and before any one-to-many join. Branch-level locations
+live in the detail dataset; a location counts once however many rows show it. Assessment
 never modifies, sorts or removes rows and writes nothing; reports and errors
 hold aggregate numbers and booleans only - never location values.
 """
@@ -38,6 +40,7 @@ from dataclasses import dataclass, fields
 
 import pandas as pd
 
+from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.schemas import (
     EXPECTED_LOCATION_COVERAGE,
     LocationCoverageConfigurationError,
@@ -47,6 +50,7 @@ from ql2_sixt_canada_analysis.schemas import (
 
 __all__ = [
     "LocationCoverageConfigurationError",
+    "assess_dataset_location_coverage",
     "LocationCoverageError",
     "LocationCoverageReport",
     "assess_expected_location_coverage",
@@ -59,13 +63,13 @@ class LocationCoverageReport:
     """Aggregate expected-location coverage metrics (no location values)."""
 
     mode: LocationCoverageMode
-    job_count: int
+    row_count: int
     expected_location_count: int
     observed_location_count: int
     covered_expected_location_count: int
     missing_expected_location_count: int
     unexpected_location_count: int
-    missing_location_job_count: int
+    missing_location_row_count: int
 
     def __post_init__(self) -> None:
         # Programmer invariants; a violation is a bug in this module.
@@ -77,10 +81,11 @@ class LocationCoverageReport:
         assert self.expected_location_count > 0
         assert self.covered_expected_location_count + self.missing_expected_location_count == \
             self.expected_location_count
-        assert self.observed_location_count == \
-            self.covered_expected_location_count + self.unexpected_location_count
-        assert self.missing_location_job_count <= self.job_count
-        assert self.observed_location_count <= self.job_count - self.missing_location_job_count
+        # Without aliases, observed = covered + unexpected; authoritative
+        # aliases can let several observed keys cover one expected location.
+        assert self.unexpected_location_count <= self.observed_location_count
+        assert self.missing_location_row_count <= self.row_count
+        assert self.observed_location_count <= self.row_count - self.missing_location_row_count
 
     @property
     def coverage_ratio(self) -> float:
@@ -96,13 +101,13 @@ class LocationCoverageReport:
         return self.mode is LocationCoverageMode.MINIMUM_REQUIRED or self.unexpected_location_count == 0
 
     @property
-    def all_jobs_assigned(self) -> bool:
-        return self.missing_location_job_count == 0
+    def all_rows_assigned(self) -> bool:
+        return self.missing_location_row_count == 0
 
     @property
     def is_valid(self) -> bool:
         """The configured coverage contract holds."""
-        return self.all_expected_covered and self.all_jobs_assigned and self.unexpected_locations_acceptable
+        return self.all_expected_covered and self.all_rows_assigned and self.unexpected_locations_acceptable
 
     @property
     def violations(self) -> tuple[str, ...]:
@@ -110,7 +115,7 @@ class LocationCoverageReport:
         checks = (
             ("missing_expected_location", not self.all_expected_covered),
             ("unexpected_location", not self.unexpected_locations_acceptable),
-            ("missing_location_assignment", not self.all_jobs_assigned),
+            ("missing_location_assignment", not self.all_rows_assigned),
         )
         return tuple(name for name, failed in checks if failed)
 
@@ -170,19 +175,40 @@ def assess_expected_location_coverage(
     names = [f"component_{i}" for i in range(len(columns))]
     observed = pd.MultiIndex.from_frame(keys.loc[assigned].drop_duplicates(), names=names)
     expected = pd.MultiIndex.from_tuples(list(coverage.expected_locations), names=names)
-    covered = int(expected.isin(observed).sum())
-    unexpected = int((~observed.isin(expected)).sum())
+    # An expected location is covered by its own key or an authoritative alias.
+    covered = sum(
+        bool(pd.MultiIndex.from_tuples(list(coverage.match_keys(key)), names=names).isin(observed).any())
+        for key in coverage.expected_locations
+    )
+    accepted = pd.MultiIndex.from_tuples(
+        [k for key in coverage.expected_locations for k in coverage.match_keys(key)], names=names
+    )
+    unexpected = int((~observed.isin(accepted)).sum())
 
     return LocationCoverageReport(
         mode=coverage.mode,
-        job_count=len(jobs),
+        row_count=len(jobs),
         expected_location_count=len(expected),
         observed_location_count=len(observed),
         covered_expected_location_count=covered,
         missing_expected_location_count=len(expected) - covered,
         unexpected_location_count=unexpected,
-        missing_location_job_count=int((~assigned).sum()),
+        missing_location_row_count=int((~assigned).sum()),
     )
+
+
+def assess_dataset_location_coverage(
+    datasets: RawDatasets,
+    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+) -> LocationCoverageReport:
+    """Assess coverage on the frame of ``datasets`` that the contract names.
+
+    Selects ``datasets.<coverage.dataset>`` (cleaned frames expected) so
+    callers never hard-code which dataset carries the locations.
+    """
+    if not isinstance(datasets, RawDatasets):
+        raise TypeError(f"expected RawDatasets, got {type(datasets).__name__}")
+    return assess_expected_location_coverage(getattr(datasets, coverage.dataset.value), coverage)
 
 
 def validate_expected_location_coverage(
