@@ -480,6 +480,61 @@ validate_temporal_reconciliation(jobs_df, cars_df)          # raises TemporalPar
   are never rewritten, filled or dropped. Tests use fabricated timestamps and
   dates; real temporal diagnostics must not be committed.
 
+## Related location stream comparison
+
+`compare_location_streams(jobs_df, cars_df, LOCATION_STREAM_COMPARISON)`
+compares two expected location streams. The pair is defined once, in
+`COMPARED_LOCATION_STREAMS` / `LOCATION_STREAM_COMPARISON`
+(`src/ql2_sixt_canada_analysis/schemas.py`), together with the pairing mode,
+the product columns (stable offer identity: no identifiers, location labels,
+timestamps or prices), the price columns and any authoritative identity
+columns. The result is a frozen, categorical
+`LocationStreamComparisonReport` (enums and booleans only).
+
+Evidence is kept in three layers and never mixed:
+
+1. **Observation** - presence of each stream, linkage, shared collection
+   events, temporal overlap, and whether each paired capture has identical
+   product multisets and identical price-aware offer multisets (exact tuple
+   comparison with `collections.Counter`: multiplicity kept, row order
+   ignored, no lossy fingerprints, prices never used as product identity).
+   A **scope baseline** applies the same comparison to every other location
+   pair in the same scope, so identical behaviour counts only if it is not
+   normal for the source.
+2. **Interpretation** - `LIKELY_DUPLICATE_STREAMS`, `LIKELY_DISTINCT_STREAMS`,
+   `COMPARISON_INCONCLUSIVE`, `INSUFFICIENT_COMPARABLE_CAPTURES`, or presence
+   failures `ONE_STREAM_ABSENT` / `BOTH_STREAMS_ABSENT`.
+3. **Confirmation** - only from authoritative identity columns:
+   `CONFIRMED_DISTINCT_LOCATIONS`, `CONFIRMED_ALIAS`,
+   `DUPLICATED_COLLECTION_CONFIGURATION` or `LOCATION_MAPPING_DEFECT`.
+   Similar names, proximity or identical prices never confirm identity.
+
+Pairing is `SHARED_COLLECTION_EVENT` (exact, by the detail relationship key;
+the project setting) or `CAPTURE_TIME` (reconciled instants within an
+explicit, authorised tolerance; ambiguous or unresolved times fail closed).
+
+```python
+from ql2_sixt_canada_analysis import (
+    LOCATION_STREAM_COMPARISON, compare_location_streams, validate_confirmed_location_alias,
+)
+
+report = compare_location_streams(jobs_df, cars_df, LOCATION_STREAM_COMPARISON)
+report.status, report.upstream_review_required, report.alias_authority_sufficient
+validate_confirmed_location_alias(jobs_df, cars_df)   # raises LocationAliasNotConfirmedError
+```
+
+- Streams are **never merged, relabelled or deduplicated**. Source-label
+  coverage stays the default. `canonical_location_keys(frame, coverage)` is
+  an opt-in, non-mutating view that applies only aliases declared in the
+  coverage contract (none are confirmed).
+- The project source carries no physical-identity metadata, so the project
+  comparison can reach at most a *likely* conclusion; confirmation requires
+  supplier or collection-configuration evidence. See
+  `docs/investigations/location_stream_comparison.md` (sanitized).
+- Tests use fabricated values only. Comparison tables, offer fingerprints,
+  paired-capture and price comparison exports are ignored by Git and must
+  not be committed.
+
 ## Notebooks
 
 Notebooks live in `notebooks/` and run in numeric-prefix order, top to bottom

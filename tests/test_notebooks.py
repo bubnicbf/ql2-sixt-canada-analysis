@@ -555,6 +555,50 @@ def test_ingestion_notebook_temporal_step_runs_on_synthetic_inputs(synthetic_raw
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 
 
+# ---------------------------------------------------- related stream comparison
+
+
+def test_ingestion_notebook_compares_related_streams_through_the_api() -> None:
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, LOCATION_STREAM_COMPARISON
+
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("compare_location_streams", "LOCATION_STREAM_COMPARISON"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
+    compare = next(i for i, s in enumerate(sources) if "compare_location_streams(" in s)
+    assert temporal < compare
+    assert re.search(r"location_comparison_report\s*=\s*compare_location_streams\(\s*jobs_df\s*,\s*cars_df\s*,"
+                     r"\s*LOCATION_STREAM_COMPARISON\s*\)", sources[compare])
+    assert re.search(r"location_alias_confirmed\s*=", sources[compare])
+    # Pair, columns and aliasing live in the central definition only.
+    names = [part for key in COMPARED_LOCATION_STREAMS for part in key]
+    full = "\n".join(c.source for c in notebook.cells)
+    assert not any(n in full for n in names)
+    columns = {*LOCATION_STREAM_COMPARISON.product_columns, *LOCATION_STREAM_COMPARISON.price_columns}
+    assert not any(re.search(rf"[\"']{re.escape(c)}[\"']", code) for c in columns)
+    for pattern in (r"canonical_location_keys", r"validate_confirmed_location_alias", r"drop_duplicates",
+                    r"\.replace\(", r"\.merge\(", r"to_csv", r"to_parquet", r"Counter"):
+        assert not re.search(pattern, code), f"notebook duplicates or merges streams: {pattern}"
+    assert not re.search(r"print\([^\n]*(location_comparison_report|_confirmed|status)", code)
+
+
+def test_ingestion_notebook_comparison_step_runs_on_synthetic_inputs(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS
+
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "Related-stream comparison step completed." in outputs
+    assert not any(part in outputs for key in COMPARED_LOCATION_STREAMS for part in key)
+    assert not re.search(r"\b(duplicate|distinct|alias|identical|absent|True|False)\b", outputs, re.I)
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
 # ----------------------------------------------------------------- execution
 
 

@@ -1,5 +1,18 @@
 """Reusable analysis and data-quality code for the QL2 Sixt Canada rate feed."""
 
+from ql2_sixt_canada_analysis.comparison import (
+    ComparisonPreconditionError,
+    IdentityEvidence,
+    LocationAliasNotConfirmedError,
+    LocationStreamComparisonReport,
+    LocationStreamComparisonStatus,
+    OfferSetResult,
+    ScopeBaseline,
+    TemporalOverlap,
+    canonical_location_keys,
+    compare_location_streams,
+    validate_confirmed_location_alias,
+)
 from ql2_sixt_canada_analysis.coverage import (
     LocationCoverageError,
     LocationCoverageReport,
@@ -51,6 +64,10 @@ from ql2_sixt_canada_analysis.schemas import (
     EXPECTED_LOCATION_COVERAGE,
     IDENTIFIER_DTYPE,
     INVESTIGATED_LOCATION_STREAM,
+    COMPARED_LOCATION_STREAMS,
+    LOCATION_STREAM_COMPARISON,
+    CapturePairing,
+    LocationStreamComparisonDefinition,
     CollectionScheduleDefinition,
     JOB_DETAIL_RELATIONSHIP,
     SHARED_IDENTIFIER_COLUMNS,
@@ -109,6 +126,21 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "COMPARED_LOCATION_STREAMS",
+    "LOCATION_STREAM_COMPARISON",
+    "CapturePairing",
+    "LocationStreamComparisonDefinition",
+    "ComparisonPreconditionError",
+    "IdentityEvidence",
+    "LocationAliasNotConfirmedError",
+    "LocationStreamComparisonReport",
+    "LocationStreamComparisonStatus",
+    "OfferSetResult",
+    "ScopeBaseline",
+    "TemporalOverlap",
+    "canonical_location_keys",
+    "compare_location_streams",
+    "validate_confirmed_location_alias",
     "COLLECTION_SCHEDULE",
     "ReportingDateRule",
     "RuleStatus",

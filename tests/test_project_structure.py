@@ -201,6 +201,16 @@ QUALITY_OUTPUT_PATHS = [
     "notebooks/synthetic_timeline_profile.md",
     f"{PROCESSED}/synthetic_derived_timestamps.parquet",
     "synthetic_temporal_report.txt",
+    "reports/synthetic_stream_comparison.json",
+    f"{INTERIM}/synthetic_stream_comparison_table.csv",
+    "synthetic_offer_fingerprints.parquet",
+    "notebooks/synthetic_offer_multiset.md",
+    "synthetic_paired_capture_table.csv",
+    "synthetic_temporal_pairing.xlsx",
+    "reports/synthetic_price_comparison_export.csv",
+    "synthetic_location_profile.csv",
+    "synthetic_comparison_diagnostics.txt",
+    "notebooks/synthetic_investigation_diagnostic.html",
 ]
 
 
@@ -221,7 +231,9 @@ def test_quality_outputs_and_tooling_artifacts_are_ignored(relative_path: str) -
      f"src/{PACKAGE_NAME}/coverage.py", "tests/test_coverage.py", "tests/test_missing_locations.py",
      f"src/{PACKAGE_NAME}/streams.py", "tests/test_streams.py",
      "docs/investigations/missing_expected_location_stream.md",
-     f"src/{PACKAGE_NAME}/temporal.py", "tests/test_temporal.py"],
+     f"src/{PACKAGE_NAME}/temporal.py", "tests/test_temporal.py",
+     f"src/{PACKAGE_NAME}/comparison.py", "tests/test_comparison.py",
+     "docs/investigations/location_stream_comparison.md"],
 )
 def test_quality_source_tests_and_docs_are_not_ignored(relative_path: str) -> None:
     assert not _git_is_ignored(relative_path)

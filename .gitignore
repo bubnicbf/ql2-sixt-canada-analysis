@@ -249,6 +249,71 @@ data/processed/*
 *unlinked*.html
 *unlinked*.md
 
+# Related location-stream comparison outputs: stream comparison tables,
+# offer fingerprints/multisets, paired-capture and temporal pairing tables,
+# price comparison exports, location profiles and investigation diagnostics.
+# Sanitized, metric-free notes in docs/investigations/ stay tracked.
+*stream_comparison*.json
+*stream_comparison*.txt
+*stream_comparison*.html
+*stream_comparison*.md
+*stream_comparison*.csv
+*stream_comparison*.parquet
+*stream_comparison*.xlsx
+*offer_fingerprint*.json
+*offer_fingerprint*.txt
+*offer_fingerprint*.html
+*offer_fingerprint*.md
+*offer_fingerprint*.csv
+*offer_fingerprint*.parquet
+*offer_fingerprint*.xlsx
+*offer_multiset*.json
+*offer_multiset*.txt
+*offer_multiset*.html
+*offer_multiset*.md
+*offer_multiset*.csv
+*offer_multiset*.parquet
+*offer_multiset*.xlsx
+*paired_capture*.json
+*paired_capture*.txt
+*paired_capture*.html
+*paired_capture*.md
+*paired_capture*.csv
+*paired_capture*.parquet
+*paired_capture*.xlsx
+*temporal_pairing*.json
+*temporal_pairing*.txt
+*temporal_pairing*.html
+*temporal_pairing*.md
+*temporal_pairing*.csv
+*temporal_pairing*.parquet
+*temporal_pairing*.xlsx
+*price_comparison*.json
+*price_comparison*.txt
+*price_comparison*.html
+*price_comparison*.md
+*price_comparison*.csv
+*price_comparison*.parquet
+*price_comparison*.xlsx
+*comparison_diagnostic*.json
+*comparison_diagnostic*.txt
+*comparison_diagnostic*.html
+*comparison_diagnostic*.md
+*comparison_diagnostic*.csv
+*comparison_diagnostic*.parquet
+*comparison_diagnostic*.xlsx
+*investigation_diagnostic*.json
+*investigation_diagnostic*.txt
+*investigation_diagnostic*.html
+*investigation_diagnostic*.md
+*investigation_diagnostic*.csv
+*investigation_diagnostic*.parquet
+*investigation_diagnostic*.xlsx
+*location_profile*.csv
+*location_profile*.parquet
+*location_profile*.xlsx
+!docs/investigations/*.md
+
 # --- Generated reports and figures ---
 # Ignored by default; use `git add -f` to deliberately publish a final report.
 reports/*

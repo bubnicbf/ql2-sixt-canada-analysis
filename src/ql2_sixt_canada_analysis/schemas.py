@@ -81,6 +81,10 @@ __all__ = [
     "JOB_DETAIL_RELATIONSHIP",
     "JobDetailRelationshipDefinition",
     "COLLECTION_SCHEDULE",
+    "COMPARED_LOCATION_STREAMS",
+    "LOCATION_STREAM_COMPARISON",
+    "CapturePairing",
+    "LocationStreamComparisonDefinition",
     "TEMPORAL_RECONCILIATION",
     "ReportingDateRule",
     "TemporalAwareness",
@@ -576,12 +580,19 @@ class LocationCoverageDefinition:
 #: notebooks and tests refer to this constant, never to the literal.
 INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('Calgary Downtown',)
 
+#: Two expected branch-level streams the project owner asked to compare
+#: (authority for their expectation). Defined once; referenced by constant.
+COMPARED_LOCATION_STREAMS: Final[tuple[tuple[str, ...], tuple[str, ...]]] = (
+    ('Vancouver Downtown',),
+    ('Vancouver Thurlow',),
+)
+
 #: The expected-location contract. Locations are branch-level pickup
 #: locations, carried only by detail rows (``location``); jobs are city-level
 #: collection runs, so a jobs-level contract cannot represent a branch stream
 #: (an earlier jobs-``city`` structure would have reported a permanent false
 #: absence). Expected keys come only from an authority - here the project
-#: owner's statement for the one stream above - so the set is a required
+#: owner's statements for the streams above - so the set is a required
 #: MINIMUM, not an exhaustive universe. Add further locations only from an
 #: authoritative list, never from the observed extract. No aliases are
 #: authoritatively confirmed. ``city`` scopes a branch to its collection runs
@@ -589,7 +600,7 @@ INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('Calgary Downtown',)
 EXPECTED_LOCATION_COVERAGE: Final = LocationCoverageDefinition(
     dataset=DatasetKey.CARS,
     location_columns=('location',),
-    expected_locations=(INVESTIGATED_LOCATION_STREAM,),
+    expected_locations=(INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS),
     mode=LocationCoverageMode.MINIMUM_REQUIRED,
     stream_scope_columns=('city',),
 )
@@ -937,4 +948,126 @@ TEMPORAL_RECONCILIATION: Final = TemporalReconciliationDefinition(
         TemporalReplicationRule((DatasetKey.JOBS, 'finished_at'), (DatasetKey.CARS, 'job_finished_at')),
     ),
     relationship=JOB_DETAIL_RELATIONSHIP,
+)
+
+
+# ---------------------------------------------------- location-stream comparison
+
+
+class CapturePairing(StrEnum):
+    """How captures of two streams are paired for comparison.
+
+    * ``SHARED_COLLECTION_EVENT`` - exact: captures pair when they belong to
+      the same collection event (the same complete detail relationship key),
+      so no timestamp tolerance is involved.
+    * ``CAPTURE_TIME`` - captures pair when their reconciled instants differ
+      by at most an explicit, authorised tolerance; ambiguous pairings fail
+      closed.
+    """
+
+    SHARED_COLLECTION_EVENT = "shared_collection_event"
+    CAPTURE_TIME = "capture_time"
+
+
+@dataclass(frozen=True, slots=True)
+class LocationStreamComparisonDefinition:
+    """Immutable definition for comparing two expected location streams.
+
+    Attributes:
+        first, second: Expected location keys (from ``coverage``).
+        coverage: The expected-location contract (dataset, location columns,
+            scope columns, authoritative aliases).
+        relationship: Parent/detail relationship (collection events, linkage).
+        temporal: Temporal contract used to parse capture times.
+        pairing: :class:`CapturePairing`.
+        capture_time_field: Temporal field reference for ``CAPTURE_TIME``.
+        pairing_tolerance: Explicit, authorised, non-negative tolerance for
+            ``CAPTURE_TIME`` (never derived from observed data).
+        identity_columns: Authoritative physical-location identity fields
+            (station/branch ID, address, coordinates). Empty when the source
+            has none - identity can then never be confirmed.
+        product_columns: Stable offer identity (no prices, identifiers,
+            location labels or capture timestamps).
+        price_columns: Price fields, compared only in the price-aware offer.
+    """
+
+    first: tuple[str, ...]
+    second: tuple[str, ...]
+    coverage: LocationCoverageDefinition
+    relationship: JobDetailRelationshipDefinition
+    temporal: TemporalReconciliationDefinition
+    pairing: CapturePairing
+    product_columns: tuple[str, ...]
+    price_columns: tuple[str, ...]
+    identity_columns: tuple[str, ...] = ()
+    capture_time_field: tuple[DatasetKey, str] | None = None
+    pairing_tolerance: dt.timedelta | None = None
+
+    def __post_init__(self) -> None:
+        cov = self.coverage
+        if not cov.is_configured:
+            raise LocationCoverageConfigurationError("comparison requires a configured coverage contract")
+        for key in (self.first, self.second):
+            if not isinstance(key, tuple) or len(key) != len(cov.location_columns):
+                raise LocationCoverageConfigurationError("comparison targets must be well-formed location keys")
+            if key not in cov.expected_locations:
+                raise LocationCoverageConfigurationError("comparison targets must be expected locations")
+        if self.first == self.second:
+            raise LocationCoverageConfigurationError("comparison targets must differ")
+        if cov.dataset != self.relationship.detail:
+            raise LocationCoverageConfigurationError("comparison expects detail-level locations")
+        if not isinstance(self.pairing, CapturePairing):
+            raise LocationCoverageConfigurationError("pairing must be a CapturePairing")
+        columns = cov.source_definition.columns
+        groups = {"product_columns": self.product_columns, "price_columns": self.price_columns,
+                  "identity_columns": self.identity_columns}
+        for name, group in groups.items():
+            if not isinstance(group, tuple) or not all(isinstance(c, str) and c for c in group) \
+                    or len(set(group)) != len(group):
+                raise LocationCoverageConfigurationError(f"{name} must be a tuple of unique names")
+            if not set(group) <= set(columns):
+                raise LocationCoverageConfigurationError(f"{name} must exist in the '{cov.dataset}' contract")
+        if not self.product_columns:
+            raise LocationCoverageConfigurationError("product_columns must not be empty")
+        technical = {*self.relationship.detail_key_columns, *self.relationship.detail_definition.unique_key_columns,
+                     *self.relationship.detail_definition.identifier_columns, *cov.location_columns,
+                     *cov.stream_scope_columns, *(f.column for f in self.temporal.fields if f.dataset == cov.dataset)}
+        if set(self.product_columns) & (technical | set(self.price_columns) | set(self.identity_columns)):
+            raise LocationCoverageConfigurationError(
+                "product identity must exclude identifiers, location labels, scope, timestamps and prices"
+            )
+        if set(self.price_columns) & technical:
+            raise LocationCoverageConfigurationError("price columns must not be technical fields")
+        if self.pairing is CapturePairing.CAPTURE_TIME:
+            if self.capture_time_field is None or self.pairing_tolerance is None:
+                raise LocationCoverageConfigurationError("time pairing needs a capture field and a tolerance")
+            if self.temporal.field(self.capture_time_field).kind is not TemporalKind.TIMESTAMP:
+                raise LocationCoverageConfigurationError("capture_time_field must be a timestamp")
+            if self.capture_time_field[0] != cov.dataset:
+                raise LocationCoverageConfigurationError("capture_time_field must be on the location dataset")
+        elif self.capture_time_field is not None or self.pairing_tolerance is not None:
+            raise LocationCoverageConfigurationError("capture time and tolerance apply only to CAPTURE_TIME")
+        if self.pairing_tolerance is not None and (
+                not isinstance(self.pairing_tolerance, dt.timedelta) or self.pairing_tolerance < dt.timedelta(0)):
+            raise LocationCoverageConfigurationError("pairing_tolerance must be a non-negative timedelta")
+
+
+#: Comparison of the two owner-identified streams. Pairing is exact by shared
+#: collection event: branch streams of a city are collected inside the same
+#: collection job, so their captures share the detail relationship key and
+#: no timestamp tolerance is needed (none is authorised). The source carries
+#: no physical-identity metadata (no station/branch ID, address or
+#: coordinates), so ``identity_columns`` is empty and an alias can never be
+#: confirmed from this data. Product identity: vehicle and rental-search
+#: attributes; prices are compared only in the price-aware offer, as exact
+#: source text (price types are not yet validated).
+LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
+    first=COMPARED_LOCATION_STREAMS[0],
+    second=COMPARED_LOCATION_STREAMS[1],
+    coverage=EXPECTED_LOCATION_COVERAGE,
+    relationship=JOB_DETAIL_RELATIONSHIP,
+    temporal=TEMPORAL_RECONCILIATION,
+    pairing=CapturePairing.SHARED_COLLECTION_EVENT,
+    product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
+    price_columns=('price_per_day', 'price_num'),
 )
