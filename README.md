@@ -466,18 +466,53 @@ each declaration, `<column>_matches`, `declared_counts_agree`,
 `job_reconciled`) in memory only, sorted by key. Duplicate detail keys remain
 a separate key-integrity failure; nothing is deduplicated.
 
+### All expected streams
+
+The expected-location contract currently holds **three** authority-identified
+(city, branch) pairs (`INVESTIGATED_LOCATION_STREAM` followed by
+`COMPARED_LOCATION_STREAMS`) in `MINIMUM_REQUIRED` mode: a required minimum,
+not an exhaustive list of every branch or every scheduled city.
+`assess_expected_location_streams(jobs_df, cars_df)` investigates **every**
+configured pair exactly once, in contract order, and returns an
+`ExpectedLocationStreamsReport` that pairs each report with its configured
+key (`ExpectedStreamResult`). Its properties are derived from the contract on
+every access, so a hand-built aggregate (`from_reports`) is validated too:
+
+- an omitted pair (`expected_stream_report_missing`), a pair reported more
+  than once (`duplicate_stream_report`), a key outside the contract
+  (`unexpected_stream_report`) or a `None` report
+  (`expected_stream_report_unavailable`) fails - an omitted report is a
+  failure, never "not applicable";
+- every expected stream must be healthy with complete continuity
+  (`stream_continuity_partial`, `stream_continuity_unassessable`,
+  `expected_stream_unhealthy`);
+- `expected_stream_count`, `assessed_stream_count`, `assessed_exactly_once`,
+  `all_expected_streams_healthy` and the read-only `reports` mapping support
+  diagnostics without exposing source values.
+
+Branch labels live in the detail (`cars`) rows; jobs supply the city-level
+collection events that form each stream's continuity denominator. Row-level
+coverage therefore never substitutes for stream health: a pair can appear in
+detail rows while no job of its city exists. Adding a pair to the contract
+automatically adds it to the required assessment.
+
 ### Aggregate completeness
 
-`assess_completeness(datasets=..., coverage=..., streams=(...), reconciliation=...)`
-is complete only when the source is complete, the city-branch coverage
-passes, every stream has complete, healthy continuity and every declared
-count reconciles; a missing report blocks. Each failure is a
+`assess_completeness(datasets=..., coverage=..., streams=expected_streams_report, reconciliation=...)`
+takes the all-expected-stream aggregate (a plain tuple of reports is
+rejected) and is complete only when the source is complete, the city-branch
+coverage passes, the aggregate was built for the same contract
+(`expected_coverage`, default `EXPECTED_LOCATION_COVERAGE`), every expected
+stream is assessed exactly once and is healthy, and every declared count
+reconciles; a missing report or aggregate blocks. Each failure is a
 `CompletenessBlocker` (`source_not_complete`, `expected_pairs_missing`,
-`conflicting_pair_assignment`, `stream_continuity_unassessable`,
-`declared_count_unreconciled`, `declared_counts_disagree`, ...).
-`assess_pricing_readiness` also requires `source_complete`. Completeness is
-one prerequisite only: it does not resolve timestamp authority, Vancouver
-location identity, key validity or stability.
+`expected_stream_assessment_unavailable`, `stream_contract_mismatch`,
+`expected_stream_report_missing`, `stream_continuity_partial`,
+`declared_count_unreconciled`, ...). A `CompletenessReport` with no blockers
+cannot be constructed without a valid aggregate. Completeness is one
+prerequisite only: it does not resolve timestamp authority, Vancouver
+location identity, key validity or stability, and does not make the
+airport-premium or any other pricing analysis ready.
 
 ## One-to-many relationship and relationship-checked join
 
@@ -747,8 +782,8 @@ from ql2_sixt_canada_analysis import (
 
 keys = apply_location_policy(cars_df)                    # source_keys + analytical_keys (frame untouched)
 policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, location_comparison_report, keys)
-readiness = assess_pricing_readiness(location_policy=policy, key_contracts_valid=..., ...,
-                                     vehicle_stability=vehicle_stability_report)
+readiness = assess_pricing_readiness(location_policy=policy, completeness=completeness,
+                                     key_contracts_valid=..., ..., vehicle_stability=vehicle_stability_report)
 readiness.ready, readiness.blocking_reasons
 ```
 
@@ -768,11 +803,14 @@ Derived permissions on `LocationPolicyReport`:
   `analytical_keys` use the canonical location while `source_keys` keep the
   original labels for lineage and audit.
 
-`assess_pricing_readiness` is fail closed: every foundational gate (key
-contracts, expected coverage, expected stream health, job/detail
-reconciliation, one-to-many relationship, temporal trust, vehicle
-stability, passed as the full-population `VehicleStabilityReport`) must
-pass, and the location policy must add no blocker. Each failure is a `PricingBlocker` (for example
+`assess_pricing_readiness` is fail closed: the `CompletenessReport`
+(complete source, city-branch coverage, **every** configured expected
+stream, declared counts - there are no separate booleans that could override
+it; `None` blocks as `completeness_unavailable`, a failure as
+`data_incomplete`, plus `expected_streams_not_proven` for stream failures)
+and every other foundational gate (key contracts, one-to-many relationship,
+temporal trust, vehicle stability, passed as the full-population
+`VehicleStabilityReport`) must pass, and the location policy must add no blocker. Each failure is a `PricingBlocker` (for example
 `vancouver_policy_unresolved`, `alias_canonicalization_not_applied`,
 `temporal_fields_untrusted`); `validate_pricing_readiness` raises
 `PricingNotReadyError`. A resolved policy never overrides another gate.

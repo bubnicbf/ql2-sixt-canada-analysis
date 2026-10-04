@@ -12,6 +12,7 @@ import dataclasses
 import pandas as pd
 import pytest
 from test_comparison import COV, DEF, _jobs, offer, same_both
+from test_completeness import complete_inputs
 from test_vehicle_stability import T, V1, V2, frame as stability_frame, obs, two
 
 import ql2_sixt_canada_analysis
@@ -31,6 +32,7 @@ from ql2_sixt_canada_analysis.readiness import (
     PricingNotReadyError,
     PricingReadinessReport,
     apply_location_policy,
+    assess_completeness,
     assess_location_policy,
     assess_pricing_readiness,
     validate_pricing_readiness,
@@ -62,10 +64,13 @@ UNSTABLE = assess_vehicle_attribute_stability(two(**{V.attribute_columns[0]: "SY
 PARTIAL = assess_vehicle_attribute_stability(stability_frame([obs(V1, T[0]), obs(V1, T[1]), obs(V2, T[0])]))
 UNSTABLE_AND_PARTIAL = assess_vehicle_attribute_stability(stability_frame([
     obs(V1, T[0]), obs(V1, T[1], **{V.attribute_columns[0]: "SYNTH-CLASS-B"}), obs(V2, T[0])]))
-GATES = dict(source_complete=True, key_contracts_valid=True, expected_coverage_passed=True, expected_stream_healthy=True,
-             job_detail_counts_reconciled=True, one_to_many_contract_valid=True,
+# Completeness evidence comes from the real assessment on fabricated, healthy inputs.
+COMPLETE = assess_completeness(**complete_inputs())
+INCOMPLETE = assess_completeness(**(complete_inputs() | {"reconciliation": None}))       # data, not streams
+STREAMS_INCOMPLETE = assess_completeness(**(complete_inputs() | {"streams": None}))       # stream population
+GATES = dict(completeness=COMPLETE, key_contracts_valid=True, one_to_many_contract_valid=True,
              temporal_fields_trusted=True, vehicle_stability=STABLE)
-FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE}
+FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE}
 
 
 def evidence(status: CS) -> LocationStreamComparisonReport:
@@ -275,10 +280,12 @@ def test_each_foundational_gate_blocks_alone(gate):
 
 def test_all_failures_are_reported_together():
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(),
-                                         **(FAILING | {"vehicle_stability": UNSTABLE_AND_PARTIAL}))
+                                         **(FAILING | {"vehicle_stability": UNSTABLE_AND_PARTIAL,
+                                                       "completeness": STREAMS_INCOMPLETE}))
     assert set(readiness.blocking_reasons) == set(B) - {B.ALIAS_CANONICALIZATION_NOT_APPLIED,
                                                         B.IDENTITY_EVIDENCE_CONFLICT,
-                                                        B.VEHICLE_STABILITY_UNAVAILABLE}
+                                                        B.VEHICLE_STABILITY_UNAVAILABLE,
+                                                        B.COMPLETENESS_UNAVAILABLE}
     assert readiness.blocking_reasons[-1] is B.LOCATION_POLICY_UNRESOLVED
 
 

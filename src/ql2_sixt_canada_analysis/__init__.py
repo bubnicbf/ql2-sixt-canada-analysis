@@ -110,6 +110,10 @@ from ql2_sixt_canada_analysis.schemas import (
     get_dataset_definition,
 )
 from ql2_sixt_canada_analysis.streams import (
+    ExpectedLocationStreamsReport,
+    ExpectedStreamBlocker,
+    ExpectedStreamResult,
+    assess_expected_location_streams,
     StreamEventAccounting,
     LocationStreamError,
     LocationStreamInvestigationReport,
@@ -177,6 +181,10 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "ExpectedLocationStreamsReport",
+    "ExpectedStreamBlocker",
+    "ExpectedStreamResult",
+    "assess_expected_location_streams",
     "SAFE_ON_BAD_LINES",
     "IncompleteSourceOptionError",
     "location_pair_evidence",

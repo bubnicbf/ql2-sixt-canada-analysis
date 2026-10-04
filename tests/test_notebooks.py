@@ -64,7 +64,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # Cells that are required to report categorical gate results and aggregate
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
-REPORTING_STEPS = ("assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+REPORTING_STEPS = ("assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
                    "investigate_location_stream(", "assess_completeness(")
@@ -864,8 +864,11 @@ def test_ingestion_notebook_gates_pricing_on_the_vancouver_policy() -> None:
                  "vancouver_locations_are_aliases", "vancouver_locations_comparable_independently",
                  "pricing_readiness", "pricing_analysis_ready"):
         assert re.search(rf"^{name}\s*=", cell, re.M), name
-    for gate in ("all_key_contracts_valid", "expected_location_coverage_passed", "location_stream_healthy",
-                 "job_detail_counts_reconciled", "one_to_many_contract_valid", "temporal_fields_trusted",
+    # The single-stream health and separate completeness booleans no longer gate pricing:
+    # one stream could pass while another expected stream failed.
+    assert "location_stream_healthy" not in cell and "expected_location_coverage_passed" not in cell
+    assert re.search(r"completeness=completeness\b", cell)
+    for gate in ("all_key_contracts_valid", "one_to_many_contract_valid", "temporal_fields_trusted",
                  "vehicle_stability_report"):
         assert gate in cell, f"pricing readiness ignores {gate}"
     # No policy decision may be derived from comparison evidence in the notebook.
@@ -908,11 +911,18 @@ def test_ingestion_notebook_gates_completeness_through_the_api() -> None:
     code = "\n".join(sources)
     assert re.search(r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bassess_completeness\b", code, re.S)
     cell = next(s for s in sources if "assess_completeness(" in s)
-    for argument in ("datasets=cleaned", "coverage=location_coverage_report", "streams=(location_stream_report,)",
+    # The all-expected-stream aggregate, never a hand-picked subset (a single Calgary
+    # report used to be passed, so other expected streams could fail unnoticed).
+    for argument in ("datasets=cleaned", "coverage=location_coverage_report", "streams=expected_streams_report",
                      "reconciliation=reconciliation_report"):
         assert argument in cell
+    assert "streams=(location_stream_report,)" not in code
+    expected = next(s for s in sources if "assess_expected_location_streams(" in s)
+    assert re.search(r"expected_streams_report\s*=\s*assess_expected_location_streams\(", expected)
+    assert "coverage=EXPECTED_LOCATION_COVERAGE" in expected
+    assert sources.index(expected) < sources.index(cell)
     pricing = next(s for s in sources if "assess_pricing_readiness(" in s)
-    assert "source_complete=bool(cleaned.complete_source)" in pricing
+    assert "completeness=completeness" in pricing and "source_complete" not in pricing
     for forbidden in ("nrows", "skipfooter", "skiprows", "on_bad_lines", "chunksize", "usecols"):
         assert forbidden not in code
     guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
@@ -937,6 +947,55 @@ def test_ingestion_notebook_reports_completeness_on_synthetic_inputs(synthetic_r
     reconcile = _step_output(result, "assess_job_detail_reconciliation(")
     assert len(re.findall(r"^Declared .* reconciled:", reconcile, re.M)) == len(
         JOB_DETAIL_RELATIONSHIP.expected_detail_count_columns)
+    assert list(workdir.iterdir()) == []
+
+
+def test_ingestion_notebook_blocks_when_one_expected_stream_is_partial(tmp_path: Path) -> None:
+    # Regression: only the investigated stream fed completeness and pricing, so the
+    # notebook could report complete data while another expected stream was partial.
+    from ql2_sixt_canada_analysis.readiness import CompletenessBlocker, PricingBlocker
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    cov = EXPECTED_LOCATION_COVERAGE
+    city_col, label_col = cov.location_columns
+    parent_city, = cov.parent_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city1, label1) = INVESTIGATED_LOCATION_STREAM
+    (city2, label2), (_, label3) = COMPARED_LOCATION_STREAMS
+    counts = {"SYNTH-JOB-001": "1", "SYNTH-JOB-002": "2", "SYNTH-JOB-003": "1"}
+    jobs = [{rel.parent_key_columns[0]: job, parent_city: city1 if job.endswith("1") else city2,
+             **{c: n for c in rel.expected_detail_count_columns}} for job, n in counts.items()]
+    cars = [{rel.detail_key_columns[0]: "SYNTH-JOB-001", position: "0", city_col: city1, label_col: label1},
+            {rel.detail_key_columns[0]: "SYNTH-JOB-002", position: "0", city_col: city2, label_col: label2},
+            {rel.detail_key_columns[0]: "SYNTH-JOB-002", position: "1", city_col: city2, label_col: label3},
+            {rel.detail_key_columns[0]: "SYNTH-JOB-003", position: "0", city_col: city2, label_col: label2}]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    calgary = _step_output(result, "investigate_location_stream(")
+    assert "Stream continuity: complete" in calgary                       # the investigated stream is fine
+    streams = _step_output(result, "assess_expected_location_streams(")
+    lines = dict(line.split(":", 1) for line in streams.splitlines() if ":" in line)
+    assert lines["Configured expected streams"].strip() == "3" and lines["Assessed streams"].strip() == "3"
+    assert lines["Every expected stream assessed exactly once"].strip() == "True"
+    assert lines["All expected streams healthy"].strip() == "False"
+    assert "stream_continuity_partial" in lines["Expected streams blocked by"]
+    assert not any(label in streams for label in (label1, label2, label3)) and "SYNTH" not in streams
+    complete = _step_output(result, "assess_completeness(")
+    assert "Overall completeness: not proven" in complete
+    assert CompletenessBlocker.STREAM_CONTINUITY_PARTIAL.value in complete
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    assert "Pricing analysis ready: False" in pricing
+    assert PricingBlocker.EXPECTED_STREAMS_NOT_PROVEN.value in pricing
     assert list(workdir.iterdir()) == []
 
 

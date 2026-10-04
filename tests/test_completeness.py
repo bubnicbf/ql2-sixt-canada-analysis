@@ -40,6 +40,7 @@ from ql2_sixt_canada_analysis.schemas import (
     LocationCoverageMode,
 )
 from ql2_sixt_canada_analysis.streams import (
+    assess_expected_location_streams,
     LocationStreamStatus as S,
     PipelineStage as P,
     StreamContinuity,
@@ -370,7 +371,8 @@ def complete_inputs():  # type: ignore[no-untyped-def]
     j, c = jobs((J1, 1, 1), (J2, 1, 1)), cars((J1, A), (J2, A))
     datasets = RawDatasets(jobs=j, cars=c, complete_source=True)
     return dict(datasets=datasets, coverage=assess_expected_location_coverage(c, SYNTH_COV),
-                streams=(stream(j, c),), reconciliation=reconcile(j, c))
+                streams=assess_expected_location_streams(j, c, coverage=SYNTH_COV), reconciliation=reconcile(j, c),
+                expected_coverage=SYNTH_COV)
 
 
 def test_completeness_passes_only_when_every_control_passes():
@@ -385,8 +387,8 @@ def test_completeness_blocks_on_each_failure():
         CB.SOURCE_NOT_COMPLETE: {"datasets": dataclasses.replace(base["datasets"], complete_source=False)},
         CB.COVERAGE_UNAVAILABLE: {"coverage": None},
         CB.EXPECTED_PAIRS_MISSING: {"coverage": assess_expected_location_coverage(cars((J1, B)), SYNTH_COV)},
-        CB.STREAM_UNAVAILABLE: {"streams": ()},
-        CB.STREAM_CONTINUITY_UNASSESSABLE: {"streams": (stream(j_bad, c),)},
+        CB.EXPECTED_STREAM_ASSESSMENT_UNAVAILABLE: {"streams": None},
+        CB.STREAM_CONTINUITY_UNASSESSABLE: {"streams": assess_expected_location_streams(j_bad, c, coverage=SYNTH_COV)},
         CB.RECONCILIATION_UNAVAILABLE: {"reconciliation": None},
         CB.DECLARED_COUNT_UNRECONCILED: {"reconciliation": reconcile(jobs((J1, 1, 9), (J2, 1, 1)),
                                                                      cars((J1, A), (J2, A)))},
@@ -404,7 +406,7 @@ def test_misassigned_pair_zero_detail_job_and_secondary_mismatch_all_block_toget
     report = assess_completeness(
         datasets=RawDatasets(jobs=j, cars=c, complete_source=True),
         coverage=assess_expected_location_coverage(c, COV),
-        streams=(investigate_location_stream(j, c, EXPECTED[0], coverage=COV),),
+        streams=assess_expected_location_streams(j, c, coverage=COV),
         reconciliation=reconcile(j, c))
     assert not report.complete
     assert {CB.EXPECTED_PAIRS_MISSING, CB.DECLARED_COUNT_UNRECONCILED, CB.DECLARED_COUNTS_DISAGREE} <= set(

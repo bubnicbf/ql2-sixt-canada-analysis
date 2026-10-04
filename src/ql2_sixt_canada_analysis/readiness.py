@@ -37,9 +37,12 @@ from ql2_sixt_canada_analysis.coverage import LocationCoverageReport
 from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.reconciliation import JobDetailReconciliationReport
 from ql2_sixt_canada_analysis.stability import VehicleStabilityReport
-from ql2_sixt_canada_analysis.streams import LocationStreamInvestigationReport, StreamContinuity
+from ql2_sixt_canada_analysis.streams import ExpectedLocationStreamsReport
 from ql2_sixt_canada_analysis.schemas import (
+    EXPECTED_LOCATION_COVERAGE,
     VANCOUVER_LOCATION_POLICY,
+    LocationCoverageConfigurationError,
+    LocationCoverageDefinition,
     LocationIdentityPolicy,
     LocationPolicyAuthority,
     LocationPolicyConfigurationError,
@@ -65,11 +68,10 @@ __all__ = [
 class PricingBlocker(StrEnum):
     """Why pricing analysis is not ready (values avoid source column names)."""
 
-    SOURCE_NOT_COMPLETE = "source_not_complete"
+    COMPLETENESS_UNAVAILABLE = "completeness_unavailable"
+    DATA_INCOMPLETE = "data_incomplete"
+    EXPECTED_STREAMS_NOT_PROVEN = "expected_streams_not_proven"
     KEY_CONTRACTS_INVALID = "key_contracts_invalid"
-    EXPECTED_COVERAGE_FAILED = "expected_coverage_failed"
-    EXPECTED_STREAM_UNHEALTHY = "expected_stream_unhealthy"
-    JOB_DETAIL_COUNTS_UNRECONCILED = "job_detail_counts_unreconciled"
     ONE_TO_MANY_INVALID = "one_to_many_invalid"
     TEMPORAL_FIELDS_UNTRUSTED = "temporal_fields_untrusted"
     VEHICLE_ATTRIBUTES_UNSTABLE = "vehicle_attributes_unstable"
@@ -165,6 +167,8 @@ class PricingReadinessReport:
 
     blocking_reasons: tuple[PricingBlocker, ...]
     location_policy: LocationPolicyReport
+    #: The completeness decision this readiness rests on (kept for audit).
+    completeness: CompletenessReport | None = None
 
     @property
     def ready(self) -> bool:
@@ -236,11 +240,8 @@ def assess_location_policy(
 def assess_pricing_readiness(
     *,
     location_policy: LocationPolicyReport,
-    source_complete: bool,
+    completeness: CompletenessReport | None,
     key_contracts_valid: bool,
-    expected_coverage_passed: bool,
-    expected_stream_healthy: bool,
-    job_detail_counts_reconciled: bool,
     one_to_many_contract_valid: bool,
     temporal_fields_trusted: bool,
     vehicle_stability: VehicleStabilityReport | None,
@@ -248,7 +249,11 @@ def assess_pricing_readiness(
     """Combine every foundational gate with the location policy (all must pass).
 
     Gate values must be real booleans; anything else is a ``TypeError`` so a
-    missing result can never be read as a pass. ``vehicle_stability`` is the
+    missing result can never be read as a pass. ``completeness`` is the
+    authoritative :class:`CompletenessReport` (complete source, coverage,
+    *every* configured expected stream, declared counts); there are no
+    separate booleans that could override it, and ``None`` blocks.
+    ``vehicle_stability`` is the
     full-population stability report (``None`` = unavailable, which blocks);
     proven violations and insufficient product history are separate blockers
     and both are reported when both apply.
@@ -257,21 +262,32 @@ def assess_pricing_readiness(
         raise TypeError("location_policy must be a LocationPolicyReport")
     if vehicle_stability is not None and not isinstance(vehicle_stability, VehicleStabilityReport):
         raise TypeError("vehicle_stability must be a VehicleStabilityReport or None")
+    if completeness is not None and not isinstance(completeness, CompletenessReport):
+        raise TypeError("completeness must be a CompletenessReport or None")
     gates = (
-        (source_complete, PricingBlocker.SOURCE_NOT_COMPLETE),
         (key_contracts_valid, PricingBlocker.KEY_CONTRACTS_INVALID),
-        (expected_coverage_passed, PricingBlocker.EXPECTED_COVERAGE_FAILED),
-        (expected_stream_healthy, PricingBlocker.EXPECTED_STREAM_UNHEALTHY),
-        (job_detail_counts_reconciled, PricingBlocker.JOB_DETAIL_COUNTS_UNRECONCILED),
         (one_to_many_contract_valid, PricingBlocker.ONE_TO_MANY_INVALID),
         (temporal_fields_trusted, PricingBlocker.TEMPORAL_FIELDS_UNTRUSTED),
     )
     if not all(isinstance(value, bool) for value, _ in gates):
         raise TypeError("every readiness gate must be a bool")
-    reasons = [blocker for value, blocker in gates if not value]
+    reasons = list(_completeness_blockers(completeness))
+    reasons.extend(blocker for value, blocker in gates if not value)
     reasons.extend(_stability_blockers(vehicle_stability))
     reasons.extend(location_policy.blocking_reasons)
-    return PricingReadinessReport(blocking_reasons=tuple(reasons), location_policy=location_policy)
+    return PricingReadinessReport(blocking_reasons=tuple(reasons), location_policy=location_policy,
+                                  completeness=completeness)
+
+
+def _completeness_blockers(report: CompletenessReport | None) -> list[PricingBlocker]:
+    if report is None:
+        return [PricingBlocker.COMPLETENESS_UNAVAILABLE]
+    if report.complete:
+        return []
+    blockers = [PricingBlocker.DATA_INCOMPLETE]
+    if any(b in _STREAM_COMPLETENESS_BLOCKERS for b in report.blocking_reasons):
+        blockers.append(PricingBlocker.EXPECTED_STREAMS_NOT_PROVEN)
+    return blockers
 
 
 def _stability_blockers(report: VehicleStabilityReport | None) -> list[PricingBlocker]:
@@ -297,10 +313,16 @@ class CompletenessBlocker(StrEnum):
     UNEXPECTED_PAIRS = "unexpected_pairs"
     UNASSIGNED_LOCATIONS = "unassigned_pairs"
     CONFLICTING_LOCATION_ASSIGNMENT = "conflicting_pair_assignment"
-    STREAM_UNAVAILABLE = "stream_unavailable"
+    EXPECTED_STREAM_ASSESSMENT_UNAVAILABLE = "expected_stream_assessment_unavailable"
+    STREAM_CONTRACT_MISMATCH = "stream_contract_mismatch"
+    EXPECTED_STREAM_REPORT_MISSING = "expected_stream_report_missing"
+    DUPLICATE_STREAM_REPORT = "duplicate_stream_report"
+    UNEXPECTED_STREAM_REPORT = "unexpected_stream_report"
+    EXPECTED_STREAM_REPORT_UNAVAILABLE = "expected_stream_report_unavailable"
     STREAM_CONTINUITY_PARTIAL = "stream_continuity_partial"
     STREAM_CONTINUITY_UNASSESSABLE = "stream_continuity_unassessable"
-    STREAM_UNHEALTHY = "stream_unhealthy"
+    STREAM_UNHEALTHY = "expected_stream_unhealthy"
+    COVERAGE_CONTRACT_MISMATCH = "coverage_contract_mismatch"
     RECONCILIATION_UNAVAILABLE = "reconciliation_unavailable"
     DECLARED_COUNT_UNRECONCILED = "declared_count_unreconciled"
     DECLARED_COUNTS_DISAGREE = "declared_counts_disagree"
@@ -315,15 +337,36 @@ _COVERAGE_BLOCKERS = {
 }
 
 
+_STREAM_COMPLETENESS_BLOCKERS = frozenset({
+    CompletenessBlocker.EXPECTED_STREAM_ASSESSMENT_UNAVAILABLE, CompletenessBlocker.STREAM_CONTRACT_MISMATCH,
+    CompletenessBlocker.EXPECTED_STREAM_REPORT_MISSING, CompletenessBlocker.DUPLICATE_STREAM_REPORT,
+    CompletenessBlocker.UNEXPECTED_STREAM_REPORT, CompletenessBlocker.EXPECTED_STREAM_REPORT_UNAVAILABLE,
+    CompletenessBlocker.STREAM_CONTINUITY_PARTIAL, CompletenessBlocker.STREAM_CONTINUITY_UNASSESSABLE,
+    CompletenessBlocker.STREAM_UNHEALTHY,
+})
+
+
 @dataclass(frozen=True, slots=True)
 class CompletenessReport:
     """Fail-closed completeness: ``complete`` only with no blocking reasons.
 
     Completeness is one prerequisite only; it says nothing about timestamp
-    authority, location identity, keys or stability.
+    authority, location identity, keys or stability. ``expected_streams`` keeps
+    the all-expected-stream aggregate it was decided on (for diagnostics).
     """
 
     blocking_reasons: tuple[CompletenessBlocker, ...]
+    expected_streams: ExpectedLocationStreamsReport | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.blocking_reasons, tuple) or not all(
+                isinstance(b, CompletenessBlocker) for b in self.blocking_reasons):
+            raise TypeError("blocking_reasons must be a tuple of CompletenessBlocker")
+        if self.expected_streams is not None and not isinstance(self.expected_streams, ExpectedLocationStreamsReport):
+            raise TypeError("expected_streams must be an ExpectedLocationStreamsReport or None")
+        # A complete report must rest on a valid all-expected-stream aggregate.
+        if not self.blocking_reasons and (self.expected_streams is None or not self.expected_streams.is_valid):
+            raise ValueError("a complete report requires a valid all-expected-stream assessment")
 
     @property
     def complete(self) -> bool:
@@ -334,13 +377,19 @@ def assess_completeness(
     *,
     datasets: RawDatasets,
     coverage: LocationCoverageReport | None,
-    streams: tuple[LocationStreamInvestigationReport | None, ...],
+    streams: ExpectedLocationStreamsReport | None,
     reconciliation: JobDetailReconciliationReport | None,
+    expected_coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
 ) -> CompletenessReport:
-    """Combine source completeness, city-location coverage, stream continuity and counts.
+    """Combine source completeness, city-location coverage, every expected stream and counts.
 
-    Every input must be present and pass; a missing report (``None``) or an
-    empty ``streams`` tuple blocks. Each failure is reported.
+    ``streams`` must be the validated all-expected-stream aggregate
+    (:func:`~ql2_sixt_canada_analysis.streams.assess_expected_location_streams`)
+    for ``expected_coverage``: a missing aggregate, an aggregate built for
+    another contract, and any missing, duplicated, unexpected, unavailable,
+    partial, unassessable or unhealthy expected stream block. Row-level
+    coverage never substitutes for job-level stream continuity. Every input
+    must be present and pass; each failure is reported.
     """
     B = CompletenessBlocker
     if not isinstance(datasets, RawDatasets):
@@ -349,9 +398,10 @@ def assess_completeness(
         raise TypeError("coverage must be a LocationCoverageReport or None")
     if reconciliation is not None and not isinstance(reconciliation, JobDetailReconciliationReport):
         raise TypeError("reconciliation must be a JobDetailReconciliationReport or None")
-    if not isinstance(streams, tuple) or not all(
-            s is None or isinstance(s, LocationStreamInvestigationReport) for s in streams):
-        raise TypeError("streams must be a tuple of LocationStreamInvestigationReport or None")
+    if streams is not None and not isinstance(streams, ExpectedLocationStreamsReport):
+        raise TypeError("streams must be an ExpectedLocationStreamsReport (all expected streams) or None")
+    if not isinstance(expected_coverage, LocationCoverageDefinition) or not expected_coverage.is_configured:
+        raise LocationCoverageConfigurationError("completeness needs a configured expected-location contract")
     reasons: list[CompletenessBlocker] = []
     if datasets.complete_source is not True:
         reasons.append(B.SOURCE_NOT_COMPLETE)
@@ -361,15 +411,14 @@ def assess_completeness(
         reasons.extend(_COVERAGE_BLOCKERS[v] for v in coverage.violations)
         if not coverage.is_valid and not coverage.violations:
             reasons.append(B.COVERAGE_UNAVAILABLE)
-    if not streams or any(s is None for s in streams):
-        reasons.append(B.STREAM_UNAVAILABLE)
-    for stream in (s for s in streams if s is not None):
-        if stream.stream_continuity is StreamContinuity.PARTIAL:
-            reasons.append(B.STREAM_CONTINUITY_PARTIAL)
-        elif stream.stream_continuity is not StreamContinuity.COMPLETE:
-            reasons.append(B.STREAM_CONTINUITY_UNASSESSABLE)
-        if not stream.is_healthy:
-            reasons.append(B.STREAM_UNHEALTHY)
+        if coverage.expected_pairs != tuple(expected_coverage.expected_locations):
+            reasons.append(B.COVERAGE_CONTRACT_MISMATCH)
+    if streams is None:
+        reasons.append(B.EXPECTED_STREAM_ASSESSMENT_UNAVAILABLE)
+    else:
+        if streams.coverage != expected_coverage:
+            reasons.append(B.STREAM_CONTRACT_MISMATCH)
+        reasons.extend(B(b.value) for b in streams.blocking_reasons)
     if reconciliation is None:
         reasons.append(B.RECONCILIATION_UNAVAILABLE)
     else:
@@ -383,7 +432,7 @@ def assess_completeness(
                 r in reasons for r in (B.DECLARED_COUNT_UNRECONCILED, B.DECLARED_COUNTS_DISAGREE,
                                        B.DETAIL_ROWS_UNLINKED)):
             reasons.append(B.DECLARED_COUNT_UNRECONCILED)     # fail closed on any other non-pass
-    return CompletenessReport(blocking_reasons=tuple(dict.fromkeys(reasons)))
+    return CompletenessReport(blocking_reasons=tuple(dict.fromkeys(reasons)), expected_streams=streams)
 
 
 def validate_pricing_readiness(**gates: object) -> PricingReadinessReport:

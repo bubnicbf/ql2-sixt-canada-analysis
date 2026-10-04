@@ -45,6 +45,18 @@ single primary :class:`LocationStreamStatus`:
    reconcile declared and observed counts (``JOB_DETAIL_COUNT_MISMATCH``).
 8. Otherwise ``STREAM_PRESENT_AND_HEALTHY``.
 
+All expected streams
+--------------------
+:func:`assess_expected_location_streams` investigates **every** key of the
+coverage contract's ``expected_locations`` exactly once (in contract order)
+and returns an :class:`ExpectedLocationStreamsReport`. The aggregate pairs
+each report with the configured key it was produced for and validates the
+population against the contract on every construction: a missing,
+duplicated, unexpected or unavailable report, or any unhealthy expected
+stream, is a :class:`ExpectedStreamBlocker`. Completeness and pricing
+readiness consume this aggregate, never a single stream; adding a pair to the
+contract automatically expands the required population.
+
 The investigation never creates, repairs, filters or writes records and never
 infers aliases or cadence. The report holds enums and booleans only - no
 identifiers, location values (other than none at all), timestamps, rows or
@@ -55,7 +67,10 @@ from __future__ import annotations
 
 import csv
 import itertools
+from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from enum import StrEnum
 from pathlib import Path
 
@@ -84,6 +99,10 @@ from ql2_sixt_canada_analysis.temporal import parse_temporal_field
 from ql2_sixt_canada_analysis.unique_keys import assess_unique_key
 
 __all__ = [
+    "ExpectedLocationStreamsReport",
+    "ExpectedStreamBlocker",
+    "ExpectedStreamResult",
+    "assess_expected_location_streams",
     "LocationStreamError",
     "LocationStreamInvestigationReport",
     "LocationStreamStatus",
@@ -448,6 +467,201 @@ def validate_location_stream(
     if not report.is_healthy:
         raise LocationStreamError(report)
     return report
+
+
+# ------------------------------------------------------------ all expected streams
+
+
+class ExpectedStreamBlocker(StrEnum):
+    """Why the expected-stream population is not proven healthy (fixed order)."""
+
+    EXPECTED_STREAM_REPORT_MISSING = "expected_stream_report_missing"
+    DUPLICATE_STREAM_REPORT = "duplicate_stream_report"
+    UNEXPECTED_STREAM_REPORT = "unexpected_stream_report"
+    EXPECTED_STREAM_REPORT_UNAVAILABLE = "expected_stream_report_unavailable"
+    STREAM_CONTINUITY_PARTIAL = "stream_continuity_partial"
+    STREAM_CONTINUITY_UNASSESSABLE = "stream_continuity_unassessable"
+    EXPECTED_STREAM_UNHEALTHY = "expected_stream_unhealthy"
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedStreamResult:
+    """One stream report paired with the configured key it was produced for (``None`` = unavailable)."""
+
+    target: tuple[str, ...]
+    report: LocationStreamInvestigationReport | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, tuple) or not all(isinstance(v, str) for v in self.target):
+            raise TypeError("target must be a configured location key (tuple of strings)")
+        if self.report is not None and not isinstance(self.report, LocationStreamInvestigationReport):
+            raise TypeError("report must be a LocationStreamInvestigationReport or None")
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedLocationStreamsReport:
+    """Stream results validated against a coverage contract's expected population.
+
+    Every property is derived from ``coverage.expected_locations`` and
+    ``results`` on access, so no construction path can claim a population it
+    does not hold: omitted, duplicated, unexpected or unavailable results
+    always appear in :attr:`blocking_reasons`. ``results`` are stored in
+    contract order (then any unexpected keys, ordered), whatever the input
+    order. Reports hold no source values; configured keys are repository
+    configuration and are never put into messages.
+    """
+
+    coverage: LocationCoverageDefinition
+    results: tuple[ExpectedStreamResult, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.coverage, LocationCoverageDefinition):
+            raise TypeError(f"expected a LocationCoverageDefinition, got {type(self.coverage).__name__}")
+        if not self.coverage.is_configured:
+            raise LocationCoverageConfigurationError(
+                "No expected-location contract is configured; the expected streams cannot be assessed.")
+        results = tuple(self.results) if isinstance(self.results, (tuple, list)) else None
+        if results is None or not all(isinstance(r, ExpectedStreamResult) for r in results):
+            raise TypeError("results must be a tuple of ExpectedStreamResult")
+        expected = list(self.coverage.expected_locations)
+        position = {key: i for i, key in enumerate(expected)}
+        ordered = sorted(results, key=lambda r: (position.get(r.target, len(expected)), repr(r.target)))
+        object.__setattr__(self, "results", tuple(ordered))
+
+    @classmethod
+    def from_reports(
+        cls,
+        coverage: LocationCoverageDefinition,
+        reports: Iterable[tuple[tuple[str, ...], LocationStreamInvestigationReport | None]]
+        | Mapping[tuple[str, ...], LocationStreamInvestigationReport | None],
+    ) -> ExpectedLocationStreamsReport:
+        """Build from ``(configured key, report)`` pairs (or a mapping); validation is by property."""
+        items = reports.items() if isinstance(reports, Mapping) else reports
+        return cls(coverage=coverage, results=tuple(ExpectedStreamResult(tuple(k), r) for k, r in items))
+
+    # ----------------------------------------------------------- population
+    @property
+    def expected_stream_count(self) -> int:
+        return len(self.coverage.expected_locations)
+
+    @property
+    def assessed_stream_count(self) -> int:
+        return len(self.results)
+
+    @property
+    def _counts(self) -> Counter:
+        return Counter(r.target for r in self.results)
+
+    @property
+    def missing_stream_count(self) -> int:
+        counts = self._counts
+        return sum(1 for key in self.coverage.expected_locations if counts[key] == 0)
+
+    @property
+    def duplicate_stream_count(self) -> int:
+        counts = self._counts
+        return sum(1 for key in self.coverage.expected_locations if counts[key] > 1)
+
+    @property
+    def unexpected_stream_count(self) -> int:
+        expected = set(self.coverage.expected_locations)
+        return sum(1 for r in self.results if r.target not in expected)
+
+    @property
+    def all_expected_assessed(self) -> bool:
+        """Every configured expected key has at least one result."""
+        return self.missing_stream_count == 0
+
+    @property
+    def assessed_exactly_once(self) -> bool:
+        """The results are exactly the configured population, each key once."""
+        return (self.missing_stream_count == 0 and self.duplicate_stream_count == 0
+                and self.unexpected_stream_count == 0)
+
+    @property
+    def reports(self) -> Mapping[tuple[str, ...], LocationStreamInvestigationReport | None]:
+        """Read-only mapping of configured key -> report (keys assessed exactly once)."""
+        counts = self._counts
+        return MappingProxyType({r.target: r.report for r in self.results
+                                 if r.target in set(self.coverage.expected_locations) and counts[r.target] == 1})
+
+    @property
+    def all_expected_streams_healthy(self) -> bool:
+        return self.assessed_exactly_once and all(
+            r.report is not None and r.report.is_healthy for r in self.results)
+
+    @property
+    def all_continuity_complete(self) -> bool:
+        return self.assessed_exactly_once and all(
+            r.report is not None and r.report.stream_continuity is StreamContinuity.COMPLETE
+            for r in self.results)
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.blocking_reasons
+
+    @property
+    def blocking_reasons(self) -> tuple[ExpectedStreamBlocker, ...]:
+        """Every applicable blocker, in the fixed enum order."""
+        B = ExpectedStreamBlocker
+        found: set[ExpectedStreamBlocker] = set()
+        if self.missing_stream_count:
+            found.add(B.EXPECTED_STREAM_REPORT_MISSING)
+        if self.duplicate_stream_count:
+            found.add(B.DUPLICATE_STREAM_REPORT)
+        if self.unexpected_stream_count:
+            found.add(B.UNEXPECTED_STREAM_REPORT)
+        expected = set(self.coverage.expected_locations)
+        for result in self.results:
+            if result.target not in expected:
+                continue
+            report = result.report
+            if report is None:
+                found.add(B.EXPECTED_STREAM_REPORT_UNAVAILABLE)
+                continue
+            if report.stream_continuity is StreamContinuity.PARTIAL:
+                found.add(B.STREAM_CONTINUITY_PARTIAL)
+            elif report.stream_continuity is not StreamContinuity.COMPLETE:
+                found.add(B.STREAM_CONTINUITY_UNASSESSABLE)
+            if not report.is_healthy:
+                found.add(B.EXPECTED_STREAM_UNHEALTHY)
+        return tuple(b for b in B if b in found)
+
+
+def assess_expected_location_streams(
+    jobs: pd.DataFrame,
+    cars: pd.DataFrame,
+    *,
+    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
+    loaded: RawDatasets | None = None,
+    schedule: CollectionScheduleDefinition | None = COLLECTION_SCHEDULE,
+    temporal: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
+) -> ExpectedLocationStreamsReport:
+    """Investigate every configured expected stream once; return the validated aggregate.
+
+    The population comes only from ``coverage.expected_locations`` (never from
+    the data), in contract order. Inputs are not modified.
+
+    Raises:
+        TypeError: Invalid argument types.
+        LocationCoverageConfigurationError: The contract is unconfigured or
+            its columns are absent (as for :func:`investigate_location_stream`).
+    """
+    if not isinstance(coverage, LocationCoverageDefinition):
+        raise TypeError(f"expected a LocationCoverageDefinition, got {type(coverage).__name__}")
+    if not coverage.is_configured:
+        raise LocationCoverageConfigurationError(
+            "No expected-location contract is configured; the expected streams cannot be assessed.")
+    results = tuple(
+        ExpectedStreamResult(key, investigate_location_stream(
+            jobs, cars, key, coverage=coverage, relationship=relationship, loaded=loaded,
+            schedule=schedule, temporal=temporal))
+        for key in coverage.expected_locations
+    )
+    aggregate = ExpectedLocationStreamsReport(coverage=coverage, results=results)
+    assert aggregate.assessed_exactly_once            # by construction; guards later refactors
+    return aggregate
 
 
 # ---------------------------------------------------------------------- helpers
