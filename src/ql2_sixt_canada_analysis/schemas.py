@@ -376,6 +376,13 @@ class JobDetailRelationshipDefinition:
         parent_suffix, detail_suffix: Stable suffixes a validated join adds
             to same-named non-key columns from each side (never to columns
             whose names do not collide).
+        scope_agreement_columns: ``(parent column, detail column)`` pairs a
+            linked detail row must agree on with its parent (the project: the
+            city). Each value must also be *assignable* - present, non-blank
+            and in canonical form, see
+            :func:`ql2_sixt_canada_analysis.city_integrity.unassignable_scope_mask`;
+            linked rows are compared exactly, never normalised or aliased.
+            Empty (the default) declares no scope invariant.
         definitions: Registry the columns are validated against (the project
             registry by default; tests may pass a synthetic one).
     """
@@ -388,6 +395,7 @@ class JobDetailRelationshipDefinition:
     additional_expected_count_columns: tuple[str, ...] = ()
     parent_suffix: str = "_job"
     detail_suffix: str = "_detail"
+    scope_agreement_columns: tuple[tuple[str, str], ...] = ()
     definitions: Mapping[DatasetKey, DatasetDefinition] = dataclass_field(
         default=None, compare=False, repr=False  # type: ignore[arg-type]
     )
@@ -452,6 +460,30 @@ class JobDetailRelationshipDefinition:
             if column in parent.identifier_columns or column in self.parent_key_columns:
                 raise RelationshipConfigurationError(
                     "expected-count column must be a measure, not a key or identifier", (column,))
+        pairs = self.scope_agreement_columns
+        if not isinstance(pairs, tuple) or not all(
+                isinstance(p, tuple) and len(p) == 2 and all(isinstance(c, str) and c for c in p) for p in pairs):
+            raise RelationshipConfigurationError("scope_agreement_columns must be (parent, detail) name pairs")
+        if len(set(pairs)) != len(pairs):
+            raise RelationshipConfigurationError("scope_agreement_columns must be distinct")
+        for parent_column, detail_column in pairs:
+            for column, definition, keys in ((parent_column, parent, self.parent_key_columns),
+                                             (detail_column, detail, self.detail_key_columns)):
+                if column not in definition.columns:
+                    raise RelationshipConfigurationError(
+                        f"scope column must be a '{definition.key}' column", (column,))
+                if column in keys:
+                    raise RelationshipConfigurationError("scope column must not be a relationship key", (column,))
+
+    @property
+    def scope_parent_columns(self) -> tuple[str, ...]:
+        """Parent-side scope columns (in pair order)."""
+        return tuple(p for p, _ in self.scope_agreement_columns)
+
+    @property
+    def scope_detail_columns(self) -> tuple[str, ...]:
+        """Detail-side scope columns (in pair order)."""
+        return tuple(d for _, d in self.scope_agreement_columns)
 
     @property
     def expected_detail_count_columns(self) -> tuple[str, ...]:
@@ -478,6 +510,8 @@ class JobDetailRelationshipDefinition:
 #: Identifiers are compared verbatim, so the textual-form difference noted on
 #: the cars identifier above is reported as orphans/under-counts until an
 #: explicit normalisation step reconciles the two forms.
+#: Scope: a cars row repeats its job's ``city``; a linked row whose city differs
+#: from its parent job's (or either is missing/blank) breaks city integrity.
 JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
     parent=DatasetKey.JOBS,
     detail=DatasetKey.CARS,
@@ -485,6 +519,7 @@ JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
     detail_key_columns=('job_id',),
     expected_detail_count_column='record_count',
     additional_expected_count_columns=('actual_car_rows',),
+    scope_agreement_columns=(('city', 'city'),),
 )
 
 

@@ -41,6 +41,7 @@ from ql2_sixt_canada_analysis.unique_keys import assess_raw_dataset_unique_keys
 JOBS, CARS = DatasetKey.JOBS, DatasetKey.CARS
 REL = JOB_DETAIL_RELATIONSHIP
 MISSING = object()
+SCOPE = "SYNTH-CITY-1"   # every synthetic job and detail row shares one scope unless a test says otherwise
 
 # Synthetic composite relationship (two-component key) for composite tests.
 _SYNTH_PARENT = DatasetDefinition(
@@ -79,6 +80,8 @@ def _jobs(keys: list[object], expected: list[object], rel: JobDetailRelationship
                                      ("int64" if all(type(v) is int for v in values) else object))
         elif column in definition.identifier_columns:
             data[column] = pd.array([f"SYNTH-OTHER-{i}"] * len(rows), dtype=IDENTIFIER_DTYPE)
+        elif column in rel.scope_parent_columns:            # linked rows share their job's scope
+            data[column] = pd.Series([SCOPE] * len(rows), dtype=object)
         else:
             data[column] = pd.Series(["synthetic_placeholder"] * len(rows), dtype=object)
     return pd.DataFrame(data, columns=list(definition.columns))
@@ -95,6 +98,8 @@ def _cars(keys: list[object], rel: JobDetailRelationshipDefinition = REL) -> pd.
             data[column] = pd.array([None if r[pos] is MISSING else r[pos] for r in rows], dtype=IDENTIFIER_DTYPE)
         elif column in definition.identifier_columns:
             data[column] = pd.array([f"SYNTH-DETAIL-{n:03d}" for n in range(len(rows))], dtype=IDENTIFIER_DTYPE)
+        elif column in rel.scope_detail_columns:
+            data[column] = pd.Series([SCOPE] * len(rows), dtype=object)
         else:
             data[column] = pd.Series([float(i)] * len(rows), dtype="float64")
     return pd.DataFrame(data, columns=list(definition.columns))

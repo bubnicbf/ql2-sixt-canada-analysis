@@ -345,6 +345,43 @@ The project contract keys expected locations on authoritative
 These controls do not decide Vancouver identity (see the location policy
 below) and do not establish timestamp authority.
 
+### City scope integrity
+
+Branch coverage is evaluated from the detail (cars) rows, as above. The job
+city proves which city's collection a job belongs to, so two further
+invariants hold, defined once in `city_integrity.py`
+(`assess_city_integrity`, `CityIntegrityReport`):
+
+- **Every job city is assignable.** `unassignable_scope_mask` is the single
+  rule: a value is unassignable when it is missing, not a string, empty,
+  whitespace-only, or carries leading/trailing whitespace. No city
+  normalisation contract exists (the source's derived `city_clean` column
+  has no documented authority), so values are never trimmed, case-folded or
+  aliased - a padded city is non-canonical, not silently repaired.
+- **Linked job and detail rows agree on city.** Every detail row whose
+  complete key links to a job must carry exactly its job's city
+  (`JOB_DETAIL_RELATIONSHIP.scope_agreement_columns`, which must equal the
+  coverage contract's `parent_scope_columns` / `stream_scope_columns`). A
+  different city, or an unassignable value on either side, is a mismatch;
+  Vancouver and Calgary never compare equal. Orphan, missing-link and
+  duplicated-parent rows remain relationship failures; nothing is repaired,
+  dropped or re-assigned.
+
+A job with an unassignable city cannot simply be left out of every stream:
+which stream it belongs to cannot be proven, so it fails continuity for
+**every** scoped stream (`StreamContinuity.SCOPE_UNASSIGNABLE`, status
+`parent_scope_unassignable`). A cross-city row fails each stream it concerns
+(`parent_detail_scope_mismatch` at the `scope_agreement` stage) instead of
+being counted under its own city. Either defect also fails reconciliation
+(the counts may match, but `parent_detail_scope_mismatch` blocks
+`is_reconciled`), withholds the trusted join (`job_scope_unassignable` /
+`parent_detail_scope_mismatch`), blocks completeness and adds
+`scope_integrity_not_proven` to pricing readiness. The report holds counts,
+typed blockers and **bounded, sorted samples** (at most
+`CITY_INTEGRITY_SAMPLE_LIMIT`) of affected job keys and of mismatching rows
+(detail key, job key, both cities); the samples are confidential, excluded
+from `repr` and exception messages, and must never be printed or exported.
+
 ## Expected location stream investigation
 
 `investigate_location_stream(jobs_df, cars_df, target)` traces one expected
@@ -389,7 +426,8 @@ Continuity is counted over **jobs**, not detail rows: every job whose city
 (`parent_scope_columns`) matches the stream's city is in the denominator,
 including jobs with no detail rows. `event_accounting`
 (`StreamEventAccounting`) reconciles
-`total_jobs = scope_excluded + scope_unassignable + in_scope` and
+`total_jobs = scope_excluded + scope_unassignable + in_scope` (any
+`scope_unassignable` job fails continuity - see *City scope integrity*) and
 `in_scope = with the branch + other branches only + zero-offer + missing details`.
 Jobs carry only a city, so a job without linked detail rows cannot be
 assigned to a branch: a **zero-offer** capture (both declared counts valid
@@ -441,6 +479,10 @@ validate_job_detail_reconciliation(jobs_df, cars_df)          # raises JobDetail
   `JobDetailReconciliationError` listing violation categories only.
 - **Nothing is changed:** no rows are removed, deduplicated or altered, and
   nothing is written.
+- **City agreement:** every linked detail row must carry its job's
+  (assignable) city; a job with a cross-city row is not reconciled even when
+  its counts match (`parent_detail_scope_mismatch`, see *City scope
+  integrity*). `declared_counts_reconciled` reports the count part alone.
 - **Empty data:** empty jobs and empty details are vacuously reconciled
   (presence/volume is a separate control); empty jobs with any detail rows
   fail; jobs without detail rows pass only if every expected count is a
@@ -498,18 +540,23 @@ automatically adds it to the required assessment.
 
 ### Aggregate completeness
 
-`assess_completeness(datasets=..., coverage=..., streams=expected_streams_report, reconciliation=...)`
+`assess_completeness(datasets=..., coverage=..., streams=expected_streams_report, reconciliation=..., city_integrity=city_integrity_report)`
 takes the all-expected-stream aggregate (a plain tuple of reports is
 rejected) and is complete only when the source is complete, the city-branch
 coverage passes, the aggregate was built for the same contract
 (`expected_coverage`, default `EXPECTED_LOCATION_COVERAGE`), every expected
-stream is assessed exactly once and is healthy, and every declared count
-reconciles; a missing report or aggregate blocks. Each failure is a
+stream is assessed exactly once and is healthy, every declared count
+reconciles, and city scope integrity passes for the same contract (every job
+city assignable, every linked row in its job's city); a missing report or
+aggregate blocks (`scope_integrity_unavailable`,
+`scope_integrity_contract_mismatch`). Coverage, healthy streams and matching
+counts cannot override `job_scope_unassignable` or
+`parent_detail_scope_mismatch`. Each failure is a
 `CompletenessBlocker` (`source_not_complete`, `expected_pairs_missing`,
 `expected_stream_assessment_unavailable`, `stream_contract_mismatch`,
 `expected_stream_report_missing`, `stream_continuity_partial`,
 `declared_count_unreconciled`, ...). A `CompletenessReport` with no blockers
-cannot be constructed without a valid aggregate. Completeness is one
+cannot be constructed without a valid aggregate and valid city integrity. Completeness is one
 prerequisite only: it does not resolve timestamp authority, Vancouver
 location identity, key validity or stability, and does not make the
 airport-premium or any other pricing analysis ready.
@@ -567,9 +614,12 @@ result = join_jobs_to_details(jobs_df, cars_df)      # relationship-checked only
 ## Trusted job-detail join
 
 A relationship-valid join is not necessarily analytically trustworthy: a
-duplicated detail business key, a duplicated or incomplete jobs key, or
-declared job-level counts that disagree with the detail rows can all coexist
-with a passing one-to-many relationship, and pandas will still merge. A
+duplicated detail business key, a duplicated or incomplete jobs key,
+declared job-level counts that disagree with the detail rows, a job with an
+unassignable city or a detail row under another city than its job can all
+coexist with a passing one-to-many relationship, and pandas will still merge.
+The gate therefore also requires city scope integrity
+(`job_scope_unassignable`, `parent_detail_scope_mismatch`). A
 non-`None` DataFrame is never proof of analytical validity.
 
 ```python
@@ -839,7 +889,8 @@ evidence cannot be constructed.
 (complete source, city-branch coverage, **every** configured expected
 stream, declared counts - there are no separate booleans that could override
 it; `None` blocks as `completeness_unavailable`, a failure as
-`data_incomplete`, plus `expected_streams_not_proven` for stream failures)
+`data_incomplete`, plus `expected_streams_not_proven` for stream failures
+and `scope_integrity_not_proven` for city scope integrity failures)
 and every other foundational gate (key contracts, one-to-many relationship,
 temporal trust, vehicle stability, passed as the full-population
 `VehicleStabilityReport`) must pass, and the location policy must add no blocker. Each failure is a `PricingBlocker` (for example

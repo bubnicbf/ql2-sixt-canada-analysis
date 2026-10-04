@@ -22,6 +22,17 @@ primary column. :func:`job_detail_count_results` gives the per-job evidence
 (in memory only; identifiers are confidential). The comparison is per job, starting
 from the jobs side, so equal global totals can never hide offsetting errors.
 
+Scope agreement
+---------------
+When the relationship declares ``scope_agreement_columns`` (the project: the
+city), every linked detail row must carry its parent job's scope, and both
+values must be assignable (the single rule in
+:mod:`~ql2_sixt_canada_analysis.city_integrity`). A job with a disagreeing
+linked row is not reconciled, and the contract fails
+(``parent_detail_scope_mismatch``): matching counts are not trusted while a
+detail row may belong to another city's job. The comparison is exact; no
+value is normalised, aliased or repaired.
+
 Detail rows fall into exactly one of: **linked** (complete key matching a
 job), **missing link** (any key component missing; counted, never dropped)
 or **orphan** (complete key matching no job). Every detail row present is
@@ -75,6 +86,7 @@ from dataclasses import dataclass, fields
 import numpy as np
 import pandas as pd
 
+from ql2_sixt_canada_analysis.city_integrity import scope_agreement
 from ql2_sixt_canada_analysis.relationships import (
     RelationshipPreconditionError,
     _check_relationship_inputs,
@@ -172,6 +184,9 @@ class JobDetailReconciliationReport:
     declared_counts_disagree_job_count: int = 0
     reconciled_job_count: int = 0
     preconditions_satisfied: bool = True
+    #: Linked detail rows (and their jobs) whose scope disagrees with the parent's.
+    scope_mismatch_detail_row_count: int = 0
+    scope_mismatch_job_count: int = 0
 
     def __post_init__(self) -> None:
         # Programmer invariants; a violation is a bug in this module.
@@ -206,6 +221,9 @@ class JobDetailReconciliationReport:
                                                     + field_report.under_counted_job_count
                                                     + field_report.over_counted_job_count)
         assert self.reconciled_job_count <= self.job_count
+        assert self.scope_mismatch_detail_row_count <= self.linked_detail_row_count
+        assert self.scope_mismatch_job_count <= self.job_count
+        assert (self.scope_mismatch_detail_row_count == 0) == (self.scope_mismatch_job_count == 0)
 
     @property
     def invalid_expected_count_job_count(self) -> int:
@@ -234,12 +252,22 @@ class JobDetailReconciliationReport:
         return all(f.reconciled for f in self.count_fields)
 
     @property
-    def is_reconciled(self) -> bool:
-        """The full contract: every declaration valid and matched, agreeing, every detail linked."""
+    def parent_detail_scope_agrees(self) -> bool:
+        """Every linked detail row carries its parent job's (assignable) scope."""
+        return self.scope_mismatch_detail_row_count == 0
+
+    @property
+    def declared_counts_reconciled(self) -> bool:
+        """The count part of the contract: every declaration valid, matched and agreeing; all linked."""
         return (self.preconditions_satisfied and self.all_expected_counts_valid
                 and self.all_valid_jobs_reconciled and self.all_count_fields_reconciled
-                and self.declared_counts_agree and self.reconciled_job_count == self.job_count
-                and self.all_details_linked)
+                and self.declared_counts_agree and self.all_details_linked)
+
+    @property
+    def is_reconciled(self) -> bool:
+        """The full contract: counts reconciled for every job and parent/detail scope agreement."""
+        return (self.declared_counts_reconciled and self.parent_detail_scope_agrees
+                and self.reconciled_job_count == self.job_count)
 
     @property
     def violations(self) -> tuple[str, ...]:
@@ -253,6 +281,7 @@ class JobDetailReconciliationReport:
             ("declared_counts_disagree", self.declared_counts_disagree_job_count),
             ("missing_link", self.missing_link_detail_row_count),
             ("orphan_detail", self.orphan_detail_row_count),
+            ("parent_detail_scope_mismatch", self.scope_mismatch_detail_row_count),
         )
         return tuple(name for name, count in checks if count)
 
@@ -302,7 +331,7 @@ def assess_job_detail_reconciliation(
         ReconciliationPreconditionError: See the module docstring.
     """
     _check_relationship_inputs(jobs, cars, relationship, ReconciliationPreconditionError,
-                               require_expected_count=True)
+                               require_expected_count=True, require_scope=True)
     count_column = relationship.expected_detail_count_column
 
     # --- expected counts (temporary arrays; source untouched)
@@ -313,7 +342,8 @@ def assess_job_detail_reconciliation(
     linkage = _link_detail_rows(jobs, cars, relationship)
     observed = linkage.observed_per_parent  # left from jobs: every job, zero when none
     difference = observed[valid] - expected[valid]
-    per_job = _per_job(jobs, observed, relationship)
+    agreement = scope_agreement(jobs, cars, relationship)
+    per_job = _per_job(jobs, observed, relationship, agreement.parent_mismatch)
 
     return JobDetailReconciliationReport(
         job_count=len(jobs),
@@ -338,6 +368,8 @@ def assess_job_detail_reconciliation(
         count_fields=per_job.field_reports,
         declared_counts_disagree_job_count=int((~per_job.agree & per_job.all_valid).sum()),
         reconciled_job_count=int(per_job.reconciled.sum()),
+        scope_mismatch_detail_row_count=int(agreement.detail_mismatch.sum()),
+        scope_mismatch_job_count=int(agreement.parent_mismatch.sum()),
     )
 
 
@@ -351,13 +383,14 @@ def job_detail_count_results(
     One row per job (zero-detail jobs included, observed ``0``), sorted by the
     parent key: the key columns, ``observed_detail_count``, each declared-count
     column as given, ``<column>_valid`` and ``<column>_matches`` per
-    declaration, ``declared_counts_agree`` and ``job_reconciled``. Holds
+    declaration, ``declared_counts_agree``, ``scope_agrees`` and ``job_reconciled``. Holds
     confidential identifiers: never print, log or persist it.
     """
     _check_relationship_inputs(jobs, cars, relationship, ReconciliationPreconditionError,
-                               require_expected_count=True)
+                               require_expected_count=True, require_scope=True)
     observed = _link_detail_rows(jobs, cars, relationship).observed_per_parent
-    per_job = _per_job(jobs, observed, relationship)
+    mismatch = scope_agreement(jobs, cars, relationship).parent_mismatch
+    per_job = _per_job(jobs, observed, relationship, mismatch)
     frame = jobs.loc[:, list(relationship.parent_key_columns)].copy()
     frame["observed_detail_count"] = observed
     for column in relationship.expected_detail_count_columns:
@@ -365,6 +398,7 @@ def job_detail_count_results(
         frame[f"{column}_valid"] = per_job.valid[column]
         frame[f"{column}_matches"] = per_job.matches[column]
     frame["declared_counts_agree"] = per_job.agree
+    frame["scope_agrees"] = ~mismatch
     frame["job_reconciled"] = per_job.reconciled
     keys = list(relationship.parent_key_columns)
     return frame.sort_values(keys, kind="mergesort", na_position="last").reset_index(drop=True)
@@ -395,8 +429,12 @@ class _PerJob:
     field_reports: tuple[DeclaredCountFieldReport, ...]
 
 
-def _per_job(jobs: pd.DataFrame, observed: np.ndarray, relationship: JobDetailRelationshipDefinition) -> _PerJob:
-    """Independent per-declaration validity/match flags, agreement and job result."""
+def _per_job(jobs: pd.DataFrame, observed: np.ndarray, relationship: JobDetailRelationshipDefinition,
+             scope_mismatch: np.ndarray | None = None) -> _PerJob:
+    """Independent per-declaration validity/match flags, agreement and job result.
+
+    A job with a scope-disagreeing linked detail row is never reconciled.
+    """
     valid, matches, values, reports = {}, {}, [], []
     for column in relationship.expected_detail_count_columns:
         category, expected = _classify_expected_counts(jobs[column])
@@ -417,6 +455,8 @@ def _per_job(jobs: pd.DataFrame, observed: np.ndarray, relationship: JobDetailRe
     stacked = np.vstack(values) if values else np.zeros((1, len(jobs)), dtype=np.int64)
     agree = all_valid & (stacked == stacked[0]).all(axis=0)
     reconciled = np.logical_and.reduce([matches[c] for c in matches]) & agree
+    if scope_mismatch is not None:
+        reconciled = reconciled & ~scope_mismatch
     return _PerJob(valid=valid, matches=matches, all_valid=all_valid, agree=agree, reconciled=reconciled,
                    field_reports=tuple(reports))
 

@@ -246,18 +246,25 @@ def _check_relationship_inputs(
     relationship: object,
     error_type: type[RelationshipPreconditionError] = RelationshipPreconditionError,
     require_expected_count: bool = False,
+    require_scope: bool = False,
 ) -> JobDetailRelationshipDefinition:
-    """Shared configuration and precondition checks (used by reconciliation too)."""
+    """Shared configuration and precondition checks (used by reconciliation too).
+
+    ``require_scope`` also requires the relationship's scope-agreement columns.
+    """
     if not isinstance(jobs, pd.DataFrame) or not isinstance(cars, pd.DataFrame):
         raise TypeError("jobs and cars must be pandas DataFrames")
     if not isinstance(relationship, JobDetailRelationshipDefinition):
         raise TypeError(f"expected a JobDetailRelationshipDefinition, got {type(relationship).__name__}")
     parent_keys, detail_keys = relationship.parent_key_columns, relationship.detail_key_columns
     extra_parent_columns = relationship.expected_detail_count_columns if require_expected_count else ()
+    if require_scope:
+        extra_parent_columns = (*extra_parent_columns, *relationship.scope_parent_columns)
+    extra_detail_columns = relationship.scope_detail_columns if require_scope else ()
     if len(parent_keys) != len(detail_keys):  # guards definitions altered after construction
         raise RelationshipConfigurationError("parent and detail keys must have equal length")
     for frame, columns, role in ((jobs, (*parent_keys, *extra_parent_columns), relationship.parent),
-                                 (cars, detail_keys, relationship.detail)):
+                                 (cars, (*detail_keys, *extra_detail_columns), relationship.detail)):
         absent = tuple(c for c in columns if c not in frame.columns)
         if absent:
             raise RelationshipConfigurationError(

@@ -13,6 +13,7 @@ from test_completeness import CITY, J1, J2, J3, cars, jobs, reconcile
 from test_readiness import GATES, assess_location_policy
 
 import ql2_sixt_canada_analysis
+from ql2_sixt_canada_analysis.city_integrity import assess_city_integrity
 from ql2_sixt_canada_analysis.coverage import assess_expected_location_coverage
 from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.readiness import (
@@ -57,7 +58,8 @@ def healthy():  # type: ignore[no-untyped-def]
 def completeness(j, c, streams, coverage=COV3):  # type: ignore[no-untyped-def]
     return assess_completeness(datasets=RawDatasets(jobs=j, cars=c, complete_source=True),
                                coverage=assess_expected_location_coverage(c, coverage),
-                               streams=streams, reconciliation=reconcile(j, c), expected_coverage=coverage)
+                               streams=streams, reconciliation=reconcile(j, c),
+                               city_integrity=assess_city_integrity(j, c, coverage=coverage), expected_coverage=coverage)
 
 
 def pricing(report):  # type: ignore[no-untyped-def]
@@ -155,7 +157,10 @@ def test_detail_pairs_without_a_parent_job_in_their_city_are_not_complete():
     coverage_report = assess_expected_location_coverage(c, COV3)
     assert coverage_report.is_valid                                          # rows cover every pair...
     agg = assess_expected_location_streams(j, c, coverage=COV3)
-    assert agg.reports[TA].is_healthy
+    # The CITY job carries CITY2 rows: a cross-city parent/detail assignment, so even
+    # the first stream fails (it used to pass on its own).
+    assert agg.reports[TA].parent_detail_scope_agrees is False and not agg.reports[TA].is_healthy
+    assert EB.STREAM_SCOPE_MISMATCH in agg.blocking_reasons
     for key in (TB, TC):                                                     # ...but no job-level stream
         assert agg.reports[key].stream_continuity is StreamContinuity.UNASSESSABLE
         assert agg.reports[key].event_accounting.in_scope_jobs == 0

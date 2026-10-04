@@ -64,7 +64,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # Cells that are required to report categorical gate results and aggregate
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
-REPORTING_STEPS = ("assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+REPORTING_STEPS = ("assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
                    "investigate_location_stream(", "assess_completeness(")
@@ -504,8 +504,11 @@ def test_ingestion_notebook_reports_blocked_join_on_duplicate_detail_keys(tmp_pa
     position, = rel.detail_definition.non_identifier_key_columns
     directory = tmp_path / "raw"
     directory.mkdir()
-    rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", **{c: "2" for c in rel.expected_detail_count_columns}}],
-            DatasetKey.CARS: [{rel.detail_key_columns[0]: "SYNTH-JOB-001", position: "0"}] * 2}  # duplicate key
+    (parent_city, detail_city), = rel.scope_agreement_columns              # linked rows share their job's city
+    rows = {DatasetKey.JOBS: [{rel.parent_key_columns[0]: "SYNTH-JOB-001", parent_city: "SYNTH-CITY-1",
+                               **{c: "2" for c in rel.expected_detail_count_columns}}],
+            DatasetKey.CARS: [{rel.detail_key_columns[0]: "SYNTH-JOB-001", position: "0",
+                               detail_city: "SYNTH-CITY-1"}] * 2}  # duplicate key
     for key, key_rows in rows.items():
         columns = DATASET_DEFINITIONS[key].columns
         lines = [",".join(r.get(c, f"synthetic_{i}_{n}") for i, c in enumerate(columns))
@@ -991,7 +994,7 @@ def test_ingestion_notebook_gates_completeness_through_the_api() -> None:
     # The all-expected-stream aggregate, never a hand-picked subset (a single Calgary
     # report used to be passed, so other expected streams could fail unnoticed).
     for argument in ("datasets=cleaned", "coverage=location_coverage_report", "streams=expected_streams_report",
-                     "reconciliation=reconciliation_report"):
+                     "reconciliation=reconciliation_report", "city_integrity=city_integrity_report"):
         assert argument in cell
     assert "streams=(location_stream_report,)" not in code
     expected = next(s for s in sources if "assess_expected_location_streams(" in s)
@@ -1073,6 +1076,87 @@ def test_ingestion_notebook_blocks_when_one_expected_stream_is_partial(tmp_path:
     pricing = _step_output(result, "assess_pricing_readiness(")
     assert "Pricing analysis ready: False" in pricing
     assert PricingBlocker.EXPECTED_STREAMS_NOT_PROVEN.value in pricing
+    assert list(workdir.iterdir()) == []
+
+
+def test_ingestion_notebook_assesses_city_integrity_through_the_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    assert re.search(r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bassess_city_integrity\b", code, re.S)
+    cell = next(s for s in sources if "assess_city_integrity(" in s)
+    assert re.search(r"^city_integrity_report\s*=\s*assess_city_integrity\(", cell, re.M)
+    assert "coverage=EXPECTED_LOCATION_COVERAGE" in cell and "city_integrity_valid" in cell
+    assert "_sample" not in code                                  # identifiers never printed
+    order = [next(i for i, s in enumerate(sources) if call in s) for call in (
+        "assess_city_integrity(", "assess_job_detail_join_readiness(", "assess_completeness(",
+        "assess_pricing_readiness(")]
+    assert order == sorted(order)
+    join = sources[order[1]]
+    assert "job_detail_join.city_integrity_valid != city_integrity_valid" in join
+    assert "city_integrity=city_integrity_report" in sources[order[2]]
+    guidance = next(c.source for c in notebook.cells if c.source.startswith("## Next step"))
+    assert "city_integrity_valid" in guidance
+
+
+@pytest.mark.parametrize("defect", ["cross_city_row", "blank_job_city"])
+def test_ingestion_notebook_blocks_on_city_integrity_defects(defect: str, tmp_path: Path) -> None:
+    # Regression: coverage, all three streams and the declared counts passed while a
+    # detail row sat under another city than its job, or a job's city was blank.
+    from ql2_sixt_canada_analysis.city_integrity import CityIntegrityBlocker
+    from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    city_col, label_col = EXPECTED_LOCATION_COVERAGE.location_columns
+    parent_city, = EXPECTED_LOCATION_COVERAGE.parent_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city1, label1) = INVESTIGATED_LOCATION_STREAM
+    (city2, label2), (_, label3) = COMPARED_LOCATION_STREAMS
+    job_rows = [("SYNTH-JOB-001", city1, "1"), ("SYNTH-JOB-002", city2, "2")]
+    detail_rows = [("SYNTH-JOB-001", city1, label1), ("SYNTH-JOB-002", city2, label2),
+                   ("SYNTH-JOB-002", city2, label3)]
+    if defect == "cross_city_row":
+        job_rows.append(("SYNTH-JOB-003", city1, "2"))
+        detail_rows += [("SYNTH-JOB-003", city1, label1), ("SYNTH-JOB-003", city2, label2)]
+        expected = CityIntegrityBlocker.PARENT_DETAIL_CITY_MISMATCH
+    else:
+        job_rows.append(("SYNTH-JOB-003", "   ", "0"))
+        expected = CityIntegrityBlocker.CITY_SCOPE_UNASSIGNABLE
+    jobs = [{rel.parent_key_columns[0]: job, parent_city: city, **{c: n for c in rel.expected_detail_count_columns}}
+            for job, city, n in job_rows]
+    cars = [{rel.detail_key_columns[0]: job, position: str(i), city_col: city, label_col: label}
+            for i, (job, city, label) in enumerate(detail_rows)]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    integrity = _step_output(result, "assess_city_integrity(")
+    lines = dict(line.split(":", 1) for line in integrity.splitlines() if ":" in line)
+    assert lines["Scope integrity passed"].strip() == "False"
+    assert expected.value in lines["Scope integrity blocked by"]
+    assert lines["Jobs with unassignable scope"].strip() == ("1" if defect == "blank_job_city" else "0")
+    assert lines["Linked detail rows disagreeing with their parent scope"].strip() == (
+        "1" if defect == "cross_city_row" else "0")
+    join = _step_output(result, "assess_job_detail_join_readiness(")
+    assert "Trusted join ready: False" in join and "Scope integrity passed: False" in join
+    assert JobDetailJoinBlocker(expected.value).value in join
+    assert "Joined frame held: diagnostic only - UNTRUSTED" in join
+    complete = _step_output(result, "assess_completeness(")
+    assert "Overall completeness: not proven" in complete and expected.value in complete
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    assert "Pricing analysis ready: False" in pricing
+    assert PricingBlocker.SCOPE_INTEGRITY_NOT_PROVEN.value in pricing
+    shown = integrity + join + complete + pricing
+    assert "SYNTH" not in shown and not any(v in shown for v in (label1, label2, label3))
     assert list(workdir.iterdir()) == []
 
 

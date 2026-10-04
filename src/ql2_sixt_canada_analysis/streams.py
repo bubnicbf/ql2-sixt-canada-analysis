@@ -26,7 +26,12 @@ single primary :class:`LocationStreamStatus`:
    details are missing makes branch continuity unprovable ->
    ``CONTINUITY_UNASSESSABLE``; no branch is invented for them. No in-scope
    job, or no ``parent_scope_columns``, is also unassessable. This compares
-   actual jobs; it does not infer a cadence.
+   actual jobs; it does not infer a cadence. Any job whose scope (city) is
+   *unassignable* - missing, blank, whitespace-only or padded, as defined once
+   by :func:`~ql2_sixt_canada_analysis.city_integrity.unassignable_scope_mask`
+   - fails continuity for **every** scoped stream (``SCOPE_UNASSIGNABLE``):
+   the stream it belongs to cannot be proven, so it may not silently drop out
+   of all of them, and no city is guessed for it.
 5. ``TIME_COVERAGE`` - only with an authoritative
    :class:`~ql2_sixt_canada_analysis.schemas.CollectionScheduleDefinition`;
    otherwise temporal completeness is ``NOT_ASSESSED``. Observed collection
@@ -39,6 +44,12 @@ single primary :class:`LocationStreamStatus`:
    naive values are never read as UTC).
 6. ``IDENTIFIER_TYPES`` / ``PARENT_KEYS`` - relationship keys use the
    identifier dtype and the parent (jobs) key is complete and unique.
+   ``SCOPE_AGREEMENT`` - every linked detail row that concerns the stream (a
+   target row, a row of the target's scope, or a row of a job in that scope)
+   carries the same assignable scope as its parent job
+   (``relationship.scope_agreement_columns``); otherwise
+   ``PARENT_DETAIL_SCOPE_MISMATCH``. A cross-city row is therefore never
+   counted under its own city in place of its parent's.
 7. ``RELATIONSHIP`` / ``DETAIL_PRESENCE`` / ``RECONCILIATION`` - target detail
    rows link to exactly one job (``RELATIONSHIP_LINK_FAILURE``), target jobs
    have details (``JOBS_PRESENT_DETAILS_ABSENT``) and the target's jobs
@@ -77,6 +88,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ql2_sixt_canada_analysis.city_integrity import check_scope_contract, scope_agreement, unassignable_scope_mask
 from ql2_sixt_canada_analysis.identifiers import is_identifier_dtype
 from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.reconciliation import _VALID, _classify_expected_counts, assess_job_detail_reconciliation
@@ -131,6 +143,8 @@ class LocationStreamStatus(StrEnum):
     JOBS_PRESENT_DETAILS_ABSENT = "jobs_present_details_absent"
     JOB_DETAIL_COUNT_MISMATCH = "job_detail_count_mismatch"
     CONTINUITY_UNASSESSABLE = "continuity_unassessable"
+    SCOPE_UNASSIGNABLE = "parent_scope_unassignable"
+    PARENT_DETAIL_SCOPE_MISMATCH = "parent_detail_scope_mismatch"
     SCHEDULED_TIME_ABSENT = "scheduled_time_absent"
     SCHEDULED_TIME_UNASSESSABLE = "scheduled_time_unassessable"
     STREAM_PRESENT_AND_HEALTHY = "stream_present_and_healthy"
@@ -148,6 +162,7 @@ class PipelineStage(StrEnum):
     TIME_COVERAGE = "time_coverage"
     IDENTIFIER_TYPES = "identifier_types"
     PARENT_KEYS = "parent_keys"
+    SCOPE_AGREEMENT = "scope_agreement"
     RELATIONSHIP = "relationship"
     DETAIL_PRESENCE = "detail_presence"
     RECONCILIATION = "reconciliation"
@@ -160,6 +175,7 @@ class StreamContinuity(StrEnum):
     COMPLETE = "complete"
     PARTIAL = "partial"
     UNASSESSABLE = "unassessable"       # in-scope jobs cannot be assigned to the branch
+    SCOPE_UNASSIGNABLE = "scope_unassignable"   # some job's scope (city) is unassignable
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +188,9 @@ class StreamEventAccounting:
     detail rows (a capture that returned no offers); missing-detail jobs
     declare a positive or invalid count but have no linked detail rows. Both
     have no branch identity and stay in the denominator.
+    ``scope_unassignable_jobs`` (missing, blank or non-canonical job scope)
+    belong to no proven scope; any of them fails continuity
+    (:attr:`StreamContinuity.SCOPE_UNASSIGNABLE`).
     """
 
     total_jobs: int
@@ -217,6 +236,7 @@ _UPSTREAM_STATUSES = frozenset({
     LocationStreamStatus.PARENT_KEY_VIOLATION, LocationStreamStatus.RELATIONSHIP_LINK_FAILURE,
     LocationStreamStatus.JOBS_PRESENT_DETAILS_ABSENT, LocationStreamStatus.JOB_DETAIL_COUNT_MISMATCH,
     LocationStreamStatus.SCHEDULED_TIME_ABSENT, LocationStreamStatus.CONTINUITY_UNASSESSABLE,
+    LocationStreamStatus.SCOPE_UNASSIGNABLE, LocationStreamStatus.PARENT_DETAIL_SCOPE_MISMATCH,
 })
 
 
@@ -248,6 +268,9 @@ class LocationStreamInvestigationReport:
     reconciliation_passes: bool | None
     relationship_passes: bool | None
     event_accounting: StreamEventAccounting | None = None
+    #: Linked rows concerning the stream agree with their parent's scope
+    #: (``None`` = not evaluated: no scope invariant or prerequisites failed).
+    parent_detail_scope_agrees: bool | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -351,6 +374,7 @@ def investigate_location_stream(
     if coverage.dataset not in frames:
         raise LocationCoverageConfigurationError("coverage dataset is not part of the relationship")
     schedule_field = _schedule_field(schedule, temporal, frames)
+    check_scope_contract(coverage, relationship)
     frame = frames[coverage.dataset]
     columns = coverage.location_columns
     absent = tuple(c for c in (*columns, *coverage.stream_scope_columns) if c not in frame.columns)
@@ -421,6 +445,11 @@ def investigate_location_stream(
     if not keys_ok:
         fail(PipelineStage.PARENT_KEYS, LocationStreamStatus.PARENT_KEY_VIOLATION)
 
+    # --- linked rows concerning the stream must carry their parent's scope
+    scope_agrees = _scope_agrees(jobs, frame, mask, coverage, relationship) if dtypes_ok else None
+    if scope_agrees is False:
+        fail(PipelineStage.SCOPE_AGREEMENT, LocationStreamStatus.PARENT_DETAIL_SCOPE_MISMATCH)
+
     # --- target jobs and details
     target_jobs, target_details, details_present, all_linked = _target_rows(
         jobs, cars, mask, coverage, relationship)
@@ -456,6 +485,7 @@ def investigate_location_stream(
         identifier_dtypes_valid=dtypes_ok, parent_keys_valid=keys_ok,
         target_details_present=details_present, target_details_all_linked=all_linked,
         reconciliation_passes=reconciled, relationship_passes=related, event_accounting=accounting,
+        parent_detail_scope_agrees=scope_agrees,
     )
 
 
@@ -481,6 +511,8 @@ class ExpectedStreamBlocker(StrEnum):
     EXPECTED_STREAM_REPORT_UNAVAILABLE = "expected_stream_report_unavailable"
     STREAM_CONTINUITY_PARTIAL = "stream_continuity_partial"
     STREAM_CONTINUITY_UNASSESSABLE = "stream_continuity_unassessable"
+    STREAM_SCOPE_UNASSIGNABLE = "stream_scope_unassignable"
+    STREAM_SCOPE_MISMATCH = "stream_parent_detail_scope_mismatch"
     EXPECTED_STREAM_UNHEALTHY = "expected_stream_unhealthy"
 
 
@@ -621,8 +653,12 @@ class ExpectedLocationStreamsReport:
                 continue
             if report.stream_continuity is StreamContinuity.PARTIAL:
                 found.add(B.STREAM_CONTINUITY_PARTIAL)
+            elif report.stream_continuity is StreamContinuity.SCOPE_UNASSIGNABLE:
+                found.add(B.STREAM_SCOPE_UNASSIGNABLE)
             elif report.stream_continuity is not StreamContinuity.COMPLETE:
                 found.add(B.STREAM_CONTINUITY_UNASSESSABLE)
+            if report.parent_detail_scope_agrees is False:
+                found.add(B.STREAM_SCOPE_MISMATCH)
             if not report.is_healthy:
                 found.add(B.EXPECTED_STREAM_UNHEALTHY)
         return tuple(b for b in B if b in found)
@@ -677,12 +713,14 @@ _TIME_FAILURES = {
 _CONTINUITY_FAILURES = {
     StreamContinuity.PARTIAL: LocationStreamStatus.RAW_STREAM_PARTIAL,
     StreamContinuity.UNASSESSABLE: LocationStreamStatus.CONTINUITY_UNASSESSABLE,
+    StreamContinuity.SCOPE_UNASSIGNABLE: LocationStreamStatus.SCOPE_UNASSIGNABLE,
 }
 
 _STATUS_BY_STAGE = {
     PipelineStage.SOURCE_CONTINUITY: LocationStreamStatus.RAW_STREAM_PARTIAL,
     PipelineStage.IDENTIFIER_TYPES: LocationStreamStatus.IDENTIFIER_TYPE_MISMATCH,
     PipelineStage.PARENT_KEYS: LocationStreamStatus.PARENT_KEY_VIOLATION,
+    PipelineStage.SCOPE_AGREEMENT: LocationStreamStatus.PARENT_DETAIL_SCOPE_MISMATCH,
     PipelineStage.RELATIONSHIP: LocationStreamStatus.RELATIONSHIP_LINK_FAILURE,
     PipelineStage.DETAIL_PRESENCE: LocationStreamStatus.JOBS_PRESENT_DETAILS_ABSENT,
     PipelineStage.RECONCILIATION: LocationStreamStatus.JOB_DETAIL_COUNT_MISMATCH,
@@ -761,7 +799,7 @@ def _continuity(jobs: pd.DataFrame, frame: pd.DataFrame, mask: pd.Series, covera
     target_scope = pd.MultiIndex.from_frame(
         frame.loc[mask.to_numpy(), list(scope)].astype(object).dropna().drop_duplicates(), names=names)
     job_scope = jobs.loc[:, list(parent_scope)].astype(object)
-    scope_missing = job_scope.isna().any(axis=1).to_numpy()
+    scope_missing = unassignable_scope_mask(jobs, parent_scope)   # the one definition (blank/padded included)
     in_scope = pd.MultiIndex.from_frame(job_scope, names=names).isin(target_scope) & ~scope_missing
 
     keys = [f"key_{i}" for i in range(len(parent_keys))]
@@ -791,13 +829,41 @@ def _continuity(jobs: pd.DataFrame, frame: pd.DataFrame, mask: pd.Series, covera
         zero_offer_jobs=int((in_scope & ~has_details & declared_zero).sum()),
         missing_detail_jobs=int((in_scope & ~has_details & ~declared_zero).sum()),
     )
-    if accounting.jobs_with_other_details_only:
+    if accounting.scope_unassignable_jobs:
+        status = StreamContinuity.SCOPE_UNASSIGNABLE          # denominator itself unproven
+    elif accounting.jobs_with_other_details_only:
         status = StreamContinuity.PARTIAL                     # proven absence in an observed event
     elif accounting.in_scope_jobs == 0 or accounting.zero_detail_jobs:
         status = StreamContinuity.UNASSESSABLE                # branch presence unprovable
     else:
         status = StreamContinuity.COMPLETE
     return status, accounting
+
+
+def _scope_agrees(jobs: pd.DataFrame, frame: pd.DataFrame, mask: pd.Series, coverage: LocationCoverageDefinition,
+                  relationship: JobDetailRelationshipDefinition) -> bool | None:
+    """Do linked rows concerning the target agree with their parent's scope? (``None`` = not applicable).
+
+    Concerning the target: a target row, a row whose own scope is the
+    target's, or a row linked to a job of the target's scope. Uses the shared
+    :func:`~ql2_sixt_canada_analysis.city_integrity.scope_agreement` rule.
+    """
+    if not relationship.scope_agreement_columns or coverage.dataset != relationship.detail:
+        return None
+    agreement = scope_agreement(jobs, frame, relationship)
+    if not agreement.detail_mismatch.any():
+        return True
+    names = [f"scope_{i}" for i in range(len(relationship.scope_detail_columns))]
+    target_rows = mask.to_numpy()
+    detail_scope = pd.MultiIndex.from_frame(
+        frame.loc[:, list(relationship.scope_detail_columns)].astype(object), names=names)
+    target_scope = detail_scope[target_rows].unique()
+    parent_scope = pd.MultiIndex.from_frame(
+        jobs.loc[:, list(relationship.scope_parent_columns)].astype(object), names=names)
+    concerned_rows = target_rows | detail_scope.isin(target_scope)
+    concerned_jobs = parent_scope.isin(target_scope)
+    return not (bool((agreement.detail_mismatch & concerned_rows).any())
+                or bool((agreement.parent_mismatch & concerned_jobs).any()))
 
 
 def _target_rows(jobs: pd.DataFrame, cars: pd.DataFrame, mask: pd.Series,

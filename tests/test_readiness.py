@@ -69,6 +69,7 @@ UNSTABLE_AND_PARTIAL = assess_vehicle_attribute_stability(stability_frame([
 COMPLETE = assess_completeness(**complete_inputs())
 INCOMPLETE = assess_completeness(**(complete_inputs() | {"reconciliation": None}))       # data, not streams
 STREAMS_INCOMPLETE = assess_completeness(**(complete_inputs() | {"streams": None}))       # stream population
+STREAMS_AND_SCOPE_INCOMPLETE = assess_completeness(**(complete_inputs() | {"streams": None, "city_integrity": None}))
 GATES = dict(completeness=COMPLETE, key_contracts_valid=True, one_to_many_contract_valid=True,
              temporal_fields_trusted=True, vehicle_stability=STABLE)
 FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE}
@@ -453,7 +454,7 @@ def test_each_foundational_gate_blocks_alone(gate):
 def test_all_failures_are_reported_together():
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(),
                                          **(FAILING | {"vehicle_stability": UNSTABLE_AND_PARTIAL,
-                                                       "completeness": STREAMS_INCOMPLETE}))
+                                                       "completeness": STREAMS_AND_SCOPE_INCOMPLETE}))
     assert set(readiness.blocking_reasons) == set(B) - {B.ALIAS_CANONICALIZATION_NOT_APPLIED,
                                                         B.IDENTITY_EVIDENCE_CONFLICT,
                                                         B.VEHICLE_STABILITY_UNAVAILABLE,

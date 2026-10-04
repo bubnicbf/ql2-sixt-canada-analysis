@@ -17,6 +17,7 @@ from conftest import contract_columns, write_synthetic_csv
 
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis import ingestion
+from ql2_sixt_canada_analysis.city_integrity import assess_city_integrity
 from ql2_sixt_canada_analysis.coverage import assess_expected_location_coverage, location_pair_evidence
 from ql2_sixt_canada_analysis.ingestion import (
     SAFE_ON_BAD_LINES,
@@ -372,7 +373,7 @@ def complete_inputs():  # type: ignore[no-untyped-def]
     datasets = RawDatasets(jobs=j, cars=c, complete_source=True)
     return dict(datasets=datasets, coverage=assess_expected_location_coverage(c, SYNTH_COV),
                 streams=assess_expected_location_streams(j, c, coverage=SYNTH_COV), reconciliation=reconcile(j, c),
-                expected_coverage=SYNTH_COV)
+                city_integrity=assess_city_integrity(j, c, coverage=SYNTH_COV), expected_coverage=SYNTH_COV)
 
 
 def test_completeness_passes_only_when_every_control_passes():
@@ -407,7 +408,7 @@ def test_misassigned_pair_zero_detail_job_and_secondary_mismatch_all_block_toget
         datasets=RawDatasets(jobs=j, cars=c, complete_source=True),
         coverage=assess_expected_location_coverage(c, COV),
         streams=assess_expected_location_streams(j, c, coverage=COV),
-        reconciliation=reconcile(j, c))
+        reconciliation=reconcile(j, c), city_integrity=assess_city_integrity(j, c))
     assert not report.complete
     assert {CB.EXPECTED_PAIRS_MISSING, CB.DECLARED_COUNT_UNRECONCILED, CB.DECLARED_COUNTS_DISAGREE} <= set(
         report.blocking_reasons)

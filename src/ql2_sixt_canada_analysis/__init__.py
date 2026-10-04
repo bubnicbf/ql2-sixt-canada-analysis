@@ -125,6 +125,16 @@ from ql2_sixt_canada_analysis.streams import (
     resolve_expected_location,
     validate_location_stream,
 )
+from ql2_sixt_canada_analysis.city_integrity import (
+    CITY_INTEGRITY_SAMPLE_LIMIT,
+    CityIntegrityBlocker,
+    CityIntegrityError,
+    CityIntegrityReport,
+    ScopeMismatchSample,
+    assess_city_integrity,
+    unassignable_scope_mask,
+    validate_city_integrity,
+)
 from ql2_sixt_canada_analysis.join_readiness import (
     JobDetailJoinBlocker,
     JobDetailJoinReadiness,
@@ -181,6 +191,14 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "CITY_INTEGRITY_SAMPLE_LIMIT",
+    "CityIntegrityBlocker",
+    "CityIntegrityError",
+    "CityIntegrityReport",
+    "ScopeMismatchSample",
+    "assess_city_integrity",
+    "unassignable_scope_mask",
+    "validate_city_integrity",
     "ExpectedLocationStreamsReport",
     "ExpectedStreamBlocker",
     "ExpectedStreamResult",
