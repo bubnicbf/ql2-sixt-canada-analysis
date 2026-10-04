@@ -1191,6 +1191,9 @@ class LocationPolicyState(StrEnum):
 
     Behavioural evidence (for example a likely-duplicate comparison result)
     never selects a state; only configuration backed by authority does.
+    Authoritative identity evidence can make a resolved state unusable
+    without changing it: a ``LOCATION_MAPPING_DEFECT`` contradicts both
+    resolved states (see :func:`ql2_sixt_canada_analysis.readiness.assess_location_policy`).
     """
 
     UNRESOLVED = "unresolved"

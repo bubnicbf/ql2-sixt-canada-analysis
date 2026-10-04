@@ -15,6 +15,15 @@ configured, authority-backed
 **not** evidence that the labels are distinct; only
 ``locations_comparable_independently`` grants that.
 
+Authoritative identity evidence can *contradict* a resolved policy (it never
+selects one). ``LOCATION_MAPPING_DEFECT`` - conflicting authoritative
+identity values within one stream - contradicts both ``CONFIRMED_ALIAS`` and
+``CONFIRMED_DISTINCT``: the configured decision stays recorded
+(``location_policy_resolved``) but is not ``location_policy_authority_sufficient``,
+neither permission is granted and pricing is blocked until the source mapping
+is corrected or authoritatively reconciled. Behavioural similarity cannot
+override it.
+
 :func:`assess_pricing_readiness` combines the policy with every existing
 foundational gate. Pricing is ready only when *all* pass; each failure is
 reported as a :class:`PricingBlocker`. The location gate never overrides
@@ -27,8 +36,10 @@ are kept alongside for lineage. Frames are never modified.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 
 import pandas as pd
 
@@ -82,13 +93,42 @@ class PricingBlocker(StrEnum):
     IDENTITY_EVIDENCE_CONFLICT = "identity_evidence_conflicts_with_policy"
 
 
-_CONFLICTING_EVIDENCE = {
+#: Authoritative identity evidence that contradicts *every* resolved policy.
+#: ``LOCATION_MAPPING_DEFECT`` means the authoritative identity columns hold
+#: several different physical-location identities *within* one stream. That is
+#: evidence for neither aliasing nor distinctness: whichever decision was
+#: configured, the source mapping it would be applied to is itself broken, so
+#: neither alias grouping nor independent comparison is safe until the mapping
+#: is corrected or authoritatively reconciled. Behavioural statuses (likely
+#: duplicate / likely distinct / inconclusive / insufficient captures / absent
+#: streams) are deliberately absent: they are never authority.
+_RESOLVED_POLICY_CONFLICTS: frozenset[LocationStreamComparisonStatus] = frozenset({
+    LocationStreamComparisonStatus.LOCATION_MAPPING_DEFECT,
+})
+
+#: Authoritative identity evidence that contradicts one specific resolved state
+#: (in addition to :data:`_RESOLVED_POLICY_CONFLICTS`). Read-only.
+_STATE_SPECIFIC_CONFLICTS: Mapping[LocationPolicyState, frozenset[LocationStreamComparisonStatus]] = MappingProxyType({
     LocationPolicyState.CONFIRMED_ALIAS: frozenset({LocationStreamComparisonStatus.CONFIRMED_DISTINCT_LOCATIONS}),
     LocationPolicyState.CONFIRMED_DISTINCT: frozenset({
         LocationStreamComparisonStatus.CONFIRMED_ALIAS,
         LocationStreamComparisonStatus.DUPLICATED_COLLECTION_CONFIGURATION,
     }),
-}
+})
+
+
+def _identity_evidence_conflicts(state: LocationPolicyState,
+                                 evidence: LocationStreamComparisonStatus | None) -> bool:
+    """Whether authoritative identity evidence contradicts the configured decision.
+
+    Only a resolved state is a decision that evidence can contradict; an
+    ``UNRESOLVED`` policy has nothing to contradict (it already blocks pricing
+    as unresolved), so this is ``False`` there even for a mapping defect -
+    which stays visible as the report's recorded evidence.
+    """
+    if state is LocationPolicyState.UNRESOLVED or evidence is None:
+        return False
+    return evidence in _RESOLVED_POLICY_CONFLICTS or evidence in _STATE_SPECIFIC_CONFLICTS.get(state, frozenset())
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -117,7 +157,14 @@ class AnalyticalLocationKeys:
 
 @dataclass(frozen=True, slots=True)
 class LocationPolicyReport:
-    """Explicit identity-policy state and derived permissions (no location values)."""
+    """Explicit identity-policy state and derived permissions (no location values).
+
+    ``behavioral_evidence`` is the comparison status recorded as evidence
+    (behavioural or authoritative-identity); it never changes ``state``.
+    ``identity_evidence_conflict`` must equal the centralised conflict rule
+    for ``state`` and that evidence - a report claiming otherwise is rejected,
+    so a mapping defect cannot be hidden by constructing or replacing a report.
+    """
 
     state: LocationPolicyState
     authority: LocationPolicyAuthority | None
@@ -125,14 +172,39 @@ class LocationPolicyReport:
     identity_evidence_conflict: bool
     canonicalization_applied: bool
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, LocationPolicyState):
+            raise TypeError("state must be a LocationPolicyState")
+        if self.behavioral_evidence is not None and not isinstance(
+                self.behavioral_evidence, LocationStreamComparisonStatus):
+            raise TypeError("behavioral_evidence must be a LocationStreamComparisonStatus or None")
+        if not isinstance(self.identity_evidence_conflict, bool) or not isinstance(self.canonicalization_applied, bool):
+            raise TypeError("identity_evidence_conflict and canonicalization_applied must be bools")
+        if self.identity_evidence_conflict != _identity_evidence_conflicts(self.state, self.behavioral_evidence):
+            raise ValueError("identity_evidence_conflict disagrees with the recorded identity evidence")
+
     @property
     def location_policy_resolved(self) -> bool:
-        """True only for an authority-backed CONFIRMED_ALIAS or CONFIRMED_DISTINCT."""
+        """An authority-backed CONFIRMED_ALIAS or CONFIRMED_DISTINCT decision is configured.
+
+        This records only that a decision exists; whether it may be *used* is
+        :attr:`location_policy_authority_sufficient`.
+        """
         return self.state is not LocationPolicyState.UNRESOLVED and self.authority is not None
 
     @property
+    def mapping_defect_indicated(self) -> bool:
+        """The recorded evidence is ``LOCATION_MAPPING_DEFECT`` (any policy state)."""
+        return self.behavioral_evidence is LocationStreamComparisonStatus.LOCATION_MAPPING_DEFECT
+
+    @property
     def location_policy_authority_sufficient(self) -> bool:
-        """Resolved, authority-backed and not contradicted by identity metadata."""
+        """Resolved and not contradicted by authoritative identity evidence.
+
+        A ``LOCATION_MAPPING_DEFECT`` contradicts every resolved state, so a
+        configured alias or distinct decision stays recorded (resolved) but is
+        not sufficient for analysis while the defect exists.
+        """
         return self.location_policy_resolved and not self.identity_evidence_conflict
 
     @property
@@ -220,8 +292,21 @@ def assess_location_policy(
 ) -> LocationPolicyReport:
     """Explicit policy permissions; ``comparison`` is recorded as evidence only.
 
-    Behavioural statuses never change the state. Authoritative identity
-    metadata in the comparison that contradicts a resolved policy blocks it.
+    The configured state is never changed by evidence. Behavioural statuses
+    neither resolve nor contradict a policy. Authoritative identity metadata
+    that contradicts a resolved policy sets ``identity_evidence_conflict``,
+    which makes the policy authority-insufficient, withdraws both permissions
+    and blocks pricing (``IDENTITY_EVIDENCE_CONFLICT``):
+
+    * ``LOCATION_MAPPING_DEFECT`` (conflicting identities within a stream)
+      contradicts **both** ``CONFIRMED_ALIAS`` and ``CONFIRMED_DISTINCT``;
+    * ``CONFIRMED_DISTINCT_LOCATIONS`` contradicts ``CONFIRMED_ALIAS``;
+    * ``CONFIRMED_ALIAS`` and ``DUPLICATED_COLLECTION_CONFIGURATION``
+      contradict ``CONFIRMED_DISTINCT``.
+
+    An ``UNRESOLVED`` policy reports no conflict (there is no decision to
+    contradict) and is blocked as unresolved; the evidence stays recorded.
+    Applied canonicalisation is recorded but never outweighs a conflict.
     """
     if not isinstance(policy, LocationIdentityPolicy):
         raise TypeError("policy must be a LocationIdentityPolicy")
@@ -230,7 +315,7 @@ def assess_location_policy(
     if analytical_keys is not None and not isinstance(analytical_keys, AnalyticalLocationKeys):
         raise TypeError("analytical_keys must be AnalyticalLocationKeys or None")
     evidence = comparison.status if comparison is not None else None
-    conflict = evidence in _CONFLICTING_EVIDENCE.get(policy.state, frozenset())
+    conflict = _identity_evidence_conflicts(policy.state, evidence)
     applied = (analytical_keys is not None and analytical_keys.policy == policy
                and analytical_keys.alias_mapping_applied)
     return LocationPolicyReport(state=policy.state, authority=policy.authority, behavioral_evidence=evidence,

@@ -790,10 +790,11 @@ readiness.ready, readiness.blocking_reasons
 Derived permissions on `LocationPolicyReport`:
 
 - `location_policy_resolved` - an authority-backed `CONFIRMED_ALIAS` or
-  `CONFIRMED_DISTINCT`.
+  `CONFIRMED_DISTINCT` decision is configured (recorded, not necessarily
+  usable).
 - `location_policy_authority_sufficient` - resolved and not contradicted by
   authoritative identity metadata in the comparison (a contradiction blocks
-  pricing as `identity_evidence_conflicts_with_policy`).
+  pricing as `identity_evidence_conflicts_with_policy`; see below).
 - `locations_are_aliases` - true only for a sufficient `CONFIRMED_ALIAS`.
   **False is not evidence that the locations are distinct.**
 - `locations_comparable_independently` - true only for a sufficient
@@ -802,6 +803,37 @@ Derived permissions on `LocationPolicyReport`:
   alias needs `apply_location_policy` keys built from that same policy;
   `analytical_keys` use the canonical location while `source_keys` keep the
   original labels for lineage and audit.
+
+**Authoritative evidence that contradicts a resolved policy.** Comparison
+evidence never selects a state, but authoritative identity evidence can
+contradict a configured one (`identity_evidence_conflict`):
+
+| Comparison evidence | Contradicts |
+| --- | --- |
+| `LOCATION_MAPPING_DEFECT` | **both** `CONFIRMED_ALIAS` and `CONFIRMED_DISTINCT` |
+| `CONFIRMED_DISTINCT_LOCATIONS` | `CONFIRMED_ALIAS` |
+| `CONFIRMED_ALIAS`, `DUPLICATED_COLLECTION_CONFIGURATION` | `CONFIRMED_DISTINCT` |
+
+`LOCATION_MAPPING_DEFECT` means the authoritative identity columns hold
+conflicting physical-location identities *within* one stream. That is
+evidence for neither aliasing nor distinctness - the mapping any decision
+would rest on is itself broken - so under it a configured decision stays
+recorded (`location_policy_resolved` is true, the state is not changed) but
+is **not** `location_policy_authority_sufficient`: neither alias grouping
+(`locations_are_aliases`) nor independent comparison
+(`locations_comparable_independently`) is permitted, applied canonicalisation
+stays recorded but does not help, and pricing is blocked as
+`identity_evidence_conflicts_with_policy` (alongside
+`alias_canonicalization_not_applied` when that also applies) until the source
+identity mapping is corrected or authoritatively reconciled. No identity
+value is chosen and no row is dropped. Behavioural statuses (likely
+duplicate, likely distinct, inconclusive, insufficient captures, absent
+streams) never create or override a conflict. An `UNRESOLVED` policy has no
+decision to contradict, so `identity_evidence_conflict` is false there; the
+defect stays visible as the recorded evidence (`mapping_defect_indicated`)
+and pricing is blocked as `vancouver_policy_unresolved`. A
+`LocationPolicyReport` whose conflict flag disagrees with its recorded
+evidence cannot be constructed.
 
 `assess_pricing_readiness` is fail closed: the `CompletenessReport`
 (complete source, city-branch coverage, **every** configured expected

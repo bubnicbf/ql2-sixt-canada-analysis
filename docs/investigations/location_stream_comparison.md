@@ -78,3 +78,9 @@ identical offers and identical prices do not prove physical identity.
   pricing readiness is blocked until an authority confirms an alias (with a
   canonical location) or distinct locations. This investigation's behavioural
   result does not resolve it.
+- Mapping defects (added later): if authoritative identity metadata becomes
+  available and a stream shows conflicting identities
+  (`LOCATION_MAPPING_DEFECT`), any configured alias or distinct decision stays
+  recorded but is not authority sufficient; neither alias grouping nor
+  independent comparison is permitted and pricing stays blocked until the
+  source mapping is corrected or authoritatively reconciled.

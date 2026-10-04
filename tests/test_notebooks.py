@@ -861,7 +861,7 @@ def test_ingestion_notebook_gates_pricing_on_the_vancouver_policy() -> None:
     assert order == sorted(order)
     cell = sources[order[-1]]
     for name in ("vancouver_location_policy_state", "vancouver_location_policy_resolved",
-                 "vancouver_locations_are_aliases", "vancouver_locations_comparable_independently",
+                 "vancouver_location_policy_authority_sufficient", "vancouver_locations_are_aliases", "vancouver_locations_comparable_independently",
                  "pricing_readiness", "pricing_analysis_ready"):
         assert re.search(rf"^{name}\s*=", cell, re.M), name
     # The single-stream health and separate completeness booleans no longer gate pricing:
@@ -893,6 +893,8 @@ def test_ingestion_notebook_reports_unresolved_policy_and_blocked_pricing(
     lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
     assert lines["Vancouver identity policy state"].strip() == "unresolved"
     assert lines["Policy authority-backed and resolved"].strip() == "False"
+    assert lines["Identity evidence conflicts with policy"].strip() == "False"
+    assert lines["Policy authority sufficient for analysis"].strip() == "False"
     assert lines["Vancouver labels confirmed aliases"].strip() == "False"
     assert lines["Vancouver labels comparable independently"].strip() == "False"
     assert lines["Canonicalization required"].strip() == "False | applied: False"
@@ -900,6 +902,81 @@ def test_ingestion_notebook_reports_unresolved_policy_and_blocked_pricing(
     assert PricingBlocker.LOCATION_POLICY_UNRESOLVED.value in lines["Pricing blocked by"]
     assert "SYNTH" not in outputs and "synthetic_r" not in outputs and not re.search(r"\d", outputs)
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+_POLICY_OVERRIDE = """\
+# Test-only kernel configuration (synthetic authority, never a real decision):
+# resolve the policy and give the comparison an authoritative identity column.
+import dataclasses
+
+import ql2_sixt_canada_analysis as package
+from ql2_sixt_canada_analysis.schemas import LocationPolicyAuthority, LocationPolicyState
+
+state = LocationPolicyState({state!r})
+package.VANCOUVER_LOCATION_POLICY = dataclasses.replace(
+    package.VANCOUVER_LOCATION_POLICY, state=state,
+    authority=LocationPolicyAuthority(source="SYNTH-AUTHORITY"),
+    canonical_location={canonical!r} if state is LocationPolicyState.CONFIRMED_ALIAS else None)
+package.LOCATION_STREAM_COMPARISON = dataclasses.replace(
+    package.LOCATION_STREAM_COMPARISON, identity_columns=({identity!r},))
+"""
+
+
+@pytest.mark.parametrize("state", ["confirmed_alias", "confirmed_distinct"])
+def test_ingestion_notebook_blocks_resolved_policy_on_mapping_defect(state: str, tmp_path: Path) -> None:
+    # Regression (P1): a resolved policy stayed sufficient - and pricing could become
+    # ready - although the comparison reported a location mapping defect. The notebook
+    # source is unchanged; only the kernel's configuration is overridden.
+    from test_comparison import ID_COL
+
+    from ql2_sixt_canada_analysis.readiness import PricingBlocker
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    city_col, label_col = EXPECTED_LOCATION_COVERAGE.location_columns
+    parent_city, = EXPECTED_LOCATION_COVERAGE.parent_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city, first), (_, second) = COMPARED_LOCATION_STREAMS
+    jobs = [{rel.parent_key_columns[0]: job, parent_city: city,
+             **{c: "2" for c in rel.expected_detail_count_columns}} for job in ("SYNTH-JOB-001", "SYNTH-JOB-002")]
+    # The first stream carries two different authoritative identities: a within-stream conflict.
+    identities = {("SYNTH-JOB-001", first): "SYNTH-SITE-1", ("SYNTH-JOB-002", first): "SYNTH-SITE-3",
+                  ("SYNTH-JOB-001", second): "SYNTH-SITE-2", ("SYNTH-JOB-002", second): "SYNTH-SITE-2"}
+    cars = [{rel.detail_key_columns[0]: job, position: str(i), city_col: city, label_col: label, ID_COL: site}
+            for i, ((job, label), site) in enumerate(identities.items())]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(_POLICY_OVERRIDE.format(
+        state=state, canonical=(city, "SYNTH-CANONICAL-BRANCH"), identity=ID_COL), encoding="utf-8")
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    pythonpath = os.pathsep.join(p for p in (str(site), os.environ.get("PYTHONPATH", "")) if p)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory), "PYTHONPATH": pythonpath})
+    comparison = _step_output(result, "compare_location_streams(")
+    assert "Behavioural comparison result: location_mapping_defect" in comparison
+    outputs = _step_output(result, "assess_pricing_readiness(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Vancouver identity policy state"].strip() == state       # decision stays recorded
+    assert lines["Policy authority-backed and resolved"].strip() == "True"
+    assert lines["Identity evidence conflicts with policy"].strip() == "True"
+    assert lines["Policy authority sufficient for analysis"].strip() == "False"
+    assert lines["Vancouver labels confirmed aliases"].strip() == "False"
+    assert lines["Vancouver labels comparable independently"].strip() == "False"
+    assert lines["Pricing analysis ready"].strip() == "False"
+    blocked = lines["Pricing blocked by"]
+    assert PricingBlocker.IDENTITY_EVIDENCE_CONFLICT.value in blocked
+    assert PricingBlocker.LOCATION_POLICY_UNRESOLVED.value not in blocked
+    shown = comparison + outputs
+    assert "SYNTH" not in shown and first not in shown and second not in shown and city not in shown
+    assert list(workdir.iterdir()) == []
 
 
 # ------------------------------------------------------------ data completeness

@@ -11,11 +11,12 @@ import dataclasses
 
 import pandas as pd
 import pytest
-from test_comparison import COV, DEF, _jobs, offer, same_both
+from test_comparison import COV, DEF, DK, IDDEF, ID_COL, J1, J2, _cars, _jobs, _with_ids, offer, same_both
 from test_completeness import complete_inputs
 from test_vehicle_stability import T, V1, V2, frame as stability_frame, obs, two
 
 import ql2_sixt_canada_analysis
+from ql2_sixt_canada_analysis import readiness as readiness_module
 from ql2_sixt_canada_analysis.comparison import (
     IdentityEvidence,
     LocationStreamComparisonReport,
@@ -258,6 +259,177 @@ def test_identity_metadata_contradicting_policy_blocks_pricing(policy, status):
     assert not report.locations_are_aliases and not report.locations_comparable_independently
     readiness = assess_pricing_readiness(location_policy=report, **GATES)
     assert not readiness.ready and B.IDENTITY_EVIDENCE_CONFLICT in readiness.blocking_reasons
+
+
+# ------------------------------------------- authoritative mapping defects (P1)
+#
+# LOCATION_MAPPING_DEFECT: authoritative identity columns hold conflicting
+# physical-location identities within a stream. It is evidence for neither
+# aliasing nor distinctness, so it contradicts every resolved policy.
+
+RESOLVED = [pytest.param(ALIAS, id="confirmed_alias"), pytest.param(DISTINCT, id="confirmed_distinct")]
+
+
+def mapping_defect_comparison() -> LocationStreamComparisonReport:
+    """Real comparison: the first stream carries two different identities (obvious within-stream conflict)."""
+    cars = _with_ids(same_both(), "SYNTH-SITE-1", "SYNTH-SITE-2")
+    cars.loc[(cars[COV.location_columns[0]] == A[0]) & (cars[DK] == J2), ID_COL] = "SYNTH-SITE-3"
+    return compare_location_streams(_jobs(), cars, IDDEF)
+
+
+def assert_defect_blocks(report: LocationPolicyReport, policy: LocationIdentityPolicy, *,
+                         canonicalized: bool) -> None:
+    assert report.state is policy.state and report.authority == AUTHORITY      # decision stays recorded
+    assert report.behavioral_evidence is CS.LOCATION_MAPPING_DEFECT
+    assert report.location_policy_resolved is True
+    assert report.identity_evidence_conflict is True
+    assert report.location_policy_authority_sufficient is False
+    assert report.locations_are_aliases is False
+    assert report.locations_comparable_independently is False
+    assert report.canonicalization_applied is canonicalized
+    expected = (B.IDENTITY_EVIDENCE_CONFLICT,) + (
+        (B.ALIAS_CANONICALIZATION_NOT_APPLIED,) if report.canonicalization_required and not canonicalized else ())
+    assert report.blocking_reasons == expected
+    readiness = assess_pricing_readiness(location_policy=report, **GATES)      # every other gate passes
+    assert readiness.ready is False and readiness.blocking_reasons == expected
+    assert readiness.location_policy is report
+    assert report.mapping_defect_indicated is True
+
+
+def test_confirmed_alias_with_mapping_defect_is_recorded_but_not_sufficient():
+    keys = apply_location_policy(frame([A, B_]), ALIAS)
+    assert keys.alias_mapping_applied
+    report = assess_location_policy(ALIAS, evidence(CS.LOCATION_MAPPING_DEFECT), keys)
+    # Canonicalisation stays recorded as applied but does not make the policy usable.
+    assert report.canonicalization_required and report.canonicalization_applied
+    assert_defect_blocks(report, ALIAS, canonicalized=True)
+
+
+def test_confirmed_distinct_with_mapping_defect_is_recorded_but_not_sufficient():
+    report = assess_location_policy(DISTINCT, evidence(CS.LOCATION_MAPPING_DEFECT))
+    assert report.canonicalization_required is False
+    assert_defect_blocks(report, DISTINCT, canonicalized=False)
+
+
+@pytest.mark.parametrize("policy", RESOLVED)
+def test_strict_validator_rejects_resolved_policy_under_mapping_defect(policy):
+    keys = apply_location_policy(frame([A, B_]), policy)
+    report = assess_location_policy(policy, evidence(CS.LOCATION_MAPPING_DEFECT), keys)
+    with pytest.raises(PricingNotReadyError) as info:
+        validate_pricing_readiness(location_policy=report, **GATES)
+    assert info.value.blocking_reasons == (B.IDENTITY_EVIDENCE_CONFLICT,)
+    assert info.value.report.location_policy.location_policy_authority_sufficient is False
+    message = str(info.value)
+    assert B.IDENTITY_EVIDENCE_CONFLICT.value in message
+    assert "SYNTH" not in message and A[0] not in message and B_[0] not in message
+
+
+def test_alias_mapping_defect_and_missing_canonicalization_are_both_reported():
+    report = assess_location_policy(ALIAS, evidence(CS.LOCATION_MAPPING_DEFECT))     # no analytical keys
+    assert_defect_blocks(report, ALIAS, canonicalized=False)
+    assert report.blocking_reasons == (B.IDENTITY_EVIDENCE_CONFLICT, B.ALIAS_CANONICALIZATION_NOT_APPLIED)
+    with pytest.raises(PricingNotReadyError) as info:
+        validate_pricing_readiness(location_policy=report, **GATES)
+    assert info.value.blocking_reasons == (B.IDENTITY_EVIDENCE_CONFLICT, B.ALIAS_CANONICALIZATION_NOT_APPLIED)
+
+
+@pytest.mark.parametrize("policy", RESOLVED)
+def test_mapping_defect_from_the_comparison_api_blocks_resolved_policy(policy):
+    comparison = mapping_defect_comparison()
+    assert comparison.status is CS.LOCATION_MAPPING_DEFECT and comparison.mapping_defect_indicated
+    keys = apply_location_policy(frame([A, B_]), policy)
+    report = assess_location_policy(policy, comparison, keys)
+    assert_defect_blocks(report, policy, canonicalized=keys.alias_mapping_applied)
+
+
+def test_confirmed_alias_with_compatible_identity_evidence_is_unchanged():
+    # Same identity, disjoint events: the real API confirms the alias, which agrees with the policy.
+    cars = _with_ids(_cars([(J1, A[0], offer()), (J2, B_[0], offer("SYNTH-CAR-Y"))]), "SYNTH-SITE-1", "SYNTH-SITE-1")
+    comparison = compare_location_streams(_jobs(), cars, IDDEF)
+    assert comparison.status is CS.CONFIRMED_ALIAS
+    for evidence_report in (comparison, evidence(CS.LIKELY_DUPLICATE_STREAMS), None):
+        report = assess_location_policy(ALIAS, evidence_report, apply_location_policy(frame([A, B_]), ALIAS))
+        assert report.identity_evidence_conflict is False and report.mapping_defect_indicated is False
+        assert report.location_policy_resolved and report.location_policy_authority_sufficient
+        assert report.locations_are_aliases is True and report.locations_comparable_independently is False
+        assert report.blocking_reasons == ()
+        assert assess_pricing_readiness(location_policy=report, **GATES).ready is True
+
+
+def test_confirmed_distinct_with_compatible_identity_evidence_is_unchanged():
+    comparison = compare_location_streams(_jobs(), _with_ids(same_both(), "SYNTH-SITE-1", "SYNTH-SITE-2"), IDDEF)
+    assert comparison.status is CS.CONFIRMED_DISTINCT_LOCATIONS
+    for evidence_report in (comparison, evidence(CS.LIKELY_DISTINCT_STREAMS), None):
+        report = assess_location_policy(DISTINCT, evidence_report)
+        assert report.identity_evidence_conflict is False
+        assert report.location_policy_authority_sufficient is True
+        assert report.locations_comparable_independently is True and report.locations_are_aliases is False
+        assert assess_pricing_readiness(location_policy=report, **GATES).ready is True
+        # ... still subject to every other readiness gate.
+        blocked = assess_pricing_readiness(location_policy=report, **(GATES | {"key_contracts_valid": False}))
+        assert blocked.blocking_reasons == (B.KEY_CONTRACTS_INVALID,)
+
+
+@pytest.mark.parametrize("policy", RESOLVED)
+@pytest.mark.parametrize("status", BEHAVIOURAL)
+def test_behavioural_evidence_neither_contradicts_nor_changes_a_resolved_policy(policy, status):
+    keys = apply_location_policy(frame([A, B_]), policy)
+    report = assess_location_policy(policy, evidence(status), keys)
+    assert report.state is policy.state and report.behavioral_evidence is status
+    assert report.identity_evidence_conflict is False and report.mapping_defect_indicated is False
+    assert report.location_policy_authority_sufficient is True
+    assert report.locations_are_aliases is (policy is ALIAS)
+    assert report.locations_comparable_independently is (policy is DISTINCT)
+    assert assess_pricing_readiness(location_policy=report, **GATES).ready is True
+
+
+def test_unresolved_policy_with_mapping_defect_stays_unresolved_and_blocked():
+    # Intended semantics: an unresolved policy has no decision for evidence to contradict,
+    # so identity_evidence_conflict is False; the defect stays visible as recorded evidence
+    # and pricing is blocked as unresolved.
+    for comparison in (evidence(CS.LOCATION_MAPPING_DEFECT), mapping_defect_comparison()):
+        report = assess_location_policy(UNRESOLVED, comparison)
+        assert report.state is PS.UNRESOLVED and report.authority is None
+        assert report.behavioral_evidence is CS.LOCATION_MAPPING_DEFECT and report.mapping_defect_indicated
+        assert report.identity_evidence_conflict is False
+        assert report.location_policy_resolved is False and report.location_policy_authority_sufficient is False
+        assert not report.locations_are_aliases and not report.locations_comparable_independently
+        assert report.blocking_reasons == (B.LOCATION_POLICY_UNRESOLVED,)
+        readiness = assess_pricing_readiness(location_policy=report, **GATES)
+        assert readiness.ready is False and readiness.blocking_reasons == (B.LOCATION_POLICY_UNRESOLVED,)
+
+
+@pytest.mark.parametrize("policy", [pytest.param(UNRESOLVED, id="unresolved"), *RESOLVED])
+@pytest.mark.parametrize("status", [None, *CS])
+def test_no_permission_survives_an_identity_conflict(policy, status):
+    keys = apply_location_policy(frame([A, B_]), policy)
+    report = assess_location_policy(policy, None if status is None else evidence(status), keys)
+    if report.identity_evidence_conflict:
+        assert not report.locations_are_aliases and not report.locations_comparable_independently
+        assert not report.location_policy_authority_sufficient
+        assert B.IDENTITY_EVIDENCE_CONFLICT in assess_pricing_readiness(location_policy=report, **GATES).blocking_reasons
+    assert not (report.locations_are_aliases and report.locations_comparable_independently)
+    if report.mapping_defect_indicated:                              # never usable under a mapping defect
+        assert not report.location_policy_authority_sufficient
+        assert not assess_pricing_readiness(location_policy=report, **GATES).ready
+
+
+@pytest.mark.parametrize("policy", RESOLVED)
+def test_mapping_defect_cannot_be_removed_from_the_decision(policy):
+    report = assess_location_policy(policy, evidence(CS.LOCATION_MAPPING_DEFECT))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        report.identity_evidence_conflict = False  # type: ignore[misc]
+    with pytest.raises(ValueError):                                   # claimed "no conflict" is rejected
+        dataclasses.replace(report, identity_evidence_conflict=False)
+    with pytest.raises(ValueError):                                   # conflict without its evidence too
+        dataclasses.replace(report, behavioral_evidence=CS.LIKELY_DISTINCT_STREAMS)
+    with pytest.raises(TypeError):
+        dataclasses.replace(report, behavioral_evidence="location_mapping_defect")
+    with pytest.raises(TypeError):
+        readiness_module._STATE_SPECIFIC_CONFLICTS[policy.state] = frozenset()  # type: ignore[index]
+    assert not hasattr(readiness_module._RESOLVED_POLICY_CONFLICTS, "discard")
+    assert assess_location_policy(policy, evidence(CS.LOCATION_MAPPING_DEFECT)) == report
+    assert report.identity_evidence_conflict and not report.location_policy_authority_sufficient
 
 
 # --------------------------------------------------- other gates stay effective
