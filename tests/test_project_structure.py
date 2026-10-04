@@ -173,6 +173,11 @@ QUALITY_OUTPUT_PATHS = [
     "notebooks/synthetic_identifier_extract.csv",
     "synthetic_diagnostics.json",
     "synthetic_run.log",
+    f"{INTERIM}/synthetic_duplicate_keys.csv",
+    "reports/synthetic_key_report.json",
+    "synthetic_missing_key_rows.txt",
+    "notebooks/synthetic_duplicate_key_extract.json",
+    "synthetic_key_profile.md",
 ]
 
 
@@ -186,7 +191,8 @@ def test_quality_outputs_and_tooling_artifacts_are_ignored(relative_path: str) -
 @pytest.mark.parametrize(
     "relative_path",
     [f"src/{PACKAGE_NAME}/quality.py", "tests/test_quality.py", "notebooks/01_data_ingestion.ipynb",
-     "tests/test_removed_rows_synthetic.py", "docs/quality_notes.md"],
+     "tests/test_removed_rows_synthetic.py", "docs/quality_notes.md",
+     f"src/{PACKAGE_NAME}/unique_keys.py", "tests/test_unique_keys.py", "tests/test_missing_key_rows.py"],
 )
 def test_quality_source_tests_and_docs_are_not_ignored(relative_path: str) -> None:
     assert not _git_is_ignored(relative_path)

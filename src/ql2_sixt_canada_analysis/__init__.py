@@ -27,7 +27,17 @@ from ql2_sixt_canada_analysis.schemas import (
     SHARED_IDENTIFIER_COLUMNS,
     DatasetDefinition,
     DatasetKey,
+    KeyConfigurationError,
     get_dataset_definition,
+)
+from ql2_sixt_canada_analysis.unique_keys import (
+    RawDatasetUniqueKeyReports,
+    UniqueKeyReport,
+    UniqueKeyViolationError,
+    assess_raw_dataset_unique_keys,
+    assess_unique_key,
+    validate_raw_dataset_unique_keys,
+    validate_unique_key,
 )
 
 __all__ = [
@@ -38,11 +48,17 @@ __all__ = [
     "IDENTIFIER_DTYPE",
     "IdentifierDtypeError",
     "IdentifierTypeConflictError",
+    "KeyConfigurationError",
     "MissingIdentifierColumnError",
     "SHARED_IDENTIFIER_COLUMNS",
     "RawDatasetBlankRowResults",
     "RawDatasetPaths",
+    "RawDatasetUniqueKeyReports",
     "RawDatasets",
+    "UniqueKeyReport",
+    "UniqueKeyViolationError",
+    "assess_raw_dataset_unique_keys",
+    "assess_unique_key",
     "cast_identifier_fields",
     "cast_identifiers_for_raw_datasets",
     "discover_raw_csvs",
@@ -52,4 +68,6 @@ __all__ = [
     "remove_completely_blank_rows",
     "validate_identifier_dtypes",
     "validate_raw_dataset_identifier_dtypes",
+    "validate_raw_dataset_unique_keys",
+    "validate_unique_key",
 ]

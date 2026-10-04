@@ -205,6 +205,58 @@ classification alone.
   locations). Automated tests (`tests/test_quality.py`) use only synthetic
   DataFrames and synthetic temporary CSVs.
 
+## Unique keys
+
+Each logical dataset's business key is defined once, with its row grain, in
+`ql2_sixt_canada_analysis.schemas` (`DatasetDefinition.unique_key_columns`;
+the source code is the authority, so component names are not repeated here).
+Keys are chosen from the grain's meaning, not from what happens to be unique
+in one extract: `jobs` has one row per scrape job, keyed by the job
+identifier; `cars` has one row per offer position within a job, keyed by the
+parent job identifier plus the offer's ordinal position (the one documented
+non-identifier component, see `non_identifier_key_columns`).
+
+```python
+from ql2_sixt_canada_analysis import assess_raw_dataset_unique_keys, validate_raw_dataset_unique_keys
+
+key_reports = assess_raw_dataset_unique_keys(cleaned)   # always returns reports
+key_reports.jobs.is_complete, key_reports.jobs.is_unique, key_reports.jobs.is_valid
+key_reports.cars.missing_key_row_count, key_reports.cars.duplicate_key_row_count
+key_reports.all_valid
+validate_raw_dataset_unique_keys(cleaned)               # raises on violations
+```
+
+- **A valid key is complete and unique.** Completeness and uniqueness are
+  measured separately; the contract passes only when both hold.
+- **Missing keys:** a row with any missing component (pandas `NA`/`NaN`) is a
+  missing-key row. Missing-key rows are counted on their own and never form
+  duplicate groups. Non-empty text such as `"0"`, `"False"`, `"N/A"` or
+  `"null"` is a value, and keys are compared verbatim (never stripped or
+  normalised); validating identifier *content* is a separate control.
+- **Duplicate keys:** evaluated only among complete rows, with all
+  components compared as a tuple (`DataFrame.duplicated(keep=False)`), never
+  as concatenated strings, so delimiter-like characters cannot collide. Every
+  row in a duplicate group is counted (`duplicate_key_row_count`), and groups
+  are counted separately (`duplicate_key_group_count`).
+- **Assessment vs strict validation:** `assess_unique_key` /
+  `assess_raw_dataset_unique_keys` always return typed, in-memory reports
+  (counts only, no key values or rows) and raise only
+  `KeyConfigurationError` for configuration problems such as a missing key
+  column. `validate_unique_key` / `validate_raw_dataset_unique_keys` raise
+  `UniqueKeyViolationError` naming the dataset and violation categories
+  (`missing_key`, `duplicate_key`), with the reports on `.reports`.
+- **Nothing is changed:** validation never removes, deduplicates, fills,
+  sorts or repairs rows, and writes nothing.
+- **Pipeline order:** completely blank rows are removed *before* key
+  assessment, so a blank physical line is counted by the blank-row control
+  and not again as a missing key; partially populated rows with a missing key
+  remain and are reported.
+- **Empty datasets** are vacuously valid (no missing keys, no duplicates);
+  whether records were expected at all is a separate presence/volume control.
+- Tests use fabricated keys only. Key values, duplicate or missing-key
+  extracts and key reports derived from the proprietary data must never be
+  committed.
+
 ## Notebooks
 
 Notebooks live in `notebooks/` and run in numeric-prefix order, top to bottom

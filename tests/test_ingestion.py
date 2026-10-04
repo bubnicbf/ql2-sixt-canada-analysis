@@ -215,7 +215,8 @@ def _patch_contracts(monkeypatch: pytest.MonkeyPatch, columns: tuple[str, ...]) 
     # cases also exercise the identifier dtype mapping.
     patched = MappingProxyType(
         {
-            key: replace(DATASET_DEFINITIONS[key], columns=columns, identifier_columns=columns[:1])
+            key: replace(DATASET_DEFINITIONS[key], columns=columns, identifier_columns=columns[:1],
+                         unique_key_columns=columns[:1])
             for key in DatasetKey
         }
     )
@@ -383,7 +384,8 @@ def test_pyarrow_engine_header_check_for_datasets_without_identifiers(
     # The pyarrow engine is only allowed when a dataset has no identifiers
     # (see the identifier tests); its header check still works then.
     patched = MappingProxyType(
-        {key: replace(DATASET_DEFINITIONS[key], columns=("alpha", "beta"), identifier_columns=())
+        {key: replace(DATASET_DEFINITIONS[key], columns=("alpha", "beta"), identifier_columns=(),
+                      unique_key_columns=())
          for key in DatasetKey}
     )
     monkeypatch.setattr(ingestion, "DATASET_DEFINITIONS", patched)

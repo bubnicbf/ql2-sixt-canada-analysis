@@ -263,6 +263,69 @@ def test_ingestion_notebook_runs_with_risky_synthetic_identifiers(tmp_path: Path
         "notebook wrote files"
 
 
+# ------------------------------------------------------------------ unique keys
+
+
+def test_ingestion_notebook_assesses_unique_keys_with_reusable_api() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    cells = _code_cells(notebook)
+    sources = [c.source for c in cells]
+    code = "\n".join(sources)
+    assert re.search(
+        r"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\bassess_raw_dataset_unique_keys\b", code, re.S
+    )
+    clean = next(i for i, s in enumerate(sources) if "remove_blank_rows_from_raw_datasets(" in s)
+    dtypes = next(i for i, s in enumerate(sources) if "validate_raw_dataset_identifier_dtypes(" in s)
+    assess = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
+    assert clean < dtypes < assess
+    assert re.search(r"\bkey_reports\s*=\s*assess_raw_dataset_unique_keys\(\s*cleaned\s*\)", sources[assess])
+    # Assessment, not strict validation, so real violations cannot stop the workflow.
+    assert "validate_raw_dataset_unique_keys" not in code and "validate_unique_key" not in code
+
+
+def test_ingestion_notebook_has_no_key_lists_or_own_key_algorithm() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    code = _code_source(notebook)
+    text = code + "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+    keys = {c for d in DATASET_DEFINITIONS.values() for c in d.unique_key_columns}
+    assert not any(re.search(rf"\b{re.escape(c)}\b", text) for c in keys), "key names live in schemas only"
+    for pattern in (r"\.duplicated\(", r"\.groupby\(", r"\.drop_duplicates\(", r"\.nunique\(",
+                    r"\.value_counts\(", r"unique_key_columns", r"\.notna\(", r"\.isna\("):
+        assert not re.search(pattern, code), f"notebook reimplements key logic: {pattern}"
+    for attribute in ("row_count", "is_valid", "all_valid", "violations"):
+        assert not re.search(rf"print\([^\n]*{attribute}", code), "key results must not be displayed"
+
+
+def test_ingestion_notebook_key_step_runs_on_synthetic_violations(tmp_path: Path) -> None:
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    for key in DatasetKey:
+        definition = DATASET_DEFINITIONS[key]
+        def line(job: str) -> str:
+            return ",".join(
+                job if c in definition.identifier_columns
+                else ("1" if c in definition.unique_key_columns else f"synthetic_{i}")
+                for i, c in enumerate(definition.columns)
+            )
+        # duplicate key, missing key and a blank line: the notebook must not stop.
+        lines = [line("SYNTH-JOB-001"), line("SYNTH-JOB-001"), line(""), "", line("000001")]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(definition.columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8")
+        )
+    before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(
+        INGESTION_NOTEBOOK, workdir=tmp_path, env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)}
+    )
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "Unique-key assessment completed" in outputs
+    assert "SYNTH-JOB-001" not in outputs and "000001" not in outputs
+    assert not re.search(r"\b[0-9]+\b", outputs)
+    assert not re.search(r"\b(True|False|valid|invalid|duplicate)\b", outputs, re.I)
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before
+    assert _snapshot(PROJECT_ROOT) == repo_before
+
+
 # ----------------------------------------------------------------- execution
 
 

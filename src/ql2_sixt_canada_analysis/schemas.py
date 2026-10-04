@@ -20,6 +20,17 @@ round long integers or turn missing values into text. Every other column keeps
 normal pandas inference. Identifier content is never normalised here.
 These definitions are the only identifier registry; ingestion, quality
 helpers, notebooks and tests all read them from here.
+
+Unique keys and row grain
+-------------------------
+``unique_key_columns`` is the dataset's business-key contract: the smallest
+ordered set of columns that identifies one row of the documented grain. A
+valid key is *complete* (no missing component) and *unique* (no two rows share
+the full component tuple); :mod:`ql2_sixt_canada_analysis.unique_keys`
+measures both without changing data. Components should be identifier columns;
+any other component is listed by ``non_identifier_key_columns`` and must be
+justified next to the definition. Keys are chosen from the grain's semantics,
+never from whatever happens to be unique in one extract.
 """
 
 from __future__ import annotations
@@ -37,6 +48,7 @@ __all__ = [
     "DATASET_DEFINITIONS",
     "IDENTIFIER_DTYPE",
     "JOBS_DEFINITION",
+    "KeyConfigurationError",
     "SHARED_IDENTIFIER_COLUMNS",
     "DatasetDefinition",
     "DatasetKey",
@@ -48,6 +60,21 @@ __all__ = [
 #: nullable string dtype (``"string"``), whose missing value is ``pd.NA``.
 #: Shared logical identifiers therefore have identical types in both datasets.
 IDENTIFIER_DTYPE: Final[pd.StringDtype] = pd.StringDtype()
+
+
+class KeyConfigurationError(ValueError):
+    """A unique-key definition is invalid or cannot be applied to a frame.
+
+    Distinct from data-quality violations (see
+    :class:`ql2_sixt_canada_analysis.unique_keys.UniqueKeyViolationError`).
+    Messages carry the dataset key and counts only; column names are on
+    ``columns``.
+    """
+
+    def __init__(self, message: str, key: object = None, columns: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.role = key
+        self.columns = tuple(columns)
 
 
 class DatasetKey(StrEnum):
@@ -70,12 +97,22 @@ class DatasetDefinition:
         identifier_columns: Columns (a subset of ``columns``, in the same
             relative order) holding identity labels; loaded as
             :data:`IDENTIFIER_DTYPE`. Empty means the dataset has none.
+        unique_key_columns: Ordered business-key components for one row of
+            the dataset's grain (see the module docstring). Empty means no
+            key contract is declared; assessment then raises
+            :class:`KeyConfigurationError`.
     """
 
     key: DatasetKey
     filename_tokens: tuple[str, ...]
     columns: tuple[str, ...]
     identifier_columns: tuple[str, ...] = ()
+    unique_key_columns: tuple[str, ...] = ()
+
+    @property
+    def non_identifier_key_columns(self) -> tuple[str, ...]:
+        """Key components that are not identifier columns (documented exceptions)."""
+        return tuple(c for c in self.unique_key_columns if c not in self.identifier_columns)
 
     @property
     def identifier_dtypes(self) -> Mapping[str, pd.StringDtype]:
@@ -104,6 +141,24 @@ class DatasetDefinition:
             raise ValueError(f"{self.key}: identifier_columns must be listed in columns")
         if identifiers != tuple(c for c in self.columns if c in identifiers):
             raise ValueError(f"{self.key}: identifier_columns must follow column order")
+        key = self.unique_key_columns
+        if not isinstance(key, tuple):
+            raise KeyConfigurationError(f"{self.key}: unique_key_columns must be a tuple", self.key)
+        if not all(isinstance(v, str) and v for v in key):
+            raise KeyConfigurationError(
+                f"{self.key}: unique_key_columns must contain non-empty strings", self.key
+            )
+        if len(set(key)) != len(key):
+            raise KeyConfigurationError(
+                f"{self.key}: unique_key_columns must not contain duplicates", self.key,
+                tuple(dict.fromkeys(c for c in key if key.count(c) > 1)),
+            )
+        unknown = tuple(c for c in key if c not in self.columns)
+        if unknown:
+            raise KeyConfigurationError(
+                f"{self.key}: {len(unknown)} unique_key_columns not listed in columns",
+                self.key, unknown,
+            )
 
 
 JOBS_DEFINITION: Final = DatasetDefinition(
@@ -123,6 +178,9 @@ JOBS_DEFINITION: Final = DatasetDefinition(
     ),
     # Scrape-job identity; referenced by every cars row (shared key).
     identifier_columns=('job_id',),
+    # Grain: one row per scrape (collection) job. The job identifier alone
+    # identifies that row; no other column is needed.
+    unique_key_columns=('job_id',),
 )
 
 CARS_DEFINITION: Final = DatasetDefinition(
@@ -166,6 +224,16 @@ CARS_DEFINITION: Final = DatasetDefinition(
     #   to normal inference. Dates, timestamps, prices, seats and bags are
     #   measures or calendar values and must never be cast as identifiers.
     identifier_columns=('job_id',),
+    # Grain: one row per offer position within one scrape job's result list.
+    # A job returns many offers, so the job identifier alone cannot identify a
+    # row, and the ordinal restarts in every job, so it cannot either; the
+    # pair (parent job identifier, ordinal position) is the smallest key for
+    # this grain. row_index is the one documented non-identifier component:
+    # it is a positional locator kept numeric for rank analysis (see above),
+    # so it appears in non_identifier_key_columns. Offer attributes (vehicle,
+    # price, location, timestamps) are deliberately excluded: they describe
+    # the offer and may legitimately repeat within a job.
+    unique_key_columns=('job_id', 'row_index'),
 )
 
 DATASET_DEFINITIONS: Final[Mapping[DatasetKey, DatasetDefinition]] = MappingProxyType(

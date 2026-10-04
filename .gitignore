@@ -105,6 +105,28 @@ data/processed/*
 *diagnostics*.txt
 *diagnostics*.html
 *.log
+# Unique-key outputs: duplicate/missing-key extracts and key reports.
+# (.csv/.parquet/... are already ignored globally above.)
+*duplicate_key*.json
+*duplicate_key*.txt
+*duplicate_key*.html
+*duplicate_key*.md
+*duplicate_rows*.json
+*duplicate_rows*.txt
+*duplicate_rows*.html
+*duplicate_rows*.md
+*missing_key*.json
+*missing_key*.txt
+*missing_key*.html
+*missing_key*.md
+*key_report*.json
+*key_report*.txt
+*key_report*.html
+*key_report*.md
+*key_profile*.json
+*key_profile*.txt
+*key_profile*.html
+*key_profile*.md
 
 # --- Generated reports and figures ---
 # Ignored by default; use `git add -f` to deliberately publish a final report.
