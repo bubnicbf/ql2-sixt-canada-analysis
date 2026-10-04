@@ -713,7 +713,8 @@ def test_ingestion_notebook_reports_inconclusive_single_pair_partial_overlap(tmp
     scope, = D.coverage.stream_scope_columns
     position, = rel.detail_definition.non_identifier_key_columns
     (city, first), (_, second) = COMPARED_LOCATION_STREAMS
-    same = {c: f"SYNTH-{c.upper()}" for c in (*D.product_columns, *D.price_columns)} | {scope: city}
+    same = ({c: f"SYNTH-{c.upper()}" for c in (*D.product_columns, *D.price_columns)}
+            | {c: "10.00" for c in D.numeric_columns} | {scope: city})   # valid offers
     cars = [same | {rel.detail_key_columns[0]: "SYNTH-JOB-001", loc: first, position: "0"},
             same | {rel.detail_key_columns[0]: "SYNTH-JOB-001", loc: second, position: "1"},
             same | {rel.detail_key_columns[0]: "SYNTH-JOB-002", loc: first, position: "0"}]   # unpaired
@@ -736,12 +737,60 @@ def test_ingestion_notebook_reports_inconclusive_single_pair_partial_overlap(tmp
     assert lines["Paired captures"].strip() == "1 | minimum required: 2"
     assert lines["Unpaired captures - first stream"].strip() == "1 | second stream: 0"
     assert lines["Matching paired captures"].strip() == "1 | differing: 0"
+    assert lines["Eligible paired captures (valid offers on both sides)"].strip() == "1 | invalid: 0"
+    assert lines["Target evidence threshold passed"].strip() == "False"
+    assert lines["Duplicate-stream inference permitted"].strip() == "False"
     assert lines["Temporal overlap"].strip() == "partial" and lines["Scope baseline"].strip() == "unavailable"
     assert lines["Duplicate inference blocked by"].strip() == ", ".join(
         b.value for b in (DB.INSUFFICIENT_PAIRED_CAPTURES, DB.INCOMPLETE_TEMPORAL_OVERLAP, DB.BASELINE_UNAVAILABLE))
     assert first not in outputs and second not in outputs and "SYNTH" not in outputs
     policy = _step_output(result, "assess_pricing_readiness(")
     assert "Vancouver identity policy state: unresolved" in policy and "Pricing analysis ready: False" in policy
+
+
+def test_ingestion_notebook_reports_missing_prices_as_invalid_not_duplicate(tmp_path: Path) -> None:
+    # Regression: two fully paired captures with missing prices compared equal and,
+    # with one weak comparator capture, were reported as likely_duplicate_streams.
+    from ql2_sixt_canada_analysis.comparison import DuplicateInferenceBlocker as DB
+    from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, LOCATION_STREAM_COMPARISON as D
+
+    rel = JOB_DETAIL_RELATIONSHIP
+    loc = D.coverage.label_column
+    scope, = D.coverage.stream_scope_columns
+    position, = rel.detail_definition.non_identifier_key_columns
+    (city, first), (_, second) = COMPARED_LOCATION_STREAMS
+    no_price = ({c: f"SYNTH-{c.upper()}" for c in D.product_columns} | {c: "" for c in D.price_columns}
+                | {scope: city})
+    cars = [no_price | {rel.detail_key_columns[0]: job, loc: label, position: str(i)}
+            for job in ("SYNTH-JOB-001", "SYNTH-JOB-002") for i, label in enumerate((first, second))]
+    jobs = [{rel.parent_key_columns[0]: job, rel.expected_detail_count_column: "2"}
+            for job in ("SYNTH-JOB-001", "SYNTH-JOB-002")]
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    for dataset, dataset_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[dataset].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}") for i, c in enumerate(columns)) for r in dataset_rows]
+        (directory / f"synthetic_{dataset}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    outputs = _step_output(result, "compare_location_streams(")
+    lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
+    assert lines["Behavioural comparison result"].strip() == "comparison_unassessable"
+    assert lines["Paired captures"].strip() == "2 | minimum required: 2"
+    assert lines["Eligible paired captures (valid offers on both sides)"].strip() == "0 | invalid: 2"
+    assert lines["Invalid offers found in"].strip() == "first_target_stream, second_target_stream"
+    assert lines["Invalid offer reasons"].strip() == "missing_value"
+    assert lines["Offer validity sufficient"].strip() == "False"
+    assert lines["Target evidence threshold passed"].strip() == "False"
+    assert lines["Baseline evidence threshold passed"].strip() == "False"
+    assert lines["Duplicate-stream inference permitted"].strip() == "False"
+    assert DB.INVALID_OFFER_EVIDENCE.value in lines["Duplicate inference blocked by"]
+    assert first not in outputs and second not in outputs and "SYNTH" not in outputs
+    assert "Pricing analysis ready: False" in _step_output(result, "assess_pricing_readiness(")
+    assert list(workdir.iterdir()) == []
 
 
 # ---------------------------------------------------- vehicle-attribute stability

@@ -18,6 +18,7 @@ from conftest import contract_columns
 
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.comparison import (
+    OfferDefect,
     ComparisonPreconditionError,
     DuplicateInferenceBlocker as DB,
     IdentityEvidence,
@@ -364,10 +365,14 @@ def test_tuple_comparison_is_collision_safe():
     assert compare_location_streams(_jobs(), cars, DEF).product_sets is O.DISTINCT
 
 
-def test_missing_values_compare_equal_to_missing_only():
+def test_missing_values_are_unassessable_not_equal():
+    # Previously two missing values compared equal (IDENTICAL). A missing signature
+    # field is no evidence at all - neither matching nor differing.
     x, y = offer() | {PRODUCT[1]: pd.NA}, offer() | {PRODUCT[1]: "SYNTH-NA"}
-    assert compare_location_streams(_jobs(), _cars([(J1, A, x), (J1, B, x)]), DEF).product_sets is O.IDENTICAL
-    assert compare_location_streams(_jobs(), _cars([(J1, A, x), (J1, B, y)]), DEF).product_sets is O.DISTINCT
+    both = compare_location_streams(_jobs(), _cars([(J1, A, x), (J1, B, x)]), DEF)
+    assert both.product_sets is O.UNAVAILABLE and both.status is S.COMPARISON_UNASSESSABLE
+    one = compare_location_streams(_jobs(), _cars([(J1, A, x), (J1, B, y)]), DEF)
+    assert one.product_sets is O.UNAVAILABLE and one.invalid_paired_capture_count == 1
 
 
 def test_price_text_compared_exactly():
@@ -515,7 +520,15 @@ def test_report_holds_only_enums_bools_counts_and_none():
     assert isinstance(r, LocationStreamComparisonReport)
     for field in dataclasses.fields(r):
         value = getattr(r, field.name)
-        if isinstance(value, tuple):
+        if field.name == "invalid_offer_sample":            # bounded, confidential, excluded from repr
+            assert not field.repr and isinstance(value, tuple)
+        elif field.name == "invalid_offer_fields":          # contract column names only
+            assert all(v in (*PRODUCT, *PRICE) for v in value)
+        elif field.name == "invalid_offer_reasons":
+            assert all(isinstance(v, OfferDefect) for v in value)
+        elif field.name == "baseline_evidence":
+            assert all(type(getattr(value, f.name)) is int for f in dataclasses.fields(value))
+        elif isinstance(value, tuple):
             assert all(isinstance(v, DB) for v in value)
         else:
             assert value is None or isinstance(value, (bool, int)) or hasattr(value, "value")
@@ -577,11 +590,12 @@ def test_single_shared_capture_with_unpaired_capture_and_no_baseline_is_not_dupl
 
 
 def test_one_pair_is_below_the_minimum_even_with_full_overlap_and_baseline():
+    # The one-capture comparator no longer qualifies the baseline either (same standard).
     cars = _cars([(J1, A, offer()), (J1, B, offer()), *_baseline_rows((J1,))])
     r = compare_location_streams(_jobs(), cars, DEF)
-    assert r.temporal_overlap is TemporalOverlap.COMPLETE and r.scope_baseline is ScopeBaseline.DISCRIMINATIVE
+    assert r.temporal_overlap is TemporalOverlap.COMPLETE and r.scope_baseline is ScopeBaseline.INSUFFICIENT
     assert r.status is S.COMPARISON_INCONCLUSIVE
-    assert r.duplicate_inference_blockers == (DB.INSUFFICIENT_PAIRED_CAPTURES,)
+    assert r.duplicate_inference_blockers == (DB.INSUFFICIENT_PAIRED_CAPTURES, DB.BASELINE_EVIDENCE_INSUFFICIENT)
     assert _evidence(r) == (1, 1, 1, 0, 0, 1, 0, 2)
 
 
@@ -708,6 +722,7 @@ def test_blocker_values_are_stable_and_name_no_source_columns():
     assert [b.value for b in DB] == [
         "no_paired_captures", "insufficient_paired_captures", "incomplete_temporal_overlap",
         "temporal_overlap_unavailable", "ambiguous_pairing", "unassessable_observations",
-        "baseline_unavailable", "baseline_non_discriminative", "differing_paired_captures"]
+        "invalid_offer_evidence", "baseline_unavailable", "baseline_evidence_insufficient",
+        "baseline_non_discriminative", "differing_paired_captures"]
     columns = set(contract_columns(CARS)) | set(contract_columns(JOBS))
     assert not any(c in b.value for b in DB for c in columns)

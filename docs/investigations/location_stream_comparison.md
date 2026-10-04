@@ -84,6 +84,11 @@ identical offers and identical prices do not prove physical identity.
   recorded but is not authority sufficient; neither alias grouping nor
   independent comparison is permitted and pricing stays blocked until the
   source mapping is corrected or authoritatively reconciled.
+- Evidence validity (added later): only offers with complete, valid
+  product-and-price signatures count; missing values are unassessable, not
+  equal, and a paired capture with any invalid offer is ineligible. The scope
+  baseline must meet the same minimum of eligible, fully overlapping paired
+  captures; one partially overlapping comparator capture is insufficient.
 - Governed scope (added later): a confirmed alias for the two Vancouver labels
   may canonicalise only to one of those two Vancouver keys. A canonical key
   in another city (for example the Calgary stream) or any other arbitrary

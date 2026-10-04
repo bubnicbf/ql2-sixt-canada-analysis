@@ -725,7 +725,28 @@ compares two expected location streams. The pair is defined once, in
 the product columns (stable offer identity: no identifiers, location labels,
 timestamps or prices), the price columns and any authoritative identity
 columns. The result is a frozen, categorical
-`LocationStreamComparisonReport` (enums and booleans only).
+`LocationStreamComparisonReport` (enums, booleans and aggregate counts, plus
+a bounded, repr-excluded sample of invalid offers).
+
+**Valid offers only.** Duplicate-stream inference compares product-and-price
+*signatures*, and `offer_signature` is the single validity contract: every
+signature column (`product_columns` and `price_columns`) is required. A
+field that is missing (`None`, `NaN`, `pd.NA`, `NaT`), blank or
+whitespace-only text, or - for `numeric_columns` (`price_num`) - not a
+finite, non-negative number (zero is valid; booleans and malformed text are
+not) gives the offer **no signature** (`OfferDefect`: `missing_value`,
+`blank_text`, `invalid_number`). Missing values are unassessable, not equal:
+two missing prices are no evidence at all. The rule is capture-level and fail
+closed: a paired capture with any invalid offer on either side is
+*ineligible* - it is neither matching nor differing evidence, nothing is
+dropped to make the remaining offers look identical, values from one side
+never fill the other, and a capture of only invalid offers is never an
+identical empty capture. Every stream is checked independently, and the
+report says where invalidity occurred (`invalid_evidence_streams`: first
+target, second target and/or baseline stream). The signature columns are the
+documented ones; the stability contract's allowance for consistently absent
+baggage capacity is not carried over, so an offer without it cannot support
+duplicate inference (a stricter, documented limitation).
 
 Evidence is kept in three layers and never mixed:
 
@@ -738,25 +759,39 @@ Evidence is kept in three layers and never mixed:
    pair in the same scope, so identical behaviour counts only if it is not
    normal for the source.
 2. **Interpretation** - `LIKELY_DUPLICATE_STREAMS`, `LIKELY_DISTINCT_STREAMS`,
-   `COMPARISON_INCONCLUSIVE`, `INSUFFICIENT_COMPARABLE_CAPTURES`, or presence
+   `COMPARISON_INCONCLUSIVE`, `COMPARISON_UNASSESSABLE`,
+   `INSUFFICIENT_COMPARABLE_CAPTURES`, or presence
    failures `ONE_STREAM_ABSENT` / `BOTH_STREAMS_ABSENT`.
    `LIKELY_DUPLICATE_STREAMS` needs affirmative evidence for **every**
    prerequisite; each missing one is a `DuplicateInferenceBlocker` in
    `duplicate_inference_blockers`, and the result is then
    `COMPARISON_INCONCLUSIVE` (insufficient duplicate evidence is never read
    as distinctness):
-   - at least `minimum_paired_captures` independent paired capture events
-     (`MINIMUM_DUPLICATE_PAIRED_CAPTURES = 2`, validated as an integer of at
-     least two). A capture is one collection event: duplicate rows and the
-     many vehicle offers inside one capture are one observation, so they
-     never add temporal evidence (`insufficient_paired_captures`);
+   - at least `minimum_paired_captures` independent **eligible** paired
+     capture events (`MINIMUM_DUPLICATE_PAIRED_CAPTURES = 2`, validated as an
+     integer of at least two). Only pairs with valid offers on both sides
+     count - three temporal pairs of which one is eligible do not meet a
+     two-capture minimum. A capture is one collection event: duplicate rows
+     and the many vehicle offers inside one capture are one observation, so
+     they never add temporal evidence (`insufficient_paired_captures`);
+   - no invalid offer in either target stream (`invalid_offer_evidence`);
    - `COMPLETE` temporal overlap - any capture present in only one stream
      means the streams diverge somewhere, so partial overlap is
      `incomplete_temporal_overlap` (no tolerance policy exists);
    - a `DISCRIMINATIVE` scope baseline (an allowlist): with `UNAVAILABLE`
-     nothing shows that identical behaviour is unusual for the source, and
-     with `NON_DISCRIMINATIVE` it is normal (`baseline_unavailable` /
-     `baseline_non_discriminative`);
+     nothing shows that identical behaviour is unusual for the source, with
+     `INSUFFICIENT` no comparator meets the evidence standard, and with
+     `NON_DISCRIMINATIVE` identical behaviour is normal
+     (`baseline_unavailable` / `baseline_evidence_insufficient` /
+     `baseline_non_discriminative`). The baseline must satisfy the **same**
+     standard as the target pair (one shared routine): a comparator pair
+     qualifies only with at least `minimum_paired_captures` eligible paired
+     captures, complete unambiguous overlap and no invalid or unidentifiable
+     rows, and the baseline is `DISCRIMINATIVE` only when a qualified pair
+     has a differing eligible capture and no comparator is identical in all
+     its eligible captures. One partially overlapping comparator capture -
+     or one fully overlapping capture below the minimum - never establishes
+     it. Invalid offers are neither matching nor differing baseline evidence;
    - identical price-aware offers in every paired capture - one differing
      capture outweighs any number of matching ones and is kept as evidence
      (`differing_paired_captures`);
@@ -764,8 +799,17 @@ Evidence is kept in three layers and never mixed:
      or with an unresolvable capture time under time pairing, are counted as
      unassessable instead of being dropped) and unambiguous pairing.
    The report exposes the denominator: captures per stream, paired,
-   unpaired per stream, matching and differing paired captures, unassessable
-   rows and the minimum. The rule is symmetric in the two streams.
+   eligible and invalid paired captures (and on which side), unpaired per
+   stream, matching and differing eligible captures, unassessable rows, invalid
+   offer fields and reasons, the minimum, and `baseline_evidence`
+   (comparator pairs, qualified pairs, paired/eligible/invalid,
+   identical and discriminatory eligible captures). Flags report each part
+   separately: `temporal_pairing_sufficient`, `offer_validity_sufficient`,
+   `target_threshold_passed`, `baseline_threshold_passed`,
+   `baseline_discriminative`, `duplicate_inference_permitted`. Paired
+   captures without any eligible pair are `COMPARISON_UNASSESSABLE`; invalid
+   evidence never yields `LIKELY_DISTINCT_STREAMS` either. The rule is
+   symmetric in the two streams.
 3. **Confirmation** - only from authoritative identity columns:
    `CONFIRMED_DISTINCT_LOCATIONS`, `CONFIRMED_ALIAS`,
    `DUPLICATED_COLLECTION_CONFIGURATION` or `LOCATION_MAPPING_DEFECT`.
@@ -793,9 +837,10 @@ validate_confirmed_location_alias(jobs_df, cars_df)   # raises LocationAliasNotC
   comparison can reach at most a *likely* conclusion; confirmation requires
   supplier or collection-configuration evidence. See
   `docs/investigations/location_stream_comparison.md` (sanitized).
-- Even a valid `LIKELY_DUPLICATE_STREAMS` is behavioural evidence only: it
-  never creates an alias, merges streams, resolves the Vancouver location
-  policy or enables pricing.
+- Even a valid `LIKELY_DUPLICATE_STREAMS` is behavioural evidence only and
+  stays subordinate to the authority-backed Vancouver identity policy: it
+  never creates an alias, merges streams, resolves the policy, authorises
+  canonicalisation, removes a stream from completeness or enables pricing.
 - The comparison is **evidence only**. `alias_authority_sufficient` refers to
   identity metadata in the data (none exists here) and does not decide
   anything downstream: whether the two labels may be merged or compared is

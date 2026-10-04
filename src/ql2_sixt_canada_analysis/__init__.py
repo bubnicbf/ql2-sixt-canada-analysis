@@ -1,6 +1,13 @@
 """Reusable analysis and data-quality code for the QL2 Sixt Canada rate feed."""
 
 from ql2_sixt_canada_analysis.comparison import (
+    INVALID_OFFER_SAMPLE_LIMIT,
+    BaselineEvidence,
+    InvalidOfferSample,
+    OfferDefect,
+    OfferSignature,
+    OfferStreamRole,
+    offer_signature,
     ComparisonPreconditionError,
     DuplicateInferenceBlocker,
     IdentityEvidence,
@@ -194,6 +201,13 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "INVALID_OFFER_SAMPLE_LIMIT",
+    "BaselineEvidence",
+    "InvalidOfferSample",
+    "OfferDefect",
+    "OfferSignature",
+    "OfferStreamRole",
+    "offer_signature",
     "CITY_INTEGRITY_SAMPLE_LIMIT",
     "CityIntegrityBlocker",
     "CityIntegrityError",

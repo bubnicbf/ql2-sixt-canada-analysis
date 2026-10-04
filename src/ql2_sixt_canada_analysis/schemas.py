@@ -1106,7 +1106,14 @@ class LocationStreamComparisonDefinition:
         price_columns: Price fields, compared only in the price-aware offer.
         minimum_paired_captures: Independent paired capture events (not offer
             rows) required before ``LIKELY_DUPLICATE_STREAMS`` is possible;
-            an integer of at least two.
+            an integer of at least two. Only *eligible* pairs count (every
+            offer on both sides has a valid signature), and the same minimum
+            qualifies the discriminatory scope baseline.
+        numeric_columns: Signature columns (product or price) whose values
+            must be finite, non-negative numbers (or numeric text); zero is a
+            valid number. Every other signature column must be present and,
+            when textual, non-blank. No signature column may be missing:
+            missing values are unassessable, never equal evidence.
     """
 
     first: tuple[str, ...]
@@ -1121,8 +1128,15 @@ class LocationStreamComparisonDefinition:
     capture_time_field: tuple[DatasetKey, str] | None = None
     pairing_tolerance: dt.timedelta | None = None
     minimum_paired_captures: int = 2
+    numeric_columns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if (not isinstance(self.numeric_columns, tuple)
+                or not all(isinstance(c, str) and c for c in self.numeric_columns)
+                or len(set(self.numeric_columns)) != len(self.numeric_columns)
+                or not set(self.numeric_columns) <= {*self.product_columns, *self.price_columns}):
+            raise LocationCoverageConfigurationError(
+                "numeric_columns must be unique product or price columns")
         if (isinstance(self.minimum_paired_captures, bool) or not isinstance(self.minimum_paired_captures, int)
                 or self.minimum_paired_captures < 2):
             raise LocationCoverageConfigurationError(
@@ -1183,7 +1197,10 @@ class LocationStreamComparisonDefinition:
 #: coordinates), so ``identity_columns`` is empty and an alias can never be
 #: confirmed from this data. Product identity: vehicle and rental-search
 #: attributes; prices are compared only in the price-aware offer, as exact
-#: source text (price types are not yet validated).
+#: source values. Every signature field is required: an offer with a
+#: missing, blank or invalid field has no comparison signature and makes its
+#: capture ineligible as evidence. ``price_num`` is the numeric price
+#: (finite, non-negative; zero allowed); ``price_per_day`` is source text.
 #: Conservative minimum of independent paired capture events for a
 #: behavioural likely-duplicate classification. No authority defines a
 #: threshold, so the floor is two: a single shared capture is never enough.
@@ -1199,6 +1216,7 @@ LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
     product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
     price_columns=('price_per_day', 'price_num'),
     minimum_paired_captures=MINIMUM_DUPLICATE_PAIRED_CAPTURES,
+    numeric_columns=('price_num',),
 )
 
 
