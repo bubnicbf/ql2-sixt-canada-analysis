@@ -50,11 +50,15 @@ from pathlib import Path
 
 import pandas as pd
 
+from ql2_sixt_canada_analysis.authority_decisions import (
+    AuthorityDecisionRecord,
+    AuthorityReference,
+    DecisionId,
+)
 from ql2_sixt_canada_analysis.coverage import location_pair_evidence
 from ql2_sixt_canada_analysis.readiness import PricingReadinessReport
 from ql2_sixt_canada_analysis.schemas import (
     EXPECTED_LOCATION_COVERAGE,
-    LocationPolicyAuthority,
     TemporalKind,
     INVESTIGATED_LOCATION_STREAM,
     JOB_DETAIL_RELATIONSHIP,
@@ -70,6 +74,7 @@ from ql2_sixt_canada_analysis.temporal import TemporalReconciliationReport
 
 __all__ = [
     "ApprovedDateAgreement",
+    "baseline_authority_inputs",
     "rental_date_fields",
     "LocationRole",
     "BaselineInputError",
@@ -113,6 +118,38 @@ def rental_date_fields(relationship: JobDetailRelationshipDefinition) -> tuple[t
             *((detail, c) for c in RENTAL_PERIOD_COLUMNS))
 
 
+def baseline_authority_inputs(
+    record: AuthorityDecisionRecord, relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
+) -> dict[str, object]:
+    """Keyword inputs for :func:`build_pricing_baseline` taken from APPROVED decisions only.
+
+    A PROPOSED or REJECTED decision contributes nothing (``None``), so a record
+    without approvals - such as ``v1`` - can never close a plan gap.
+    """
+    if not isinstance(record, AuthorityDecisionRecord):
+        raise BaselineInputError("a validated AuthorityDecisionRecord is required")
+    inputs: dict[str, object] = dict(location_role_map=None, location_role_authority=None,
+                                     rental_period_rule_authority=None, approved_rental_date_agreements=None)
+    roles = record.approved_resolution(DecisionId.LOCATION_ROLE_ASSIGNMENTS)
+    if roles is not None:
+        inputs["location_role_map"] = {tuple(a["stream"]): LocationRole(a["role"].lower()) for a in roles["assignments"]}
+        inputs["location_role_authority"] = record.approved_authority(DecisionId.LOCATION_ROLE_ASSIGNMENTS)
+    agreements = record.approved_resolution(DecisionId.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS)
+    validity = record.approved_resolution(DecisionId.RENTAL_DATE_VALIDITY)
+    if agreements is not None and validity is not None:
+        datasets = {str(relationship.parent): relationship.parent, str(relationship.detail): relationship.detail}
+
+        def ref(value: str) -> tuple[object, str]:
+            dataset, column = value.split(".", 1)
+            return (datasets[dataset], column)
+
+        inputs["approved_rental_date_agreements"] = tuple(
+            ApprovedDateAgreement(source=ref(a["source"]), target=ref(a["target"])) for a in agreements["agreements"])
+        inputs["rental_period_rule_authority"] = record.approved_authority(
+            DecisionId.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS)
+    return inputs
+
+
 class BaselineInputError(ValueError):
     """A required assessment input is missing, empty or malformed (fail closed)."""
 
@@ -126,6 +163,7 @@ class LocationRole(StrEnum):
 
     AIRPORT = "airport"
     DOWNTOWN = "downtown"
+    OTHER = "other"
 
 
 class PlanReadinessGap(StrEnum):
@@ -207,8 +245,8 @@ def build_pricing_baseline(
     temporal_contract: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
     investigated_stream: tuple[str, ...] = INVESTIGATED_LOCATION_STREAM,
     location_role_map: Mapping[tuple[str, ...], LocationRole] | None = None,
-    location_role_authority: LocationPolicyAuthority | None = None,
-    rental_period_rule_authority: LocationPolicyAuthority | None = None,
+    location_role_authority: AuthorityReference | None = None,
+    rental_period_rule_authority: AuthorityReference | None = None,
     approved_rental_date_agreements: tuple[ApprovedDateAgreement, ...] | None = None,
 ) -> PricingReadinessBaseline:
     """Assemble the sanitized baseline from existing assessment results (inputs are not modified).
@@ -332,7 +370,7 @@ def _plan_gaps(coverage: LocationCoverageDefinition, relationship: JobDetailRela
 
 def _role_map_sufficient(role_map: object, authority: object, required: set, width: int) -> bool:
     """Authority-backed, typed roles for every expected and observed stream; anything less is a gap."""
-    if not isinstance(authority, LocationPolicyAuthority) or not isinstance(role_map, Mapping) or not role_map:
+    if not isinstance(authority, AuthorityReference) or not isinstance(role_map, Mapping) or not role_map:
         return False
     for key, role in role_map.items():
         if not (isinstance(key, tuple) and len(key) == width and all(isinstance(v, str) and v for v in key)):
@@ -345,7 +383,7 @@ def _role_map_sufficient(role_map: object, authority: object, required: set, wid
 def _rental_rules_sufficient(contract: object, relationship: JobDetailRelationshipDefinition, authority: object,
                              approved: object) -> bool:
     """Authority, an exact approved agreement per detail rental field, validity and matching rules."""
-    if not isinstance(contract, TemporalReconciliationDefinition) or not isinstance(authority, LocationPolicyAuthority):
+    if not isinstance(contract, TemporalReconciliationDefinition) or not isinstance(authority, AuthorityReference):
         return False
     if (not isinstance(approved, tuple) or not approved
             or not all(isinstance(a, ApprovedDateAgreement) for a in approved)):

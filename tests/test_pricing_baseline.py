@@ -17,6 +17,7 @@ from test_completeness import SYNTH_COV
 from test_readiness import DISTINCT, GATES, STABLE, scheduled_coverage, scheduled_frames
 
 from ql2_sixt_canada_analysis import pricing_baseline as pb
+from ql2_sixt_canada_analysis.authority_decisions import AuthorityKind, AuthorityReference
 from ql2_sixt_canada_analysis.pricing_baseline import (
     LocationRole,
     BaselineInputError,
@@ -37,7 +38,6 @@ from ql2_sixt_canada_analysis.schemas import (
     TEMPORAL_RECONCILIATION,
     DatasetKey,
     LocationCoverageMode,
-    LocationPolicyAuthority,
     TemporalAwareness,
     TemporalFieldDefinition,
     TemporalKind,
@@ -115,7 +115,8 @@ def test_minimum_required_contract_is_a_plan_gap_not_a_pricing_blocker():
     assert G.EXPECTED_STREAMS_NOT_EXHAUSTIVE not in synth_baseline(coverage=exhaustive).plan_gaps
 
 
-AUTHORITY = LocationPolicyAuthority(source="SYNTH-AUTHORITY", reference="SYNTH-DECISION-003")
+AUTHORITY = AuthorityReference(kind=AuthorityKind.BUSINESS_OWNER, source="SYNTH-AUTHORITY",
+                               reference="SYNTH-DECISION-003")
 
 
 def full_role_map(baseline):  # type: ignore[no-untyped-def]

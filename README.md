@@ -11,7 +11,7 @@ src/ql2_sixt_canada_analysis/   Reusable Python source package
 tests/             Automated validation (pytest)
 reports/           Generated analytical reports (ignored by default)
 reports/figures/   Generated charts and figures (ignored by default)
-docs/              Supporting documentation
+docs/              Supporting documentation (investigations, decision records)
 ```
 
 - `data/raw/` is immutable input data: never edit, rename, or overwrite it.
@@ -1072,6 +1072,25 @@ authority decision record that give each detail rental-date field
 `jobs.return_date`); all six must be required `DATE` fields and the temporal
 contract's rental-date replication rules must be exactly the approved pairs. The current baseline is
 `docs/investigations/pricing_readiness_baseline.md`.
+
+### Pricing-authority decision record
+
+The external decisions these gaps and blockers wait for are recorded, one
+atomic decision per `DecisionId`, in the versioned record
+[`docs/decisions/pricing_authorities/`](docs/decisions/pricing_authorities/README.md)
+(`authority_decisions.py`). Revision 1 (`v1.toml`) marks all 22 decisions
+`PROPOSED` and blocking on external input: no attributable supplier,
+collection-owner or business-owner decision exists yet, and raw-data
+observations, behavioural analyses, repository notes and review notes are
+recorded as non-authoritative evidence only. The questions to send are in
+[`authority_request_checklist.md`](docs/decisions/pricing_authorities/authority_request_checklist.md).
+Validate a revision with
+`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v1.toml`
+(sanitized summary; non-zero exit when invalid). The baseline's
+`location_role_authority` and `rental_period_rule_authority` take the
+domain-neutral `AuthorityReference`, and `baseline_authority_inputs(record)`
+passes on APPROVED decisions only, so a PROPOSED record clears nothing.
+Approved decisions are implemented in separate, tested changes.
 
 ## Vehicle-attribute stability
 
