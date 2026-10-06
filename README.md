@@ -376,13 +376,78 @@ tuple of expected location keys (one component per column), a mode, optional
 authoritative aliases and the scope columns used by stream investigation.
 Locations are **branch-level** pickup locations, which only the detail
 (`cars`) rows carry; jobs are city-level collection runs, so a jobs-level
-contract cannot represent a branch stream. Expected locations must come from
-an **independent authority** and are never derived from the extract being
-validated. The current contract holds three authority-identified streams:
-`INVESTIGATED_LOCATION_STREAM` and the two streams in
-`COMPARED_LOCATION_STREAMS`. The authority defines a required minimum rather
-than an exhaustive universe, so the mode is `MINIMUM_REQUIRED`; add further
-locations only from an authoritative list.
+contract cannot represent a branch stream. Expected locations come only from
+an **authority decision** and are never derived from the extract being
+validated.
+
+**The approved source-stream contract.** The expected streams are not written
+in code. `ql2_sixt_canada_analysis.expected_stream_contract` resolves them
+once from the latest valid authority record
+([`v3.toml`](docs/decisions/pricing_authorities/v3.toml):
+`EXPECTED_STREAM_UNIVERSE` approved jointly by the collection owner and the
+business owner, `EXPECTED_STREAM_SOURCE_SPELLING` approved by the collection
+owner; reference
+[`expected-stream-governance-2026-10-06.md`](docs/decisions/governance/expected-stream-governance-2026-10-06.md))
+into an `ExpectedStreamContract`, whose `coverage` *is*
+`EXPECTED_LOCATION_COVERAGE` (structure from `SOURCE_STREAM_COVERAGE_TEMPLATE`,
+keys and mode from the record). Ingestion checks, coverage, stream
+continuity, completeness, pricing readiness, the baseline and the notebook
+all use this one resolution; there is no second stream list. The contract is
+**`EXHAUSTIVE`** and holds exactly seven (city, location) source keys:
+
+| City | Location |
+| --- | --- |
+| `Calgary` | `Downtown` |
+| `Calgary` | `Int Airport` |
+| `Toronto` | `Downtown` |
+| `Toronto` | `Int Airport` |
+| `Vancouver` | `Downtown` |
+| `Vancouver` | `Int Airport` |
+| `Vancouver` | `Thurlow` |
+
+- **Exact source-key matching:** a source stream matches only when city and
+  location both equal an approved pair. Case, spacing and punctuation are
+  significant (`Calgary` is not `calgary` or `Calgary `, `Int Airport` is not
+  `Int  Airport` or `Int. Airport`); nothing is lowercased, uppercased,
+  trimmed, whitespace-collapsed or punctuation-rewritten before coverage is
+  decided.
+- **Four separate things:** the *raw source value* (preserved unchanged), the
+  *approved source key* (the exact spelling above), an *analytical display
+  label* and a *governed canonical alias*. Display labels and normalised
+  values never establish source coverage; an alias exists only through an
+  approved location-identity policy (none is approved) and is never hidden in
+  general string normalization.
+- **Fail closed:** a missing approved stream (`expected_pairs_missing`) and an
+  observed stream outside the contract (`unexpected_pairs`) both fail
+  completeness and pricing readiness - an unexpected stream is reported
+  pending contract review, never dropped, grouped, relabelled or added to the
+  universe. An unexpected stream that is a case/space/punctuation variant of
+  an approved key is also reported as `source_spelling_mismatch` (detected by
+  diagnostic folding only - the variant never covers the key). Without a valid
+  record, or with an approved universe but unapproved spellings, the coverage
+  stays unconfigured and pricing is blocked by
+  `expected_stream_authority_unavailable`; a non-exhaustive universe by
+  `expected_stream_universe_not_exhaustive`.
+- **Change control:** the contract applies to the current analyzed dataset and
+  subsequent collections until superseded. Any addition, removal, rename or
+  spelling change of a stream needs a new authority-record version (a new
+  `v<N>.toml` with its governance reference); committed versions are never
+  edited.
+- **Source identity is not analytical identity:** Vancouver `Downtown` and
+  Vancouver `Thurlow` are two separate expected *source* streams. Whether they
+  are one physical location is the separate `VANCOUVER_LOCATION_IDENTITY`
+  decision (still `PROPOSED`), applied only through `VANCOUVER_LOCATION_POLICY`.
+
+`INVESTIGATED_LOCATION_STREAM` (`Calgary / Downtown`) and
+`COMPARED_LOCATION_STREAMS` (the two Vancouver streams) are designations of
+approved keys for the detailed investigation and the identity comparison, not
+contracts; tests check that they are members of the approved universe.
+**Real data:** the current extracts carry none of the approved spellings
+exactly (their city labels differ in case and their location labels include
+the city name), so all seven approved streams are missing, all seven observed
+streams are unexpected spelling variants and pricing is blocked until the
+source spelling is corrected or a new authority version records different
+spellings or an approved alias policy.
 An unconfigured contract fails closed with `LocationCoverageConfigurationError`.
 
 ```python
@@ -399,9 +464,11 @@ validate_expected_location_coverage(cleaned.cars)      # raises LocationCoverage
 - **Separate signals:** missing expected locations, unexpected observed
   locations and rows with a missing / empty / whitespace-only location
   component are counted separately; unassigned rows create no observed key.
-- **Modes:** `EXHAUSTIVE` fails on any unexpected location;
-  `MINIMUM_REQUIRED` only reports them. Both fail on missing expected
-  locations and on unassigned rows. The mode must be stated by the authority.
+- **Modes:** `EXHAUSTIVE` (the approved project mode) fails on any
+  unexpected location; `MINIMUM_REQUIRED` only reports them (and pricing then
+  blocks as `expected_stream_universe_not_exhaustive`). Both fail on missing
+  expected locations, spelling variants and unassigned rows. The mode must be
+  stated by the authority.
 - **Exact comparison:** case-sensitive, no stripping, punctuation,
   abbreviation or fuzzy handling; composite keys are compared as tuples.
   Aliases count only when declared in the contract's `aliases` (none are
@@ -602,10 +669,8 @@ a separate key-integrity failure; nothing is deduplicated.
 
 ### All expected streams
 
-The expected-location contract currently holds **three** authority-identified
-(city, branch) pairs (`INVESTIGATED_LOCATION_STREAM` followed by
-`COMPARED_LOCATION_STREAMS`) in `MINIMUM_REQUIRED` mode: a required minimum,
-not an exhaustive list of every branch or every scheduled city.
+The expected-location contract holds the **seven** approved (city, location)
+source streams in `EXHAUSTIVE` mode (see above).
 `assess_expected_location_streams(jobs_df, cars_df)` investigates **every**
 configured pair exactly once, in contract order, and returns an
 `ExpectedLocationStreamsReport` that pairs each report with its configured
@@ -1001,7 +1066,7 @@ were bypassed - and refuses an invalid alias as a whole
 (`canonicalization_refused`, `scope_defects`): every analytical key then
 equals its source key, so no row is moved into another city or stream and
 nothing is partially rewritten. Coverage, stream continuity, the
-three-stream completeness contract and comparisons use source labels (branch
+source-stream completeness contract and comparisons use source labels (branch
 coverage from the detail rows) and are never computed from canonical keys,
 so a rejected alias neither removes the Vancouver streams nor adds rows to
 Calgary; pricing readiness stays blocked until the policy is corrected.
@@ -1094,7 +1159,7 @@ receive `ready=True`; `None` is accepted only to be reported as a blocker:
   never read as "no scheduled times were required") or `invalid`. The
   `ScheduledCoverageReport` is complete only when the schedule is available,
   the all-expected-stream aggregate holds **exactly one** report per
-  configured expected stream (all three; duplicates or unexpected reports
+  configured expected stream (all seven approved streams; duplicates or unexpected reports
   never replace a missing one), every report was assessed against that same
   schedule, and every stream's time coverage is `COMPLETE` - an allowlist:
   `NOT_ASSESSED`, `NEVER_PRESENT`, `PARTIAL`, `UNASSESSABLE`, a missing
@@ -1124,6 +1189,17 @@ receive `ready=True`; `None` is accepted only to be reported as a blocker:
   different report object than the join's adds `job_linkage_report_mismatch`.
   Completeness, keys and reconciliation computed on frames that were not
   linked under the approved policy are therefore never sufficient.
+- `expected_stream_contract` - the `ExpectedStreamContract` from
+  `current_expected_stream_contract()` (the same resolution that produced the
+  completeness contract). `None` or an unapproved universe/spelling is
+  `expected_stream_authority_unavailable` (plus
+  `expected_stream_universe_not_exhaustive`); an approved but
+  `MINIMUM_REQUIRED` universe is `expected_stream_universe_not_exhaustive`;
+  completeness assessed against another contract is
+  `expected_stream_contract_mismatch`. Missing, unexpected and misspelled
+  source streams found by completeness are repeated with their own values
+  (`expected_pairs_missing`, `unexpected_pairs`, `source_spelling_mismatch`),
+  and pricing never reuses one stream's result for the whole contract.
 
 Blockers accumulate in a fixed order (completeness, foundational gates,
 stability, scheduled coverage, trusted join, location policy) and nothing
@@ -1135,14 +1211,29 @@ short-circuits. `PricingReadinessReport` keeps both inputs for audit
 rows. Timestamp authority (ordering, reporting-day derivation and the zone of
 naive `finished_at` values) remains unresolved and is not established here.
 
-**Definition of done for pricing readiness:** complete data (every expected
-stream exactly once, coverage, counts, city integrity), valid key contracts,
+**Definition of done for pricing readiness:** an approved, `EXHAUSTIVE`
+source-stream contract from the current authority record, complete data
+(every approved stream exactly once and healthy, no missing, unexpected or
+misspelled stream, counts, city integrity), valid key contracts,
 a valid one-to-many relationship, trusted temporal fields, a stable,
 fully assessed vehicle population, an available and valid authoritative
 collection schedule with `COMPLETE` time coverage for every configured
 expected stream, a validated trusted job-detail join (no
 `join_construction_failed` or other join blocker) and an authority-sufficient
 location policy - and nothing else blocking.
+
+**Remaining blockers (current real-data baseline):** the observed source
+spellings do not match the approved keys (`expected_pairs_missing`,
+`unexpected_pairs`, `source_spelling_mismatch`, `data_incomplete`,
+`expected_streams_not_proven`); no authoritative collection schedule
+(`collection_schedule_unavailable`, `scheduled_coverage_incomplete`) and the
+one Calgary Downtown capture gap that only a schedule or an approved exception
+could explain; untrusted temporal fields (`temporal_fields_untrusted`); the
+unresolved Vancouver identity (`vancouver_policy_unresolved`); and the plan
+prerequisites without authority (location roles and comparison pairs,
+rental-date rules). `expected_stream_authority_unavailable` and
+`expected_stream_universe_not_exhaustive` are cleared by the approved
+revision 3. The dataset is **not** pricing ready.
 
 **Still required:** an authoritative statement - from the supplier, the
 collection owner or the business - of whether the two Vancouver labels are
@@ -1159,11 +1250,18 @@ runs the same assessments as the ingestion notebook on the real files and
 prints a sanitized Markdown baseline (`pricing_baseline.py`: a reporting
 layer only - it never re-decides readiness). It separates **active
 blockers** (the exact typed values the existing reports emitted) from
-**plan-level gaps** (`PlanReadinessGap`: a `MINIMUM_REQUIRED` stream
-contract, no airport/downtown role map, no pickup/return-date rules - none
-of them a `PricingBlocker`), lists the configured expected and the observed
-stream populations separately (observations establish no authority) and
-reports the investigated stream's continuity in aggregate only. Serialization
+**plan-level gaps** (`PlanReadinessGap`: no airport/downtown role map, no
+pickup/return-date rules - neither a `PricingBlocker`; the expected-stream
+universe is a central blocker, not a gap), reports the approved contract
+(authority status, `EXHAUSTIVE` mode, record version and the seven approved
+keys) and the observed population separately - the observed population as
+counts only (exact matches, unexpected streams, spelling variants, approved
+keys never observed exactly), naming only observed keys that equal approved
+keys - and reports per-stream health: the typed status, continuity and time
+coverage of every approved stream, and anonymous (numbered) exact job-based
+continuity of every observed stream, so a partial observed stream stays
+visible without printing its source value. The investigated approved
+stream's continuity is reported in aggregate only. Serialization
 is fail closed: only counts, booleans, snake-case codes and digit-free
 location labels are accepted. Plan gaps close only on sufficient,
 authority-backed inputs: the role-map gap needs authority provenance
@@ -1183,23 +1281,26 @@ The external decisions these gaps and blockers wait for are recorded, one
 atomic decision per `DecisionId`, in the versioned record
 [`docs/decisions/pricing_authorities/`](docs/decisions/pricing_authorities/README.md)
 (`authority_decisions.py`). Revision 1 (`v1.toml`, schema 1, kept unchanged
-as history) marked all 22 decisions `PROPOSED`. The current revision 2
-(`v2.toml`, schema 2, `CURRENT_RECORD_PATH`) approves the four
-job-identifier decisions on collection-owner authority (the governance
-reference above) and leaves the other 18 `PROPOSED` and blocking on external
-input; raw-data observations, behavioural analyses, repository notes and
+as history) marked all 22 decisions `PROPOSED`. Revision 2 (`v2.toml`,
+schema 2, unchanged) approved the four job-identifier decisions on
+collection-owner authority. The current revision 3 (`v3.toml`, schema 2,
+`CURRENT_RECORD_PATH`) keeps those four and approves the exhaustive
+seven-stream universe and its exact source spellings (collection owner and
+business owner; collection owner), leaving the other 16 `PROPOSED` and
+blocking on external input; raw-data observations, behavioural analyses, repository notes and
 review notes remain non-authoritative evidence only. The questions still to
 send are in
 [`authority_request_checklist.md`](docs/decisions/pricing_authorities/authority_request_checklist.md).
 Validate a revision with
-`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v2.toml`
+`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v3.toml`
 (sanitized summary; non-zero exit when invalid). The baseline's
 `location_role_authority` and `rental_period_rule_authority` take the
 domain-neutral `AuthorityReference`, and `baseline_authority_inputs(record)`
 passes on APPROVED decisions only, so a PROPOSED record clears nothing.
 Approved decisions are implemented in separate, tested changes: the
 job-identifier approvals by `job_linkage` (`job_linkage_policy_from_record`
-builds its policy only when all four are approved and consistent).
+builds its policy only when all four are approved and consistent), the
+expected-stream approvals by `expected_stream_contract`.
 
 ## Vehicle-attribute stability
 
@@ -1311,7 +1412,8 @@ python -m pytest tests/test_notebooks.py
 - Authoritative collection schedule available, with `COMPLETE` time coverage for every expected stream
 - Authority-backed job linkage valid (derived keys; raw identifiers unchanged)
 - Trusted job-detail join validated (no `join_construction_failed`)
-- All authoritative expected (city, branch) pairs present in detail (`cars`) rows
+- Approved exhaustive source-stream contract (seven exact (city, location) keys) from the current authority record
+- Every approved (city, location) pair present in detail (`cars`) rows with its exact source spelling, and no unexpected stream
 - Job level counts = detail row counts
 - Valid offers duplicated
 - Job timestamps consistent

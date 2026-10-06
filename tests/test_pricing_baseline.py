@@ -12,7 +12,8 @@ import json
 
 import pandas as pd
 import pytest
-from test_city_integrity import PROJECT_GATES, completeness as project_completeness, healthy
+from stream_contract_fixtures import synthetic_contract
+from test_city_integrity import COV, PROJECT_GATES, completeness as project_completeness, healthy
 from test_completeness import SYNTH_COV
 from test_readiness import DISTINCT, GATES, STABLE, scheduled_coverage, scheduled_frames
 
@@ -33,7 +34,6 @@ from ql2_sixt_canada_analysis.readiness import PricingBlocker as B, assess_locat
 from ql2_sixt_canada_analysis.identifiers import is_identifier_dtype
 from ql2_sixt_canada_analysis.schemas import (
     JOB_DETAIL_RELATIONSHIP as REL,
-    EXPECTED_LOCATION_COVERAGE as COV,
     INVESTIGATED_LOCATION_STREAM,
     TEMPORAL_RECONCILIATION,
     DatasetKey,
@@ -43,6 +43,7 @@ from ql2_sixt_canada_analysis.schemas import (
     TemporalKind,
     TemporalReplicationRule,
 )
+from ql2_sixt_canada_analysis.coverage import location_pair_evidence
 from ql2_sixt_canada_analysis.temporal import assess_temporal_reconciliation
 
 SYNTH_TARGET = SYNTH_COV.expected_locations[0]
@@ -55,7 +56,8 @@ def synth_pricing(**changes):  # type: ignore[no-untyped-def]
 def synth_baseline(pricing=None, cars=None, **kwargs):  # type: ignore[no-untyped-def]
     j, c = scheduled_frames()
     return build_pricing_baseline(
-        pricing=pricing if pricing is not None else synth_pricing(), cars=cars if cars is not None else c,
+        pricing=pricing if pricing is not None else synth_pricing(), jobs=kwargs.pop("jobs", j),
+        cars=cars if cars is not None else c,
         temporal=kwargs.pop("temporal", None), vehicle_stability=kwargs.pop("vehicle_stability", STABLE),
         coverage=kwargs.pop("coverage", SYNTH_COV), investigated_stream=kwargs.pop("investigated_stream", SYNTH_TARGET),
         **kwargs)
@@ -65,7 +67,7 @@ def project_baseline(cars=None, **gate_changes):  # type: ignore[no-untyped-def]
     j, c = healthy()
     gates = PROJECT_GATES(project_completeness(j, c)) | gate_changes
     pricing = assess_pricing_readiness(location_policy=assess_location_policy(), **gates)
-    return build_pricing_baseline(pricing=pricing, cars=c if cars is None else cars, temporal=None,
+    return build_pricing_baseline(pricing=pricing, jobs=j, cars=c if cars is None else cars, temporal=None,
                                   vehicle_stability=STABLE)
 
 
@@ -101,26 +103,33 @@ def test_active_blockers_and_plan_gaps_are_separate():
     assert not gap_values & set(baseline.pricing_blockers)
     assert not any(gap_values & set(codes) for _, codes in baseline.subordinate_blockers)
     assert not gap_values & {b.value for b in B}                  # gaps are not PricingBlocker values
-    assert baseline.plan_gaps == (G.EXPECTED_STREAMS_NOT_EXHAUSTIVE, G.LOCATION_ROLE_MAP_UNAVAILABLE,
-                                  G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE)
+    assert baseline.plan_gaps == (G.LOCATION_ROLE_MAP_UNAVAILABLE, G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE)
+    assert not any("exhaustive" in g.value for g in G)     # exhaustiveness is a central blocker, not a gap
 
 
-def test_minimum_required_contract_is_a_plan_gap_not_a_pricing_blocker():
+def test_non_exhaustive_contract_is_a_central_blocker_not_a_plan_gap():
     pricing = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT), **GATES)
     baseline = synth_baseline(pricing=pricing)                          # every central gate passes
     assert baseline.pricing_ready and baseline.pricing_blockers == ()
-    assert G.EXPECTED_STREAMS_NOT_EXHAUSTIVE in baseline.plan_gaps
-    assert baseline.expected_population.authority == "authoritative_minimum_required"
-    exhaustive = dataclasses.replace(SYNTH_COV, mode=LocationCoverageMode.EXHAUSTIVE)
-    assert G.EXPECTED_STREAMS_NOT_EXHAUSTIVE not in synth_baseline(coverage=exhaustive).plan_gaps
+    assert baseline.expected_population.authority == "authoritative_exhaustive"
+    minimum = dataclasses.replace(SYNTH_COV, mode=LocationCoverageMode.MINIMUM_REQUIRED)
+    blocked = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
+                                       **(GATES | {"expected_stream_contract": synthetic_contract(minimum)}))
+    assert B.EXPECTED_STREAM_UNIVERSE_NOT_EXHAUSTIVE in blocked.blocking_reasons
+    assert B.EXPECTED_STREAM_CONTRACT_MISMATCH in blocked.blocking_reasons      # completeness used another contract
+    report = synth_baseline(pricing=blocked, coverage=minimum)
+    assert "expected_stream_universe_not_exhaustive" in report.pricing_blockers
+    assert report.expected_population.authority == "authoritative_minimum_required"
+    assert set(report.plan_gaps) <= set(G)
 
 
 AUTHORITY = AuthorityReference(kind=AuthorityKind.BUSINESS_OWNER, source="SYNTH-AUTHORITY",
                                reference="SYNTH-DECISION-003")
 
 
-def full_role_map(baseline):  # type: ignore[no-untyped-def]
-    keys = set(baseline.expected_population.keys) | set(baseline.observed_population.keys)
+def full_role_map(baseline, cars):  # type: ignore[no-untyped-def]
+    observed = location_pair_evidence(cars, COV).loc[:, list(COV.location_columns)]   # in memory only
+    keys = set(baseline.expected_population.keys) | set(map(tuple, observed.itertuples(index=False)))
     return {k: LocationRole.DOWNTOWN for k in sorted(keys)}
 
 
@@ -133,14 +142,14 @@ def test_role_map_gap_closes_only_with_complete_typed_authority_backed_roles():
     # One extra observed (not expected) stream, so expected-only maps are incomplete.
     c = pd.concat([c, c.iloc[[0]].assign(**{COV.label_column: "SYNTH Airport"})], ignore_index=True).astype(
         dict(REL.detail_definition.identifier_dtypes))
-    complete = full_role_map(project_baseline(cars=c))
+    complete = full_role_map(project_baseline(cars=c), c)
     assert len(complete) == 4
     one_key = dict(list(complete.items())[:1])
 
     def gaps(**kwargs):  # type: ignore[no-untyped-def]
         pricing = assess_pricing_readiness(location_policy=assess_location_policy(),
                                            **PROJECT_GATES(project_completeness(j, c)))
-        return build_pricing_baseline(pricing=pricing, cars=c, temporal=None, vehicle_stability=STABLE,
+        return build_pricing_baseline(pricing=pricing, jobs=j, cars=c, temporal=None, vehicle_stability=STABLE,
                                       **kwargs).plan_gaps
 
     still_open = [
@@ -214,7 +223,8 @@ def project_baseline_with(**kwargs):  # type: ignore[no-untyped-def]
     j, c = healthy()
     pricing = assess_pricing_readiness(location_policy=assess_location_policy(),
                                        **PROJECT_GATES(project_completeness(j, c)))
-    return build_pricing_baseline(pricing=pricing, cars=c, temporal=None, vehicle_stability=STABLE, **kwargs)
+    return build_pricing_baseline(pricing=pricing, jobs=j, cars=c, temporal=None, vehicle_stability=STABLE,
+                                  **kwargs)
 
 
 # --------------------------------------------------------------- populations
@@ -224,10 +234,15 @@ def test_expected_and_observed_populations_stay_separate():
     j, c = healthy()
     extra = pd.concat([c, c.iloc[[0]].assign(**{COV.label_column: "SYNTH Airport"})], ignore_index=True)
     baseline = project_baseline(cars=extra)
-    assert baseline.expected_population.keys == tuple(sorted(COV.expected_locations))
+    assert baseline.expected_population.keys == tuple(COV.expected_locations)          # contract order
     assert baseline.expected_population.count == 3 and baseline.observed_population.count == 4
-    assert baseline.observed_population.authority == "observed_not_authoritative"
-    assert (INVESTIGATED_LOCATION_STREAM[0], "SYNTH Airport") in baseline.observed_population.keys
+    observed = baseline.observed_population
+    assert observed.authority == "observed_not_authoritative"
+    assert (observed.exact_expected_count, observed.unexpected_count, observed.spelling_variant_count,
+            observed.expected_missing_count) == (3, 1, 0, 0)
+    # Only observed keys that equal approved keys are named; the extra observed key is a count only.
+    assert observed.keys == tuple(COV.expected_locations)
+    assert (INVESTIGATED_LOCATION_STREAM[0], "SYNTH Airport") not in observed.keys
     assert (INVESTIGATED_LOCATION_STREAM[0], "SYNTH Airport") not in baseline.expected_population.keys
 
 
@@ -238,7 +253,7 @@ def test_ordering_is_deterministic_and_deduplicated():
     backward = project_baseline(cars=doubled.iloc[::-1])
     assert forward == backward
     keys = forward.observed_population.keys
-    assert list(keys) == sorted(set(keys))
+    assert len(keys) == len(set(keys)) and list(keys) == [k for k in COV.expected_locations if k in keys]
     assert len(forward.pricing_blockers) == len(set(forward.pricing_blockers))
 
 
@@ -260,7 +275,7 @@ def test_continuity_finding_is_aggregate_only():
     pricing = assess_pricing_readiness(location_policy=assess_location_policy(),
                                        **(PROJECT_GATES(project_completeness(j2, cars))
                                           | {"scheduled_coverage": scheduled_coverage(schedule=None)}))
-    baseline = build_pricing_baseline(pricing=pricing, cars=cars, temporal=None, vehicle_stability=STABLE)
+    baseline = build_pricing_baseline(pricing=pricing, jobs=j2, cars=cars, temporal=None, vehicle_stability=STABLE)
     finding = baseline.continuity
     assert isinstance(finding, ContinuityFinding) and finding.stream == INVESTIGATED_LOCATION_STREAM
     assert (finding.in_scope_capture_events, finding.capture_events_lacking_stream) == (2, 1)
@@ -332,8 +347,9 @@ def test_missing_or_malformed_inputs_fail_closed():
     pricing = synth_pricing()
     for kwargs in (dict(pricing=None), dict(pricing=True), dict(cars=c.iloc[0:0]), dict(cars=None),
                    dict(cars=c.drop(columns=[SYNTH_COV.label_column])), dict(temporal="trusted"),
-                   dict(vehicle_stability=True), dict(investigated_stream=("SYNTH-NOT", "EXPECTED"))):
-        inputs = dict(pricing=pricing, cars=c, temporal=None, vehicle_stability=STABLE, coverage=SYNTH_COV,
+                   dict(vehicle_stability=True), dict(investigated_stream=("SYNTH-NOT", "EXPECTED")),
+                   dict(jobs=None), dict(jobs=j.iloc[0:0]), dict(coverage=COV)):     # COV: not the pricing contract
+        inputs = dict(pricing=pricing, jobs=j, cars=c, temporal=None, vehicle_stability=STABLE, coverage=SYNTH_COV,
                       investigated_stream=SYNTH_TARGET) | kwargs
         with pytest.raises(BaselineInputError):
             build_pricing_baseline(**inputs)

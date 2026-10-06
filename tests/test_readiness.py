@@ -39,6 +39,7 @@ from ql2_sixt_canada_analysis.readiness import (
     validate_pricing_readiness,
 )
 from conftest import join_gates, linked_join
+from stream_contract_fixtures import synthetic_contract
 from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
 from ql2_sixt_canada_analysis.job_linkage import JobLinkageBlocker
 from ql2_sixt_canada_analysis.stability import VehicleStabilityStatus, assess_vehicle_attribute_stability
@@ -115,6 +116,7 @@ def gates_for(jobs: pd.DataFrame, cars: pd.DataFrame, coverage, completeness):  
     """GATES whose schedule coverage and trusted join are assessed for ``coverage`` on these frames."""
     return GATES | {"completeness": completeness,
                     "scheduled_coverage": scheduled_coverage(frames=(jobs, captured(cars)), coverage=coverage),
+                    "expected_stream_contract": synthetic_contract(coverage),
                     **join_gates(jobs, cars)}
 
 
@@ -129,10 +131,10 @@ JOIN_OK = linked_join(*scheduled_frames())
 LINKAGE_OK = JOIN_OK.job_linkage_report
 GATES = dict(completeness=COMPLETE, key_contracts_valid=True, one_to_many_contract_valid=True,
              temporal_fields_trusted=True, vehicle_stability=STABLE, scheduled_coverage=SCHEDULED_OK,
-             job_detail_join=JOIN_OK, job_linkage=LINKAGE_OK)
+             job_detail_join=JOIN_OK, job_linkage=LINKAGE_OK, expected_stream_contract=synthetic_contract(SYNTH_COV))
 FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE,
                                              "scheduled_coverage": None, "job_detail_join": None,
-                                             "job_linkage": None}
+                                             "job_linkage": None, "expected_stream_contract": None}
 
 
 def evidence(status: CS) -> LocationStreamComparisonReport:
@@ -516,7 +518,16 @@ def test_resolved_policy_does_not_override_other_gates():
 def test_each_foundational_gate_blocks_alone(gate):
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
                                          **(GATES | {gate: FAILING[gate]}))
+    if gate == "expected_stream_contract":       # no contract: no authority, hence no exhaustive universe either
+        assert readiness.blocking_reasons == (B.EXPECTED_STREAM_AUTHORITY_UNAVAILABLE,
+                                              B.EXPECTED_STREAM_UNIVERSE_NOT_EXHAUSTIVE)
+        return
     assert not readiness.ready and len(readiness.blocking_reasons) == 1
+
+
+#: Source-stream blockers that need an applied contract and observed data (not produced by missing reports).
+SOURCE_STREAM_DETAIL = {B.EXPECTED_STREAM_CONTRACT_MISMATCH, B.EXPECTED_SOURCE_STREAMS_MISSING,
+                        B.UNEXPECTED_SOURCE_STREAMS, B.SOURCE_SPELLING_MISMATCH}
 
 
 def test_all_failures_are_reported_together():
@@ -527,7 +538,7 @@ def test_all_failures_are_reported_together():
                                                         B.ALIAS_CANONICALIZATION_NOT_APPLIED,
                                                         B.IDENTITY_EVIDENCE_CONFLICT,
                                                         B.VEHICLE_STABILITY_UNAVAILABLE,
-                                                        B.COMPLETENESS_UNAVAILABLE}
+                                                        B.COMPLETENESS_UNAVAILABLE} - SOURCE_STREAM_DETAIL
     assert readiness.blocking_reasons[-1] is B.LOCATION_POLICY_UNRESOLVED
 
 

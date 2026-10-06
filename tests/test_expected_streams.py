@@ -45,7 +45,7 @@ CITY2 = "SYNTH-CITY-2"
 A, B, C, D = "SYNTH-BRANCH-A", "SYNTH-BRANCH-B", "SYNTH-BRANCH-C", "SYNTH-BRANCH-D"
 TA, TB, TC = (CITY, A), (CITY2, B), (CITY2, C)
 COV3 = dataclasses.replace(EXPECTED_LOCATION_COVERAGE, expected_locations=(TA, TB, TC),
-                           mode=LocationCoverageMode.MINIMUM_REQUIRED)
+                           mode=LocationCoverageMode.EXHAUSTIVE)
 
 
 def healthy():  # type: ignore[no-untyped-def]
@@ -251,9 +251,11 @@ def test_blocker_categories_carry_no_source_values():
     assert not any("SYNTH" in b.value for b in EB)
 
 
-def test_project_contract_is_investigated_then_compared_streams():
-    assert EXPECTED_LOCATION_COVERAGE.expected_locations == (INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS)
-    assert EXPECTED_LOCATION_COVERAGE.mode is LocationCoverageMode.MINIMUM_REQUIRED
+def test_project_contract_is_the_approved_exhaustive_universe_with_the_designated_streams():
+    keys = EXPECTED_LOCATION_COVERAGE.expected_locations
+    assert EXPECTED_LOCATION_COVERAGE.mode is LocationCoverageMode.EXHAUSTIVE and len(keys) == 7
+    assert INVESTIGATED_LOCATION_STREAM in keys and set(COMPARED_LOCATION_STREAMS) <= set(keys)
+    assert keys != (INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS)   # not the former three-stream minimum
 
 
 def test_package_exports():

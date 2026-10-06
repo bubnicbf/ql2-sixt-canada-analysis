@@ -72,11 +72,13 @@ from ql2_sixt_canada_analysis.relationships import (
     validate_one_to_many_join,
 )
 from ql2_sixt_canada_analysis.schemas import (
+    PROJECT_DEFAULT,
+    SOURCE_STREAM_COVERAGE_TEMPLATE,
+    project_default,
     ANALYSIS_CARS_DEFINITION,
     ANALYSIS_DATASET_DEFINITIONS,
     ANALYSIS_JOBS_DEFINITION,
     ANALYSIS_JOB_DETAIL_RELATIONSHIP,
-    ANALYSIS_LOCATION_STREAM_COMPARISON,
     ANALYSIS_TEMPORAL_RECONCILIATION,
     CONFIDENTIAL_TECHNICAL_COLUMNS,
     JOB_LINKAGE_KEY_COLUMN,
@@ -86,10 +88,8 @@ from ql2_sixt_canada_analysis.schemas import (
     SOURCE_OFFER_POSITION_COLUMN,
     COLLECTION_SCHEDULE,
     DATASET_DEFINITIONS,
-    EXPECTED_LOCATION_COVERAGE,
     IDENTIFIER_DTYPE,
     INVESTIGATED_LOCATION_STREAM,
-    VANCOUVER_LOCATION_POLICY,
     MINIMUM_DUPLICATE_PAIRED_CAPTURES,
     LocationIdentityPolicy,
     LocationPolicyAuthority,
@@ -105,7 +105,6 @@ from ql2_sixt_canada_analysis.schemas import (
     VehicleStabilityConfigurationError,
     VehicleStabilityDefinition,
     COMPARED_LOCATION_STREAMS,
-    LOCATION_STREAM_COMPARISON,
     CapturePairing,
     LocationStreamComparisonDefinition,
     CollectionScheduleDefinition,
@@ -409,6 +408,17 @@ __all__ = [
     "cast_identifiers_for_raw_datasets",
     "discover_raw_csvs",
     "get_dataset_definition",
+    "PROJECT_DEFAULT",
+    "SOURCE_STREAM_COVERAGE_TEMPLATE",
+    "project_default",
+    "EXPECTED_STREAM_DECISIONS",
+    "ExpectedStreamAuthorityStatus",
+    "ExpectedStreamContract",
+    "ExpectedStreamContractBlocker",
+    "current_expected_stream_contract",
+    "expected_stream_contract_from_record",
+    "resolve_expected_stream_contract",
+    "load_current_decision_record",
     "join_jobs_to_details",
     "load_raw_datasets",
     "remove_blank_rows_from_raw_datasets",
@@ -442,7 +452,34 @@ _LAZY_JOB_LINKAGE = frozenset({
 })
 
 
+#: The authority-resolved contract and the definitions built on it (resolved
+#: on first access from :mod:`ql2_sixt_canada_analysis.schemas`).
+_LAZY_SCHEMAS = frozenset({"ANALYSIS_LOCATION_STREAM_COMPARISON", "EXPECTED_LOCATION_COVERAGE",
+                           "LOCATION_STREAM_COMPARISON", "VANCOUVER_LOCATION_POLICY"})
+
+#: Names served lazily from :mod:`ql2_sixt_canada_analysis.expected_stream_contract`
+#: and :mod:`ql2_sixt_canada_analysis.authority_decisions`.
+_LAZY_OTHER = {
+    "EXPECTED_STREAM_DECISIONS": "expected_stream_contract",
+    "ExpectedStreamAuthorityStatus": "expected_stream_contract",
+    "ExpectedStreamContract": "expected_stream_contract",
+    "ExpectedStreamContractBlocker": "expected_stream_contract",
+    "current_expected_stream_contract": "expected_stream_contract",
+    "expected_stream_contract_from_record": "expected_stream_contract",
+    "resolve_expected_stream_contract": "expected_stream_contract",
+    "load_current_decision_record": "authority_decisions",
+}
+
+
 def __getattr__(name: str):  # type: ignore[no-untyped-def]  # PEP 562
+    if name in _LAZY_SCHEMAS:
+        from ql2_sixt_canada_analysis import schemas
+
+        return getattr(schemas, name)
+    if name in _LAZY_OTHER:
+        import importlib
+
+        return getattr(importlib.import_module(f"ql2_sixt_canada_analysis.{_LAZY_OTHER[name]}"), name)
     if name in _LAZY_JOB_LINKAGE:
         from ql2_sixt_canada_analysis import job_linkage
 

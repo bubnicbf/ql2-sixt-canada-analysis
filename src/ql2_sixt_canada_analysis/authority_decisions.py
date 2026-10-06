@@ -68,9 +68,11 @@ from ql2_sixt_canada_analysis.schemas import (
 
 __all__ = [
     "CURRENT_RECORD_PATH",
+    "GOVERNANCE_REFERENCE_DIR",
     "JOB_IDENTIFIER_DECISIONS",
     "LEGACY_DECIMAL_ZERO_REPAIR",
     "OPAQUE_TEXT_IDENTIFIER_POLICY",
+    "RETIRED_DOWNSTREAM_CODES",
     "SUPPORTED_SCHEMA_VERSIONS",
     "AuthorityDecisionRecord",
     "AuthorityKind",
@@ -82,6 +84,7 @@ __all__ = [
     "EvidenceKind",
     "EvidenceReference",
     "LocationRoleDecision",
+    "load_current_decision_record",
     "load_decision_record",
     "parse_decision_record",
     "render_authority_request_checklist",
@@ -92,7 +95,7 @@ __all__ = [
 #: Record schema versions this module understands.
 SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 #: The current committed revision (repository-relative).
-CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v2.toml")
+CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v3.toml")
 
 
 class DecisionRecordError(ValueError):
@@ -191,6 +194,13 @@ RENTAL_DATE_DETAIL_FIELDS = (f"{_DETAIL}.job_pickup_date", f"{_DETAIL}.job_retur
 _TIMESTAMP_FIELDS = (f"{_PARENT}.finished_at", f"{_DETAIL}.job_finished_at", f"{_DETAIL}.scraped_at")
 
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+
+#: Downstream codes used by committed historical revisions that the current
+#: implementation has replaced (historical code -> current blocker value).
+#: Committed revisions are immutable, so their codes are mapped, not edited.
+RETIRED_DOWNSTREAM_CODES: Mapping[str, str] = MappingProxyType({
+    "expected_streams_minimum_required_not_exhaustive": "expected_stream_universe_not_exhaustive",
+})
 _EXPLICIT_OFFSET = re.compile(r"(?:Z|[+-]\d{2}:\d{2})$")
 #: Content that looks like source-level data is refused in free text.
 _SENSITIVE = (re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}"),  # timestamps
@@ -296,24 +306,51 @@ class AuthorityDecisionRecord:
 # ---------------------------------------------------------------- loading
 
 
-def load_decision_record(path: str | Path) -> AuthorityDecisionRecord:
-    """Load and validate a TOML decision record (fail closed)."""
+def load_decision_record(path: str | Path, *, repository_root: str | Path | None = None) -> AuthorityDecisionRecord:
+    """Load and validate a TOML decision record (fail closed).
+
+    ``repository_root`` (default: the project root) is where schema-2
+    authority references are resolved (see :func:`parse_decision_record`).
+    """
     try:
         data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         raise DecisionRecordError("the record file cannot be read") from None
     except tomllib.TOMLDecodeError:
         raise DecisionRecordError("the record is not valid TOML") from None
-    return parse_decision_record(data)
+    return parse_decision_record(data, repository_root=repository_root)
 
 
-def validate_decision_record(path: str | Path) -> AuthorityDecisionRecord:
+def load_current_decision_record(*, repository_root: str | Path | None = None) -> AuthorityDecisionRecord | None:
+    """The current committed record (:data:`CURRENT_RECORD_PATH`), or ``None`` when it does not validate.
+
+    ``None`` is the fail-closed "authority unavailable" state: callers treat
+    every decision as unapproved. ``repository_root`` defaults to the project root.
+    """
+    if repository_root is None:
+        from ql2_sixt_canada_analysis.paths import PROJECT_ROOT
+        repository_root = PROJECT_ROOT
+    try:
+        return load_decision_record(Path(repository_root) / CURRENT_RECORD_PATH, repository_root=repository_root)
+    except DecisionRecordError:
+        return None
+
+
+def validate_decision_record(path: str | Path, *, repository_root: str | Path | None = None) -> AuthorityDecisionRecord:
     """Public validation entry point (alias of :func:`load_decision_record`)."""
-    return load_decision_record(path)
+    return load_decision_record(path, repository_root=repository_root)
 
 
-def parse_decision_record(data: Mapping[str, object]) -> AuthorityDecisionRecord:
-    """Build a validated record from parsed TOML data (the input is never modified)."""
+def parse_decision_record(data: Mapping[str, object], *,
+                          repository_root: str | Path | None = None) -> AuthorityDecisionRecord:
+    """Build a validated record from parsed TOML data (the input is never modified).
+
+    Schema 2 onwards: every authority of an APPROVED or REJECTED decision must
+    reference an existing repository-local governance document under
+    :data:`GOVERNANCE_REFERENCE_DIR` (a relative POSIX path, no traversal),
+    resolved against ``repository_root`` (default: the project root). A
+    missing or out-of-area reference fails closed.
+    """
     if not isinstance(data, Mapping):
         raise DecisionRecordError("the record must be a table")
     _only_keys(data, {"schema_version", "record_version", "record_id", "created", "scope", "source_commit",
@@ -348,6 +385,9 @@ def parse_decision_record(data: Mapping[str, object]) -> AuthorityDecisionRecord
     entries = []
     for item in raw:
         entry = _entry(item)
+        if type(data.get("schema_version")) is int and data["schema_version"] >= 2 and entry.authority:
+            for authority in entry.authority:
+                _check_local_reference(authority.reference, repository_root, entry.id.value)
         if entry.id in seen:
             raise DecisionRecordError(f"duplicate decision {entry.id.value}")
         seen.append(entry.id)
@@ -380,6 +420,29 @@ def parse_decision_record(data: Mapping[str, object]) -> AuthorityDecisionRecord
     if not isinstance(summary, Mapping) or dict(summary) != expected:
         raise DecisionRecordError("summary counts must equal the decision statuses")
     return record
+
+
+#: Repository-relative area that schema-2 authority references must point into.
+GOVERNANCE_REFERENCE_DIR = Path("docs/decisions/governance")
+_REFERENCE_PATH = re.compile(r"docs/decisions/governance/[A-Za-z0-9][A-Za-z0-9._-]*\.md")
+
+
+def _check_local_reference(reference: str, repository_root: str | Path | None, name: str) -> None:
+    """Fail closed unless ``reference`` names an existing governance document inside the permitted area."""
+    if repository_root is None:
+        from ql2_sixt_canada_analysis.paths import PROJECT_ROOT
+        repository_root = PROJECT_ROOT
+    if not _REFERENCE_PATH.fullmatch(reference) or ".." in reference:
+        raise DecisionRecordError(f"{name}: authority reference must be a repository governance document")
+    root = Path(repository_root).resolve()
+    area = (root / GOVERNANCE_REFERENCE_DIR).resolve()
+    target = (root / reference)
+    try:
+        resolved = target.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise DecisionRecordError(f"{name}: authority reference document is missing") from None
+    if resolved.parent != area or not resolved.is_file():
+        raise DecisionRecordError(f"{name}: authority reference document is missing or outside the governance area")
 
 
 def _entry(item: Mapping[str, object]) -> DecisionEntry:
@@ -986,6 +1049,15 @@ def render_authority_request_checklist(record: AuthorityDecisionRecord) -> str:
              "rather than editing by hand. Questions are neutral: observed patterns are not suggested answers.",
              "Every answer needs an attributable source (supplier, collection owner or business owner) and a",
              "durable reference (document, ticket or written decision) recorded in a new record revision.", ""]
+    resolved = [d for d in record.decisions if not d.blocking_external_input]
+    if resolved:
+        lines += ["## Resolved decisions (no request needed)", "",
+                  "| Decision | Status | Authority | Reference |", "| --- | --- | --- | --- |"]
+        for entry in resolved:
+            kinds = " and ".join(dict.fromkeys(a.kind.value for a in entry.authority))
+            refs = ", ".join(dict.fromkeys(f"`{a.reference}`" for a in entry.authority))
+            lines.append(f"| `{entry.id.value}` | {entry.status.value} | {kinds} | {refs} |")
+        lines.append("")
     titles = {"collection_owner_or_supplier": "Collection owner or supplier", "business_owner": "Business owner",
               "joint": "Joint decision (collection owner and business owner)"}
     for label, entries in _groups(record):

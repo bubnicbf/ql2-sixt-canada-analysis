@@ -32,7 +32,7 @@ from ql2_sixt_canada_analysis.pricing_baseline import (
     rental_date_fields,
 )
 from ql2_sixt_canada_analysis.readiness import PricingBlocker
-from ql2_sixt_canada_analysis.schemas import JOB_DETAIL_RELATIONSHIP, LocationPolicyAuthority
+from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, JOB_DETAIL_RELATIONSHIP, LocationPolicyAuthority
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD_DIR = ROOT / "docs" / "decisions" / "pricing_authorities"
@@ -40,7 +40,7 @@ V1 = RECORD_DIR / "v1.toml"
 D = DecisionId
 
 A_AIR, A_DOWN = ["alpha", "Alpha Airport"], ["alpha", "Alpha Downtown"]
-V_DOWN, V_THUR = ["vancouver", "Vancouver Downtown"], ["vancouver", "Vancouver Thurlow"]
+V_DOWN, V_THUR = (list(k) for k in COMPARED_LOCATION_STREAMS)      # the two governed Vancouver keys
 UNIVERSE = [A_AIR, A_DOWN, V_DOWN, V_THUR]
 
 RESOLUTIONS = {
@@ -176,7 +176,10 @@ def test_committed_v1_holds_no_source_level_values() -> None:
 
 def test_downstream_codes_are_known_blockers_or_plan_gaps() -> None:
     known = {b.value for b in PricingBlocker} | {g.value for g in PlanReadinessGap}
-    for decision in load_decision_record(V1).decisions:
+    assert set(ad.RETIRED_DOWNSTREAM_CODES.values()) <= known and not set(ad.RETIRED_DOWNSTREAM_CODES) & known
+    for decision in load_decision_record(V1).decisions:         # history: retired codes map to current ones
+        assert set(decision.downstream) <= known | set(ad.RETIRED_DOWNSTREAM_CODES), decision.id
+    for decision in load_decision_record(RECORD_DIR / "v3.toml").decisions:   # current revision: current codes only
         assert set(decision.downstream) <= known, decision.id
 
 

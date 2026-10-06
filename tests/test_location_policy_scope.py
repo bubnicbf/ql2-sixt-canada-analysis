@@ -12,7 +12,7 @@ import dataclasses
 
 import pandas as pd
 import pytest
-from test_city_integrity import PROJECT_GATES, completeness, healthy
+from test_city_integrity import COV as THREE_STREAM_COV, PROJECT_GATES, completeness, healthy
 from test_readiness import GATES, evidence
 
 import ql2_sixt_canada_analysis
@@ -98,7 +98,7 @@ def test_calgary_canonical_key_is_rejected_with_typed_defects():
     ((CAL, "SYNTH-BRANCH-Z"), (D.CANONICAL_LOCATION_CITY_MISMATCH, D.CANONICAL_LOCATION_SCOPE_MISMATCH)),
     (("SYNTH-CITY-9", DOWNTOWN[1]), (D.CANONICAL_LOCATION_CITY_MISMATCH, D.CANONICAL_LOCATION_SCOPE_MISMATCH)),
     ((VAN, "SYNTH-UNAUTHORISED-BRANCH"), (D.CANONICAL_LOCATION_SCOPE_MISMATCH,)),   # right city, unauthorised branch
-    ((VAN, CAL_KEY[1]), (D.CANONICAL_LOCATION_SCOPE_MISMATCH,)),
+    ((VAN, "SYNTH-" + CAL_KEY[1]), (D.CANONICAL_LOCATION_SCOPE_MISMATCH,)),   # right city, ungoverned label
 ])
 def test_out_of_scope_canonical_keys_are_rejected(canonical, expected):
     policy = alias(canonical)
@@ -215,11 +215,11 @@ def test_scope_mismatch_and_mapping_defect_are_both_reported():
 
 def test_invalid_alias_changes_no_coverage_stream_or_completeness_population():
     j, c = healthy()                       # Calgary Downtown + both Vancouver streams, all healthy
-    coverage = assess_expected_location_coverage(c, COV)
-    streams = assess_expected_location_streams(j, c, coverage=COV)
+    coverage = assess_expected_location_coverage(c, THREE_STREAM_COV)
+    streams = assess_expected_location_streams(j, c, coverage=THREE_STREAM_COV)
     apply_location_policy(c, TO_CALGARY)   # refused; inputs untouched
-    assert assess_expected_location_coverage(c, COV) == coverage
-    again = assess_expected_location_streams(j, c, coverage=COV)
+    assert assess_expected_location_coverage(c, THREE_STREAM_COV) == coverage
+    again = assess_expected_location_streams(j, c, coverage=THREE_STREAM_COV)
     assert again == streams and again.assessed_exactly_once
     assert [r.target for r in again.results] == [CAL_KEY, DOWNTOWN, THURLOW]   # Vancouver streams stay
     calgary = again.reports[CAL_KEY].event_accounting

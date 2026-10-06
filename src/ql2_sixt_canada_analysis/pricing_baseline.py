@@ -11,15 +11,31 @@ re-deciding anything. It has two strictly separate parts:
   booleans and no new readiness rule is applied.
 * **Plan-level gaps** (:class:`PlanReadinessGap`) - prerequisites of the
   analysis plan that the central pricing gate does **not** model as
-  ``PricingBlocker`` values (a ``MINIMUM_REQUIRED`` expected-stream contract,
-  no airport/downtown role map, no rental-period date rules). They are derived
-  from configuration only and are never presented as active blockers.
+  ``PricingBlocker`` values (no airport/downtown role map, no rental-period
+  date rules). They are derived from configuration only and are never
+  presented as active blockers. (The exhaustive expected-stream universe is a
+  central blocker - ``expected_stream_authority_unavailable`` /
+  ``expected_stream_universe_not_exhaustive`` - not a plan gap.)
 
-Stream populations are reported separately: the configured expected population
-comes from the coverage contract; the observed population is the distinct
-complete (city, location) keys in the cleaned detail rows
+Stream populations are reported separately. The configured expected
+population is the authority-backed source-stream contract
+(:class:`~ql2_sixt_canada_analysis.expected_stream_contract.ExpectedStreamContract`,
+approved keys in their exact approved spelling). The observed population is
+the distinct complete (city, location) keys in the cleaned detail rows
 (:func:`~ql2_sixt_canada_analysis.coverage.location_pair_evidence`, exact and
-unnormalised). Observations never establish authority.
+unnormalised); it is reported as **counts only** - how many observed keys
+equal an approved key exactly, how many are unexpected and how many of those
+are spelling variants - and only observed keys that equal an approved key are
+named. Observed source values outside the approved contract are never printed.
+Observations never establish authority and never extend the universe.
+
+Per-stream health is reported for every approved expected stream (its typed
+stream status, continuity and time coverage) and, separately and anonymously
+(numbered, unlabelled), for every observed stream: whether it is in the
+contract or a spelling variant, and its job-based continuity counted exactly
+(in-scope jobs of its own city value, jobs carrying it, jobs lacking it,
+jobs without linked details). The observed-stream health is a diagnostic; it
+never substitutes for the expected-stream assessment.
 
 The investigated stream's continuity is reported from its stream report plus
 one aggregate diagnostic: distinct complete capture events (detail
@@ -55,10 +71,12 @@ from ql2_sixt_canada_analysis.authority_decisions import (
     AuthorityReference,
     DecisionId,
 )
-from ql2_sixt_canada_analysis.coverage import location_pair_evidence
+from ql2_sixt_canada_analysis.coverage import location_pair_evidence, spelling_variant_keys
+from ql2_sixt_canada_analysis.expected_stream_contract import ExpectedStreamContract
 from ql2_sixt_canada_analysis.readiness import PricingReadinessReport
 from ql2_sixt_canada_analysis.schemas import (
-    EXPECTED_LOCATION_COVERAGE,
+    PROJECT_DEFAULT,
+    project_default,
     TemporalKind,
     INVESTIGATED_LOCATION_STREAM,
     JOB_DETAIL_RELATIONSHIP,
@@ -80,7 +98,10 @@ __all__ = [
     "BaselineInputError",
     "ContinuityFinding",
     "PlanReadinessGap",
+    "ObservedPopulation",
+    "ObservedStreamHealth",
     "PricingReadinessBaseline",
+    "StreamHealth",
     "StreamPopulation",
     "UnsafeBaselineValueError",
     "build_pricing_baseline",
@@ -169,14 +190,11 @@ class LocationRole(StrEnum):
 class PlanReadinessGap(StrEnum):
     """Plan prerequisites NOT modeled as ``PricingBlocker`` values (never active blockers)."""
 
-    EXPECTED_STREAMS_NOT_EXHAUSTIVE = "expected_streams_minimum_required_not_exhaustive"
     LOCATION_ROLE_MAP_UNAVAILABLE = "airport_downtown_role_map_unavailable"
     RENTAL_PERIOD_DATE_RULES_UNAVAILABLE = "rental_period_date_rules_unavailable"
 
 
 _GAP_TEXT = {
-    PlanReadinessGap.EXPECTED_STREAMS_NOT_EXHAUSTIVE:
-        "The expected-stream contract is a required minimum, not an authoritative exhaustive stream universe.",
     PlanReadinessGap.LOCATION_ROLE_MAP_UNAVAILABLE:
         "No authoritative airport/downtown role map is configured; central readiness does not check roles.",
     PlanReadinessGap.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE:
@@ -186,16 +204,54 @@ _GAP_TEXT = {
 
 @dataclass(frozen=True, slots=True)
 class StreamPopulation:
-    """One stream population (configured expected or observed); keys sorted and unique."""
+    """The configured expected population: approved keys in contract order."""
 
-    population: str            # "configured_expected" | "observed"
-    authority: str             # "authoritative_minimum_required" | "authoritative_exhaustive" | "observed_not_authoritative"
-    coverage_mode: str
+    population: str            # "configured_expected"
+    authority: str             # "authoritative_exhaustive" | "authoritative_minimum_required" | "authority_unavailable"
+    coverage_mode: str         # "exhaustive" | "minimum_required" | "unconfigured"
     keys: tuple[tuple[str, ...], ...]
 
     @property
     def count(self) -> int:
         return len(self.keys)
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedPopulation:
+    """The observed population as counts; only observed keys equal to an approved key are named."""
+
+    population: str            # "observed"
+    authority: str             # "observed_not_authoritative"
+    count: int
+    exact_expected_count: int
+    unexpected_count: int
+    spelling_variant_count: int
+    expected_missing_count: int
+    keys: tuple[tuple[str, ...], ...]   # observed keys that exactly equal approved keys
+
+
+@dataclass(frozen=True, slots=True)
+class StreamHealth:
+    """Typed health of one approved expected stream (statuses only)."""
+
+    stream: tuple[str, ...]
+    stream_status: str
+    continuity: str
+    time_coverage: str
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedStreamHealth:
+    """Anonymous job-based continuity of one observed stream (numbered, never labelled)."""
+
+    ordinal: int
+    in_contract: bool
+    spelling_variant: bool
+    continuity: str            # "complete" | "partial" | "unassessable"
+    in_scope_jobs: int
+    jobs_with_stream: int
+    jobs_lacking_stream: int
+    jobs_without_linked_details: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,8 +279,11 @@ class PricingReadinessBaseline:
     statuses: tuple[tuple[str, str], ...]
     plan_gaps: tuple[PlanReadinessGap, ...]
     expected_population: StreamPopulation
-    observed_population: StreamPopulation
+    observed_population: ObservedPopulation
     continuity: ContinuityFinding | None
+    expected_stream_health: tuple[StreamHealth, ...] = ()
+    observed_stream_health: tuple[ObservedStreamHealth, ...] = ()
+    authority_record_version: int | None = None
 
     def to_dict(self) -> dict:
         """Plain, sanitized structure; raises :class:`UnsafeBaselineValueError` on anything unsafe."""
@@ -237,10 +296,11 @@ class PricingReadinessBaseline:
 def build_pricing_baseline(
     *,
     pricing: PricingReadinessReport,
+    jobs: pd.DataFrame,
     cars: pd.DataFrame,
     temporal: TemporalReconciliationReport | None,
     vehicle_stability: VehicleStabilityReport | None,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
     temporal_contract: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
     investigated_stream: tuple[str, ...] = INVESTIGATED_LOCATION_STREAM,
@@ -268,10 +328,20 @@ def build_pricing_baseline(
       (none missing, none unapproved). A rule from a parent field to an
       unrelated detail field never counts.
 
+    ``coverage`` defaults to the contract the pricing report was assessed
+    with (``pricing.expected_stream_contract``); a different contract is
+    refused. Without an approved contract the expected population is empty
+    and no stream is investigated.
+
     Raises:
         BaselineInputError: A required report is missing or of the wrong type,
-            the detail frame is empty or lacks the location columns.
+            the frames are empty or lack the location columns, or ``coverage``
+            differs from the pricing report's contract.
     """
+    contract = pricing.expected_stream_contract if isinstance(pricing, PricingReadinessReport) else None
+    if coverage is PROJECT_DEFAULT and contract is not None:
+        coverage = contract.coverage
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(pricing, PricingReadinessReport):
         raise BaselineInputError("a PricingReadinessReport is required")
     if not isinstance(cars, pd.DataFrame) or cars.empty:
@@ -280,12 +350,18 @@ def build_pricing_baseline(
         raise BaselineInputError("temporal must be a TemporalReconciliationReport or None")
     if vehicle_stability is not None and not isinstance(vehicle_stability, VehicleStabilityReport):
         raise BaselineInputError("vehicle_stability must be a VehicleStabilityReport or None")
-    if not isinstance(coverage, LocationCoverageDefinition) or not coverage.is_configured:
-        raise BaselineInputError("a configured expected-location contract is required")
+    if not isinstance(jobs, pd.DataFrame) or jobs.empty:
+        raise BaselineInputError("a non-empty cleaned jobs frame is required")
+    if not isinstance(coverage, LocationCoverageDefinition):
+        raise BaselineInputError("an expected-location contract is required")
+    if contract is not None and coverage != contract.coverage:
+        raise BaselineInputError("coverage differs from the contract the pricing report was assessed with")
     if not set(coverage.location_columns) <= set(cars.columns):
         raise BaselineInputError("the detail frame lacks the location columns")
-    if investigated_stream not in coverage.expected_locations:
+    if coverage.is_configured and investigated_stream not in coverage.expected_locations:
         raise BaselineInputError("the investigated stream must be a configured expected stream")
+    expected_keys = tuple(tuple(k) for k in (coverage.expected_locations or ()))
+    observed_keys = _observed_keys(cars, coverage)
 
     subordinate, statuses = _subordinate(pricing, temporal, vehicle_stability)
     return PricingReadinessBaseline(
@@ -298,15 +374,81 @@ def build_pricing_baseline(
                              approved_rental_date_agreements),
         expected_population=StreamPopulation(
             population="configured_expected",
-            authority=("authoritative_exhaustive" if coverage.mode is LocationCoverageMode.EXHAUSTIVE
+            authority=("authority_unavailable" if not coverage.is_configured
+                       else "authoritative_exhaustive" if coverage.mode is LocationCoverageMode.EXHAUSTIVE
                        else "authoritative_minimum_required"),
-            coverage_mode=coverage.mode.value,
-            keys=tuple(sorted(dict.fromkeys(tuple(k) for k in coverage.expected_locations)))),
-        observed_population=StreamPopulation(
-            population="observed", authority="observed_not_authoritative", coverage_mode=coverage.mode.value,
-            keys=_observed_keys(cars, coverage)),
-        continuity=_continuity(pricing, cars, coverage, relationship, investigated_stream),
+            coverage_mode=coverage.mode.value if coverage.mode is not None else "unconfigured",
+            keys=expected_keys),
+        observed_population=_observed_population(observed_keys, expected_keys),
+        continuity=(_continuity(pricing, cars, coverage, relationship, investigated_stream)
+                    if coverage.is_configured else None),
+        expected_stream_health=_expected_health(pricing, expected_keys),
+        observed_stream_health=_observed_health(jobs, cars, coverage, relationship, observed_keys, expected_keys),
+        authority_record_version=_record_version(contract),
     )
+
+
+def _record_version(contract: ExpectedStreamContract | None) -> int | None:
+    match = re.fullmatch(r"pricing-authorities-v(\d+)", contract.record_id or "") if contract is not None else None
+    return int(match.group(1)) if match else None
+
+
+def _observed_population(observed: tuple[tuple[str, ...], ...],
+                         expected: tuple[tuple[str, ...], ...]) -> ObservedPopulation:
+    exact = tuple(k for k in observed if k in set(expected))
+    unexpected = [k for k in observed if k not in set(expected)]
+    return ObservedPopulation(
+        population="observed", authority="observed_not_authoritative", count=len(observed),
+        exact_expected_count=len(exact), unexpected_count=len(unexpected),
+        spelling_variant_count=len(spelling_variant_keys(unexpected, expected)) if expected else 0,
+        expected_missing_count=sum(1 for k in expected if k not in set(observed)),
+        keys=tuple(k for k in expected if k in set(exact)))
+
+
+def _expected_health(pricing: PricingReadinessReport,
+                     expected: tuple[tuple[str, ...], ...]) -> tuple[StreamHealth, ...]:
+    completeness = pricing.completeness
+    streams = completeness.expected_streams if completeness is not None else None
+    reports = streams.reports if streams is not None else {}
+    health = []
+    for key in expected:
+        report = reports.get(key)
+        health.append(StreamHealth(
+            stream=key, stream_status=report.status.value if report is not None else "report_unavailable",
+            continuity=report.stream_continuity.value if report is not None else "report_unavailable",
+            time_coverage=report.time_coverage.value if report is not None else "report_unavailable"))
+    return tuple(health)
+
+
+def _observed_health(jobs: pd.DataFrame, cars: pd.DataFrame, coverage: LocationCoverageDefinition,
+                     relationship: JobDetailRelationshipDefinition, observed: tuple[tuple[str, ...], ...],
+                     expected: tuple[tuple[str, ...], ...]) -> tuple[ObservedStreamHealth, ...]:
+    """Exact job-based continuity of every observed stream (counts only; nothing normalised or repaired)."""
+    scope, parent_scope = coverage.stream_scope_columns, coverage.parent_scope_columns
+    parent_keys, detail_keys = list(relationship.parent_key_columns), list(relationship.detail_key_columns)
+    if (not scope or not parent_scope or not set(scope) <= set(coverage.location_columns)
+            or not set(parent_scope) | set(parent_keys) <= set(jobs.columns)
+            or not set(detail_keys) <= set(cars.columns)):
+        return ()
+    variants = set(spelling_variant_keys(list(observed), expected)) if expected else set()
+    linked = set(map(tuple, cars.loc[:, detail_keys].dropna().astype(object).itertuples(index=False)))
+    health = []
+    for ordinal, key in enumerate(observed, start=1):
+        key_scope = tuple(key[coverage.location_columns.index(c)] for c in scope)
+        in_scope = _match(jobs, parent_scope, (key_scope,)).to_numpy()
+        scope_jobs = set(map(tuple, jobs.loc[in_scope, parent_keys].dropna().astype(object).itertuples(index=False)))
+        rows = _match(cars, coverage.location_columns, (key,)).to_numpy()
+        with_stream = set(map(tuple, cars.loc[rows, detail_keys].dropna().astype(object).itertuples(index=False)))
+        with_stream &= scope_jobs
+        without_details = scope_jobs - linked
+        lacking = scope_jobs - with_stream - without_details
+        continuity = ("unassessable" if without_details or not scope_jobs
+                      else "partial" if lacking else "complete")
+        health.append(ObservedStreamHealth(
+            ordinal=ordinal, in_contract=key in set(expected), spelling_variant=key in variants,
+            continuity=continuity, in_scope_jobs=len(scope_jobs), jobs_with_stream=len(with_stream),
+            jobs_lacking_stream=len(lacking), jobs_without_linked_details=len(without_details)))
+    return tuple(health)
 
 
 def _codes(values) -> tuple[str, ...]:  # type: ignore[no-untyped-def]
@@ -318,6 +460,14 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
     """Blockers and statuses exactly as the existing typed reports emitted them (fixed source order)."""
     blockers: list[tuple[str, tuple[str, ...]]] = []
     statuses: list[tuple[str, str]] = []
+    contract = pricing.expected_stream_contract
+    if contract is None:
+        blockers.append(("expected_stream_contract", ("expected_stream_authority_unavailable",)))
+        statuses.append(("expected_stream_authority", "contract_missing"))
+    else:
+        statuses.append(("expected_stream_authority", contract.status.value))
+        statuses.append(("expected_stream_universe_mode", contract.mode.value if contract.mode else "unconfigured"))
+        blockers.append(("expected_stream_contract", _codes(contract.blocking_reasons)))
     completeness = pricing.completeness
     blockers.append(("completeness", _codes(completeness.blocking_reasons) if completeness is not None
                      else ("completeness_report_missing",)))
@@ -365,9 +515,7 @@ def _plan_gaps(coverage: LocationCoverageDefinition, relationship: JobDetailRela
                approved_agreements: object) -> tuple[PlanReadinessGap, ...]:
     G = PlanReadinessGap
     gaps = []
-    if coverage.mode is not LocationCoverageMode.EXHAUSTIVE:
-        gaps.append(G.EXPECTED_STREAMS_NOT_EXHAUSTIVE)
-    required_keys = {tuple(k) for k in coverage.expected_locations} | set(_observed_keys(cars, coverage))
+    required_keys = {tuple(k) for k in (coverage.expected_locations or ())} | set(_observed_keys(cars, coverage))
     if not _role_map_sufficient(role_map, role_authority, required_keys, len(coverage.location_columns)):
         gaps.append(G.LOCATION_ROLE_MAP_UNAVAILABLE)
     if not _rental_rules_sufficient(temporal_contract, relationship, rental_authority, approved_agreements):
@@ -491,7 +639,8 @@ def _sanitize(value: object, where: str):  # type: ignore[no-untyped-def]
     raise UnsafeBaselineValueError(f"unsupported value type at {where}")
 
 
-_SERIALIZABLE = (PricingReadinessBaseline, StreamPopulation, ContinuityFinding)
+_SERIALIZABLE = (PricingReadinessBaseline, StreamPopulation, ObservedPopulation, StreamHealth, ObservedStreamHealth,
+                 ContinuityFinding)
 
 
 def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str, date: str) -> str:
@@ -512,14 +661,34 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
     lines += [f"| {name} | `{value}` |" for name, value in d["statuses"]]
     lines += ["", "### B. Plan-level prerequisites not modeled as `PricingBlocker` values", ""]
     lines += [f"- `{g}` - {_GAP_TEXT[PlanReadinessGap(g)]}" for g in d["plan_gaps"]] or ["- none"]
-    for title, pop in (("Configured expected streams", d["expected_population"]),
-                       ("Observed streams (cleaned detail rows)", d["observed_population"])):
-        lines += ["", f"### {title}: {pop['count']}", "",
-                  f"Population: `{pop['population']}`; authority: `{pop['authority']}`; "
-                  f"contract coverage mode: `{pop['coverage_mode']}`.", ""]
-        lines += [f"- {key(k)}" for k in pop["keys"]]
+    e, o = d["expected_population"], d["observed_population"]
+    version = d["authority_record_version"]
+    lines += ["", f"### Configured expected streams: {e['count']}", "",
+              f"Population: `{e['population']}`; authority: `{e['authority']}`; contract mode: "
+              f"`{e['coverage_mode']}`; authority record version: "
+              f"{version if version is not None else 'unavailable'}. Keys are the approved source spellings, "
+              "matched exactly.", ""]
+    lines += [f"- {key(k)}" for k in e["keys"]] or ["- none (no approved contract)"]
+    lines += ["", f"### Observed streams (cleaned detail rows): {o['count']}", "",
+              f"Population: `{o['population']}`; authority: `{o['authority']}`. Observed source values outside "
+              "the approved contract are not printed.", "",
+              f"- Exactly equal to an approved key: {o['exact_expected_count']}",
+              f"- Unexpected (outside the approved contract): {o['unexpected_count']}",
+              f"- Of which spelling variants of approved keys: {o['spelling_variant_count']}",
+              f"- Approved keys with no exact observed match: {o['expected_missing_count']}"]
+    lines += [f"- Observed approved key: {key(k)}" for k in o["keys"]]
+    lines += ["", "### Expected stream health (per approved stream)", "",
+              "| Stream | Status | Continuity | Time coverage |", "| --- | --- | --- | --- |"]
+    lines += [f"| {key(h['stream'])} | `{h['stream_status']}` | `{h['continuity']}` | `{h['time_coverage']}` |"
+              for h in d["expected_stream_health"]] or ["| none | | | |"]
+    lines += ["", "### Observed stream health (anonymous, exact job-based continuity)", "",
+              "| Observed stream | In contract | Spelling variant | Continuity | In-scope jobs | With stream | "
+              "Lacking stream | Without linked details |", "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    lines += [f"| {h['ordinal']} | {h['in_contract']} | {h['spelling_variant']} | `{h['continuity']}` | "
+              f"{h['in_scope_jobs']} | {h['jobs_with_stream']} | {h['jobs_lacking_stream']} | "
+              f"{h['jobs_without_linked_details']} |" for h in d["observed_stream_health"]] or ["| none | | | | | | | |"]
     c = d["continuity"]
-    lines += ["", "### Investigated stream continuity (aggregate)", ""]
+    lines += ["", "### Investigated approved stream (aggregate)", ""]
     if c is None:
         lines.append("- No single stream report is available for the investigated stream.")
     else:
@@ -553,6 +722,7 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         assess_temporal_reconciliation, assess_vehicle_attribute_stability, compare_location_streams,
         load_raw_datasets, remove_blank_rows_from_raw_datasets, validate_raw_dataset_identifier_dtypes,
     )
+    from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
     from ql2_sixt_canada_analysis.paths import resolve_raw_data_dir
     from ql2_sixt_canada_analysis.relationships import RelationshipPreconditionError
     from ql2_sixt_canada_analysis.stability import VehicleStabilityPreconditionError
@@ -563,7 +733,9 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         except errors:
             return None
 
-    rel, cov = ANALYSIS_JOB_DETAIL_RELATIONSHIP, EXPECTED_LOCATION_COVERAGE
+    # The single authority-backed source-stream contract (the same object EXPECTED_LOCATION_COVERAGE comes from).
+    contract = current_expected_stream_contract()
+    rel, cov = ANALYSIS_JOB_DETAIL_RELATIONSHIP, contract.coverage
     raw = load_raw_datasets(resolve_raw_data_dir(raw_dir))
     cleaned = remove_blank_rows_from_raw_datasets(raw).cleaned
     validate_raw_dataset_identifier_dtypes(cleaned)
@@ -572,22 +744,25 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
     analysis = linkage.datasets(cleaned)
     jobs, cars = analysis.jobs, analysis.cars
     keys = assess_raw_dataset_unique_keys(analysis, ANALYSIS_DATASET_DEFINITIONS)
-    coverage = assess_dataset_location_coverage(analysis, cov)
+    configured = cov.is_configured          # without an approved contract, coverage-based steps fail closed
+    coverage = assess_dataset_location_coverage(analysis, cov) if configured else None
     reconciliation = attempt(lambda: assess_job_detail_reconciliation(jobs, cars, rel), RelationshipPreconditionError)
     relationship = attempt(lambda: assess_one_to_many_join(jobs, cars, rel), RelationshipPreconditionError)
-    city = assess_city_integrity(jobs, cars, relationship=rel, coverage=cov)
+    city = assess_city_integrity(jobs, cars, relationship=rel, coverage=cov if configured else None)
     join = assess_job_detail_join_readiness(jobs, cars, rel, job_linkage=linkage.report)
-    streams = assess_expected_location_streams(jobs, cars, coverage=cov, relationship=rel, loaded=raw,
-                                               schedule=COLLECTION_SCHEDULE)
-    scheduled = assess_scheduled_time_coverage(assess_collection_schedule(COLLECTION_SCHEDULE), streams)
+    streams = (assess_expected_location_streams(jobs, cars, coverage=cov, relationship=rel, loaded=raw,
+                                                schedule=COLLECTION_SCHEDULE) if configured else None)
+    scheduled = (assess_scheduled_time_coverage(assess_collection_schedule(COLLECTION_SCHEDULE), streams)
+                 if streams is not None else None)
     temporal = attempt(lambda: assess_temporal_reconciliation(jobs, cars, ANALYSIS_TEMPORAL_RECONCILIATION),
                        RelationshipPreconditionError)
     comparison = attempt(lambda: compare_location_streams(jobs, cars, ANALYSIS_LOCATION_STREAM_COMPARISON),
                          RelationshipPreconditionError)
     stability = attempt(lambda: assess_vehicle_attribute_stability(cars, VEHICLE_ATTRIBUTE_STABILITY),
                         VehicleStabilityPreconditionError)
-    completeness = assess_completeness(datasets=analysis, coverage=coverage, streams=streams,
-                                       reconciliation=reconciliation, city_integrity=city)
+    completeness = (assess_completeness(datasets=analysis, coverage=coverage, streams=streams,
+                                        reconciliation=reconciliation, city_integrity=city, expected_coverage=cov)
+                    if configured else None)
     policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, comparison,
                                     apply_location_policy(cars, VANCOUVER_LOCATION_POLICY))
     pricing = assess_pricing_readiness(
@@ -595,8 +770,8 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         one_to_many_contract_valid=bool(relationship is not None and relationship.is_valid),
         temporal_fields_trusted=bool(temporal is not None and temporal.is_valid),
         vehicle_stability=stability, scheduled_coverage=scheduled, job_detail_join=join,
-        job_linkage=linkage.report)
-    return build_pricing_baseline(pricing=pricing, cars=cars, temporal=temporal, vehicle_stability=stability,
+        job_linkage=linkage.report, expected_stream_contract=contract)
+    return build_pricing_baseline(pricing=pricing, jobs=jobs, cars=cars, temporal=temporal, vehicle_stability=stability,
                                   relationship=rel, temporal_contract=ANALYSIS_TEMPORAL_RECONCILIATION)
 
 

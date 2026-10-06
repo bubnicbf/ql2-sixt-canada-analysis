@@ -63,6 +63,9 @@ from ql2_sixt_canada_analysis.streams import (
     investigate_location_stream,
 )
 
+#: Synthetic three-stream contract over approved keys (the investigated Calgary stream and the two
+#: governed Vancouver streams) - test configuration only; the project contract is the approved universe.
+COV = dataclasses.replace(COV, expected_locations=(INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS))
 CAL, L1 = INVESTIGATED_LOCATION_STREAM
 (VAN, L2), (_, L3) = COMPARED_LOCATION_STREAMS
 PARENT_CITY, DETAIL_CITY = REL.scope_agreement_columns[0]
@@ -92,7 +95,8 @@ def completeness(j, c, **overrides):  # type: ignore[no-untyped-def]
     inputs = dict(datasets=RawDatasets(jobs=j, cars=c, complete_source=True),
                   coverage=assess_expected_location_coverage(c, COV),
                   streams=assess_expected_location_streams(j, c, coverage=COV),
-                  reconciliation=reconcile(j, c), city_integrity=assess_city_integrity(j, c, coverage=COV))
+                  reconciliation=reconcile(j, c), city_integrity=assess_city_integrity(j, c, coverage=COV),
+                  expected_coverage=COV)
     return assess_completeness(**(inputs | overrides))
 
 

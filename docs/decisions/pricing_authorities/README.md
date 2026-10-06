@@ -11,9 +11,11 @@ agreements (22 atomic decisions, `DecisionId` in
 | File | Purpose |
 | --- | --- |
 | [`v1.toml`](v1.toml) | Revision 1 (schema 1, historical, unchanged) - every decision `PROPOSED` (no attributable authority found). |
-| [`v2.toml`](v2.toml) | Revision 2 (schema 2, **current**) - supersedes v1; the four job-identifier decisions are `APPROVED` by the collection owner, the other 18 remain `PROPOSED`. |
-| [`authority_request_checklist.md`](authority_request_checklist.md) | Neutral questions for the 18 decisions still blocked on external input, generated from the current revision. |
-| [`../governance/job-identifier-governance-2026-10-06.md`](../governance/job-identifier-governance-2026-10-06.md) | Durable authority reference for the revision-2 approvals (collection-governance outcome supplied by the repository owner, recorded 2026-10-06). |
+| [`v2.toml`](v2.toml) | Revision 2 (schema 2, historical, unchanged) - supersedes v1; the four job-identifier decisions are `APPROVED` by the collection owner, the other 18 remain `PROPOSED`. |
+| [`v3.toml`](v3.toml) | Revision 3 (schema 2, **current revision**) - supersedes v2; keeps the four job-identifier approvals and approves `EXPECTED_STREAM_UNIVERSE` (`EXHAUSTIVE`, seven streams; collection owner and business owner) and `EXPECTED_STREAM_SOURCE_SPELLING` (collection owner); the other 16 remain `PROPOSED`. |
+| [`authority_request_checklist.md`](authority_request_checklist.md) | Generated from the current revision: the resolved decisions with their references, and neutral questions for the 16 decisions still blocked on external input. |
+| [`../governance/job-identifier-governance-2026-10-06.md`](../governance/job-identifier-governance-2026-10-06.md) | Durable authority reference for the job-identifier approvals (collection-governance outcome supplied by the repository owner, recorded 2026-10-06). |
+| [`../governance/expected-stream-governance-2026-10-06.md`](../governance/expected-stream-governance-2026-10-06.md) | Durable authority reference for the expected-stream approvals (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
 
 ## Revision 2: approved job-identifier decisions
 
@@ -43,6 +45,44 @@ separately and with their own tests in `ql2_sixt_canada_analysis.job_linkage`
 (`job_linkage_policy_from_record` builds the policy only when all four are
 approved and consistent).
 
+## Revision 3: approved exhaustive source-stream contract
+
+`v3.toml` (the current revision, `CURRENT_RECORD_PATH`) carries the four
+job-identifier approvals over unchanged and approves:
+
+* `EXPECTED_STREAM_UNIVERSE` - mode `EXHAUSTIVE`, exactly seven
+  `[city, location]` source streams: `Calgary / Downtown`,
+  `Calgary / Int Airport`, `Toronto / Downtown`, `Toronto / Int Airport`,
+  `Vancouver / Downtown`, `Vancouver / Int Airport`, `Vancouver / Thurlow`.
+  No other scheduled stream should exist under this contract. Joint decision
+  of the collection owner and the business owner.
+* `EXPECTED_STREAM_SOURCE_SPELLING` - those exact spellings are the source
+  keys (collection owner). Case, spacing and punctuation are significant;
+  the validator requires the spellings to equal the universe exactly
+  (duplicates, blank or padded components and malformed pairs are rejected).
+
+Both reference
+[`expected-stream-governance-2026-10-06.md`](../governance/expected-stream-governance-2026-10-06.md).
+The approved keys come from the supplied written decisions, not from observed
+data; the earlier raw-data observations remain in v1 and v2 as history. The
+contract applies to the current analyzed dataset and subsequent collections
+until a new revision replaces it: any addition, removal, rename or spelling
+change of a stream needs a new revision. It does not resolve location roles,
+comparison pairs, the Vancouver location identity, the schedule, temporal,
+reporting-day or rental-date decisions.
+
+The approval is implemented separately, with its own tests, in
+`ql2_sixt_canada_analysis.expected_stream_contract`: the single resolution of
+the effective coverage contract (`EXPECTED_LOCATION_COVERAGE`) from the
+latest valid approved record. An approved universe without approved
+spellings, a missing or invalid record, or a non-exhaustive universe blocks
+pricing (`expected_stream_authority_unavailable`,
+`expected_stream_universe_not_exhaustive`). Historical downstream codes that
+the implementation replaced are mapped in `RETIRED_DOWNSTREAM_CODES` (for
+example `expected_streams_minimum_required_not_exhaustive` ->
+`expected_stream_universe_not_exhaustive`); committed revisions are never
+edited.
+
 ## Status semantics
 
 | Status | Meaning |
@@ -59,6 +99,17 @@ needs the kind, the responsible source (team, organization or role holder),
 a **durable reference** (document, ticket or written decision) and optionally
 a note and an effective date. The kind must be one of the decision's
 responsible roles; a joint decision needs every responsible role.
+
+From schema 2 the durable reference must be **repository-local**: a
+sanitized governance document `docs/decisions/governance/<name>.md` that
+exists in the repository (relative POSIX path, no `..`, no subdirectories, no
+symlink leaving that directory). The production loader
+(`load_decision_record` / `parse_decision_record`) and the tests apply the
+same check, so an `APPROVED` or `REJECTED` decision whose document is missing
+or outside that area fails validation, and no policy is built from it. A
+broken reference is fixed by adding the missing document, never by editing a
+committed revision; a substantive change of authority content needs a new
+revision.
 
 Evidence (`RAW_DATA_OBSERVATION`, `BEHAVIORAL_ANALYSIS`,
 `REPOSITORY_IMPLEMENTATION_NOTE`, `ISSUE_OR_REVIEW_NOTE`) may explain why a
@@ -88,13 +139,15 @@ Old revisions stay in place as history.
 ```bash
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v1.toml
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v2.toml
+python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v3.toml
 ```
 
 prints a sanitized status summary (decision ids, statuses, roles and counts
 only) and exits non-zero if the record is invalid. Error messages name
 categories, decision ids and field names only, never record values. The test
-suite validates the committed revision and checks that the checklist matches
-`render_authority_request_checklist`.
+suite validates every committed revision (v1 and v2 byte-for-byte unchanged)
+and checks that the checklist matches `render_authority_request_checklist`
+for the current revision.
 
 ## Approved decisions are implemented separately
 
@@ -103,6 +156,7 @@ approved decision still requires a separately tested production
 implementation. Contracts in `schemas.py`, the coverage, schedule and temporal
 rules and the pricing gate consume an approved decision only through separate
 implementation work with its own tests - for the four job-identifier
-decisions, `ql2_sixt_canada_analysis.job_linkage`.
+decisions, `ql2_sixt_canada_analysis.job_linkage`; for the two expected-stream
+decisions, `ql2_sixt_canada_analysis.expected_stream_contract`.
 `pricing_baseline.baseline_authority_inputs` reads APPROVED decisions only, so
-neither revision clears a location-role or rental-date plan gap.
+no revision clears a location-role or rental-date plan gap.

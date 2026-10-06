@@ -121,8 +121,9 @@ def test_project_definition_is_immutable_and_has_no_alias_or_identity():
 
 def test_target_literals_appear_only_in_schemas():
     root = Path(__file__).resolve().parents[1]
-    # Branch labels identify the streams; the city component is a common word (e.g. in names).
-    names = [key[-1] for key in COMPARED_LOCATION_STREAMS]
+    # The compared keys are written once, as key literals, in schemas; the universe itself is never
+    # written in code (it comes from the authority record).
+    names = [repr(key) for key in COMPARED_LOCATION_STREAMS]
     hits = {p.relative_to(root).as_posix() for p in (root / "src").rglob("*.py")
             if any(n in p.read_text(encoding="utf-8") for n in names)}
     assert hits == {"src/ql2_sixt_canada_analysis/schemas.py"}

@@ -13,7 +13,7 @@ import inspect
 import pandas as pd
 import pytest
 from conftest import linked_join
-from test_city_integrity import PROJECT_GATES, completeness as project_completeness, cross_city, healthy
+from test_city_integrity import COV, PROJECT_GATES, completeness as project_completeness, cross_city, healthy
 from test_completeness import SYNTH_COV
 from test_readiness import (
     DISTINCT, GATES, JOIN_OK, SCHEDULE, SCHEDULED_OK, captured, scheduled_coverage, scheduled_frames,
@@ -29,7 +29,7 @@ from ql2_sixt_canada_analysis.readiness import (
     validate_pricing_readiness,
 )
 from ql2_sixt_canada_analysis.relationships import ValidatedJoinError
-from ql2_sixt_canada_analysis.schemas import COLLECTION_SCHEDULE, EXPECTED_LOCATION_COVERAGE as COV
+from ql2_sixt_canada_analysis.schemas import COLLECTION_SCHEDULE
 from ql2_sixt_canada_analysis.streams import (
     CollectionScheduleAssessment,
     CollectionScheduleStatus as CS,

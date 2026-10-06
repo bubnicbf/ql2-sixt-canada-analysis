@@ -94,8 +94,9 @@ from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.reconciliation import _VALID, _classify_expected_counts, assess_job_detail_reconciliation
 from ql2_sixt_canada_analysis.relationships import assess_one_to_many_join
 from ql2_sixt_canada_analysis.schemas import (
+    PROJECT_DEFAULT,
+    project_default,
     COLLECTION_SCHEDULE,
-    EXPECTED_LOCATION_COVERAGE,
     JOB_DETAIL_RELATIONSHIP,
     TEMPORAL_RECONCILIATION,
     CollectionScheduleDefinition,
@@ -316,7 +317,7 @@ class LocationStreamError(Exception):
 
 def resolve_expected_location(
     target: tuple[str, ...],
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> tuple[str, ...]:
     """Return ``target`` if it is a configured expected key, else raise.
 
@@ -327,6 +328,7 @@ def resolve_expected_location(
         LocationCoverageConfigurationError: The contract is unconfigured, or
             ``target`` is malformed or not an expected key.
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(coverage, LocationCoverageDefinition):
         raise TypeError(f"expected a LocationCoverageDefinition, got {type(coverage).__name__}")
     if not coverage.is_configured:
@@ -344,7 +346,7 @@ def investigate_location_stream(
     cars: pd.DataFrame,
     target: tuple[str, ...],
     *,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
     loaded: RawDatasets | None = None,
     raw_source: str | Path | None = None,
@@ -371,6 +373,7 @@ def investigate_location_stream(
             or the schedule's timestamp is not a timestamp field of the
             temporal contract.
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(jobs, pd.DataFrame) or not isinstance(cars, pd.DataFrame):
         raise TypeError("jobs and cars must be pandas DataFrames")
     if not isinstance(coverage, LocationCoverageDefinition):
@@ -680,7 +683,7 @@ def assess_expected_location_streams(
     jobs: pd.DataFrame,
     cars: pd.DataFrame,
     *,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
     loaded: RawDatasets | None = None,
     schedule: CollectionScheduleDefinition | None = COLLECTION_SCHEDULE,
@@ -696,6 +699,7 @@ def assess_expected_location_streams(
         LocationCoverageConfigurationError: The contract is unconfigured or
             its columns are absent (as for :func:`investigate_location_stream`).
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(coverage, LocationCoverageDefinition):
         raise TypeError(f"expected a LocationCoverageDefinition, got {type(coverage).__name__}")
     if not coverage.is_configured:

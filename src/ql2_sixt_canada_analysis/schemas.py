@@ -60,11 +60,16 @@ fields (:data:`CONFIDENTIAL_TECHNICAL_COLUMNS`).
 
 Expected location coverage
 --------------------------
-:data:`EXPECTED_LOCATION_COVERAGE` is the single contract of which locations
-the collection is *supposed* to cover. Expected locations must come from an
-independent authority (a schedule, assignment or documented market scope),
-never from the extract being validated - a list derived from observed rows
-would always pass. Locations are branch-level pickup locations (e.g. an
+:data:`EXPECTED_LOCATION_COVERAGE` is the single contract of which source
+streams the collection is *supposed* to return. It is not written here: it is
+resolved once, on first access, from the latest valid approved authority
+record by :mod:`ql2_sixt_canada_analysis.expected_stream_contract`
+(``EXPECTED_STREAM_UNIVERSE`` and ``EXPECTED_STREAM_SOURCE_SPELLING``), on the
+structure of :data:`SOURCE_STREAM_COVERAGE_TEMPLATE`. With both decisions
+approved it is the exhaustive, exact-spelling universe; otherwise it is the
+unconfigured template and every assessment fails closed. Expected locations
+never come from the extract being validated - a list derived from observed
+rows would always pass. Locations are branch-level pickup locations (e.g. an
 airport or downtown branch of a city), which only the detail dataset carries;
 jobs are city-level collection runs. An unconfigured contract fails closed
 with :class:`LocationCoverageConfigurationError`.
@@ -137,6 +142,9 @@ __all__ = [
     "TimestampOrderingRule",
     "CollectionScheduleDefinition",
     "EXPECTED_LOCATION_COVERAGE",
+    "SOURCE_STREAM_COVERAGE_TEMPLATE",
+    "PROJECT_DEFAULT",
+    "project_default",
     "INVESTIGATED_LOCATION_STREAM",
     "KeyConfigurationError",
     "LocationCoverageConfigurationError",
@@ -757,40 +765,37 @@ class LocationCoverageDefinition:
         return self.definitions[self.dataset]
 
 
-#: An expected branch-level location stream, identified as expected by the
-#: project owner (the authority for this entry). Defined once here; code,
-#: notebooks and tests refer to this constant, never to the literal.
-INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('calgary', 'Calgary Downtown')
-
-#: Two expected branch-level streams the project owner asked to compare
-#: (authority for their expectation). Defined once; referenced by constant.
-COMPARED_LOCATION_STREAMS: Final[tuple[tuple[str, ...], tuple[str, ...]]] = (
-    ('vancouver', 'Vancouver Downtown'),
-    ('vancouver', 'Vancouver Thurlow'),
-)
-
-#: The expected-location contract. Keys are authoritative (city, location)
-#: pairs - the source ``city`` label and the branch ``location`` label - so a
-#: branch label observed under another city never satisfies coverage, and a
-#: label observed under several cities is a conflicting assignment. Source
-#: values are compared exactly and never rewritten. Locations are branch-level pickup
-#: locations, carried only by detail rows (``location``); jobs are city-level
-#: collection runs, so a jobs-level contract cannot represent a branch stream
-#: (an earlier jobs-``city`` structure would have reported a permanent false
-#: absence). Expected keys come only from an authority - here the project
-#: owner's statements for the streams above - so the set is a required
-#: MINIMUM, not an exhaustive universe. Add further locations only from an
-#: authoritative list, never from the observed extract. No aliases are
-#: authoritatively confirmed. ``city`` scopes a branch to its collection runs
-#: for stream-continuity investigation only.
-EXPECTED_LOCATION_COVERAGE: Final = LocationCoverageDefinition(
+#: Structure of the source-stream contract - dataset, exact (city, location)
+#: key columns, scope - with **no** expected keys (unconfigured). The expected
+#: keys and mode come only from the approved authority record
+#: (:mod:`ql2_sixt_canada_analysis.expected_stream_contract`), which fills
+#: this template to produce :data:`EXPECTED_LOCATION_COVERAGE`. Keys are
+#: (source ``city``, source ``location``) pairs compared exactly - a branch
+#: label observed under another city never satisfies coverage, and a label
+#: observed under several cities is a conflicting assignment. Source values
+#: are never rewritten. Locations are branch-level pickup locations carried
+#: only by detail rows; ``city`` scopes a branch to its collection runs for
+#: stream-continuity investigation only. No aliases are authoritatively
+#: confirmed.
+SOURCE_STREAM_COVERAGE_TEMPLATE: Final = LocationCoverageDefinition(
     dataset=DatasetKey.CARS,
     location_columns=('city', 'location'),
-    expected_locations=(INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS),
-    mode=LocationCoverageMode.MINIMUM_REQUIRED,
     stream_scope_columns=('city',),
     parent_scope_columns=('city',),
     label_column='location',
+)
+
+#: The approved source stream investigated in detail (the Calgary Downtown
+#: branch stream). A designation, not a contract: it must be a key of the
+#: approved universe (checked by the tests and by the baseline).
+INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('Calgary', 'Downtown')
+
+#: The two approved Vancouver source streams whose analytical identity is
+#: governed by ``VANCOUVER_LOCATION_IDENTITY`` (unresolved). They stay two
+#: separate expected source streams; both must be keys of the approved universe.
+COMPARED_LOCATION_STREAMS: Final[tuple[tuple[str, ...], tuple[str, ...]]] = (
+    ('Vancouver', 'Downtown'),
+    ('Vancouver', 'Thurlow'),
 )
 
 
@@ -1299,24 +1304,30 @@ class LocationStreamComparisonDefinition:
 #: threshold, so the floor is two: a single shared capture is never enough.
 MINIMUM_DUPLICATE_PAIRED_CAPTURES: Final = 2
 
-LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
-    first=COMPARED_LOCATION_STREAMS[0],
-    second=COMPARED_LOCATION_STREAMS[1],
-    coverage=EXPECTED_LOCATION_COVERAGE,
-    relationship=JOB_DETAIL_RELATIONSHIP,
-    temporal=TEMPORAL_RECONCILIATION,
-    pairing=CapturePairing.SHARED_COLLECTION_EVENT,
-    product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
-    price_columns=('price_per_day', 'price_num'),
-    minimum_paired_captures=MINIMUM_DUPLICATE_PAIRED_CAPTURES,
-    numeric_columns=('price_num',),
-)
+_COMPARISON_PRICE_COLUMNS: Final = ('price_per_day', 'price_num')
 
-#: The same comparison applied to the analysis-stage frames (capture events are
-#: derived linkage keys, never raw identifier text).
-ANALYSIS_LOCATION_STREAM_COMPARISON: Final = dataclass_replace(
-    LOCATION_STREAM_COMPARISON, relationship=ANALYSIS_JOB_DETAIL_RELATIONSHIP,
-    temporal=ANALYSIS_TEMPORAL_RECONCILIATION)
+
+def _location_stream_comparison(coverage: LocationCoverageDefinition) -> LocationStreamComparisonDefinition:
+    """The project comparison of :data:`COMPARED_LOCATION_STREAMS` under ``coverage``."""
+    return LocationStreamComparisonDefinition(
+        first=COMPARED_LOCATION_STREAMS[0],
+        second=COMPARED_LOCATION_STREAMS[1],
+        coverage=coverage,
+        relationship=JOB_DETAIL_RELATIONSHIP,
+        temporal=TEMPORAL_RECONCILIATION,
+        pairing=CapturePairing.SHARED_COLLECTION_EVENT,
+        product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
+        price_columns=_COMPARISON_PRICE_COLUMNS,
+        minimum_paired_captures=MINIMUM_DUPLICATE_PAIRED_CAPTURES,
+        numeric_columns=('price_num',),
+    )
+
+
+#: ``LOCATION_STREAM_COMPARISON`` (raw relationship) and
+#: ``ANALYSIS_LOCATION_STREAM_COMPARISON`` (the same comparison on the
+#: analysis-stage frames: capture events are derived linkage keys, never raw
+#: identifier text) are resolved lazily with :data:`EXPECTED_LOCATION_COVERAGE`
+#: (see :func:`__getattr__`).
 
 
 # --------------------------------------------------- location identity policy
@@ -1585,7 +1596,8 @@ def assess_location_policy_scope(policy: object) -> LocationPolicyScope:
         defects=tuple(d for d in D if d in defects))
 
 
-#: Identity policy for the Vancouver pair in ``COMPARED_LOCATION_STREAMS``.
+#: ``VANCOUVER_LOCATION_POLICY`` (resolved lazily, see :func:`__getattr__`):
+#: identity policy for the Vancouver pair in ``COMPARED_LOCATION_STREAMS``.
 #: UNRESOLVED: no authoritative decision exists in the repository or project
 #: documentation. Behavioural comparison (``LOCATION_STREAM_COMPARISON``) is
 #: diagnostic evidence only. Set CONFIRMED_ALIAS (with a canonical location)
@@ -1593,12 +1605,13 @@ def assess_location_policy_scope(policy: object) -> LocationPolicyScope:
 #: supplier / collection-owner / business decision. Its governed scope is the
 #: one city both keys share; a confirmed alias may canonicalise only to one of
 #: the two governed keys, never to another city or configured stream.
-VANCOUVER_LOCATION_POLICY: Final = LocationIdentityPolicy(
-    first=COMPARED_LOCATION_STREAMS[0],
-    second=COMPARED_LOCATION_STREAMS[1],
-    coverage=EXPECTED_LOCATION_COVERAGE,
-    state=LocationPolicyState.UNRESOLVED,
-)
+def _vancouver_location_policy(coverage: LocationCoverageDefinition) -> LocationIdentityPolicy:
+    return LocationIdentityPolicy(
+        first=COMPARED_LOCATION_STREAMS[0],
+        second=COMPARED_LOCATION_STREAMS[1],
+        coverage=coverage,
+        state=LocationPolicyState.UNRESOLVED,
+    )
 
 
 # ----------------------------------------------------- vehicle-attribute stability
@@ -1829,10 +1842,70 @@ VEHICLE_ATTRIBUTE_STABILITY: Final = VehicleStabilityDefinition(
         'job_return_date', 'row_index', 'pickup_date', 'return_date', 'price_per_day', 'scraped_at',
         'price_num', 'city_clean', 'date_clean',
     ),
-    price_columns=LOCATION_STREAM_COMPARISON.price_columns,
+    price_columns=_COMPARISON_PRICE_COLUMNS,
     temporal=TEMPORAL_RECONCILIATION,
     observation_time_field=(DatasetKey.CARS, 'scraped_at'),
     minimum_observations=2,
     same_capture_conflicts_reported=True,
     canonical_location_grouping=False,
 )
+
+
+# ------------------------------------------- authority-resolved contract (lazy)
+
+_LAZY_CONTRACT_NAMES = frozenset({"EXPECTED_LOCATION_COVERAGE", "LOCATION_STREAM_COMPARISON",
+                                  "ANALYSIS_LOCATION_STREAM_COMPARISON", "VANCOUVER_LOCATION_POLICY"})
+
+
+def _governed_pair_coverage() -> LocationCoverageDefinition:
+    """Scaffold for the Vancouver comparison/policy when no approved contract contains the pair.
+
+    It holds only the two governed keys (minimum mode) so the policy stays
+    representable; it is never a coverage contract: completeness and readiness
+    use :data:`EXPECTED_LOCATION_COVERAGE` and block without an approved universe.
+    """
+    return dataclass_replace(SOURCE_STREAM_COVERAGE_TEMPLATE, expected_locations=COMPARED_LOCATION_STREAMS,
+                             mode=LocationCoverageMode.MINIMUM_REQUIRED)
+
+
+class _ProjectDefault:
+    """Default-argument marker: "the project's authority-resolved definition", looked up at call time."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "PROJECT_DEFAULT"
+
+
+#: Default-argument marker for the lazily resolved definitions above, so that
+#: importing a module never reads the authority record (see :func:`project_default`).
+PROJECT_DEFAULT: Final = _ProjectDefault()
+
+
+def project_default(value: object, name: str) -> object:
+    """``value``, or the lazily resolved module attribute ``name`` when ``value`` is :data:`PROJECT_DEFAULT`."""
+    if value is PROJECT_DEFAULT:
+        if name not in _LAZY_CONTRACT_NAMES:
+            raise AttributeError(name)
+        return __getattr__(name)
+    return value
+
+
+def __getattr__(name: str):  # PEP 562: resolve the authority-backed contract on first access
+    if name not in _LAZY_CONTRACT_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
+
+    coverage = current_expected_stream_contract().coverage
+    governed = coverage if coverage.is_configured and set(COMPARED_LOCATION_STREAMS) <= set(
+        coverage.expected_locations) else _governed_pair_coverage()
+    comparison = _location_stream_comparison(governed)
+    values = {
+        "EXPECTED_LOCATION_COVERAGE": coverage,
+        "LOCATION_STREAM_COMPARISON": comparison,
+        "ANALYSIS_LOCATION_STREAM_COMPARISON": dataclass_replace(
+            comparison, relationship=ANALYSIS_JOB_DETAIL_RELATIONSHIP, temporal=ANALYSIS_TEMPORAL_RECONCILIATION),
+        "VANCOUVER_LOCATION_POLICY": _vancouver_location_policy(governed),
+    }
+    globals().update(values)
+    return globals()[name]

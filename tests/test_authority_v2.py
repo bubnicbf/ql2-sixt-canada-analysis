@@ -76,7 +76,7 @@ def test_v2_validates_under_schema_2_and_supersedes_v1() -> None:
     assert (record.schema_version, record.record_version, record.record_id) == (2, 2, "pricing-authorities-v2")
     assert record.supersedes == "pricing-authorities-v1" and record.created == dt.date(2026, 10, 6)
     assert re.fullmatch(r"[0-9a-f]{40}", record.source_commit)
-    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v2.toml"
+    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v3.toml"   # superseded by v3
     assert 2 in ad.SUPPORTED_SCHEMA_VERSIONS and 1 in ad.SUPPORTED_SCHEMA_VERSIONS
 
 
@@ -117,14 +117,12 @@ def test_governance_reference_records_only_supplied_provenance() -> None:
     assert "pricing-authorities-v2" in text
 
 
-def test_checklist_matches_v2_and_excludes_approved_decisions() -> None:
-    record = load_decision_record(V2)
-    checklist = render_authority_request_checklist(record)
-    assert (RECORD_DIR / "authority_request_checklist.md").read_text(encoding="utf-8") == checklist
+def test_v2_checklist_lists_job_decisions_as_resolved_and_asks_the_other_eighteen() -> None:
+    checklist = render_authority_request_checklist(load_decision_record(V2))
     assert "(pricing-authorities-v2)" in checklist
-    rows = [line for line in checklist.splitlines() if line.startswith("| `")]
-    assert len(rows) == 18
-    assert not any(f"`{d.value}`" in checklist for d in JOB)
+    resolved, requests = checklist.split("## Resolved decisions")[1].split("\n## ", 1)
+    assert all(f"`{d.value}`" in resolved and f"`{d.value}`" not in requests for d in JOB)
+    assert len([line for line in requests.splitlines() if line.startswith("| `")]) == 18
 
 
 def test_readme_documents_revision_2() -> None:
@@ -237,7 +235,12 @@ def test_v2_produces_the_expected_typed_policy() -> None:
     assert policy.legacy_decimal_zero_repair is True and policy.legacy_offer_position_repair is True
     assert [a.kind for a in policy.authority] == [AuthorityKind.COLLECTION_OWNER]
     assert policy.authority[0].reference == GOVERNANCE
-    assert load_job_linkage_policy() == policy                                   # the committed current record
+    current = load_job_linkage_policy()                                         # the committed current record (v3)
+    assert current is not None and current.record_id == "pricing-authorities-v3"
+    assert {f: getattr(current, f) for f in ("authority", "semantics", "legacy_decimal_zero_repair",
+                                             "legacy_offer_position_repair")} == {
+        f: getattr(policy, f) for f in ("authority", "semantics", "legacy_decimal_zero_repair",
+                                        "legacy_offer_position_repair")}            # v3 preserves the four
     assert dict(OPAQUE_TEXT_IDENTIFIER_POLICY)["numeric_parsing"] is False
 
 
@@ -299,3 +302,72 @@ def test_record_input_is_never_modified() -> None:
     snapshot = copy.deepcopy(data)
     job_linkage_policy_from_record(parse_decision_record(data))
     assert data == snapshot
+
+
+# ------------------------------------------------- repository-local references
+
+
+def _governance_root(tmp_path: Path, *, with_document: bool = True) -> Path:
+    root = tmp_path / "repo"
+    area = root / "docs" / "decisions" / "governance"
+    area.mkdir(parents=True)
+    if with_document:
+        (area / Path(GOVERNANCE).name).write_text("# synthetic governance reference\n", encoding="utf-8")
+    return root
+
+
+def test_approved_decision_with_an_existing_local_reference_passes(tmp_path: Path) -> None:
+    assert parse_decision_record(v2(), repository_root=ROOT).counts()[DecisionStatus.APPROVED] == 4
+    assert parse_decision_record(v2(), repository_root=_governance_root(tmp_path)).record_id == "pricing-authorities-v2"
+    assert load_decision_record(V2, repository_root=ROOT).record_id == "pricing-authorities-v2"
+
+
+def test_approved_decision_with_a_missing_local_reference_fails_closed(tmp_path: Path) -> None:
+    root = _governance_root(tmp_path, with_document=False)
+    with pytest.raises(ad.DecisionRecordError) as info:
+        parse_decision_record(v2(), repository_root=root)
+    assert "missing" in str(info.value) and "governance" not in str(info.value).split(":")[0]
+    with pytest.raises(ad.DecisionRecordError):
+        load_decision_record(V2, repository_root=root)          # the production loader applies the same rule
+
+
+@pytest.mark.parametrize("reference", [
+    "docs/decisions/governance/../../../README.md", "../docs/decisions/governance/x.md", "/etc/hosts",
+    "README.md", "docs/decisions/pricing_authorities/v1.toml", "docs/decisions/governance/sub/x.md",
+    "docs\\decisions\\governance\\x.md", "docs/decisions/governance/.hidden.md", "SYNTH-DECISION-REF",
+])
+def test_references_outside_the_governance_area_are_rejected(tmp_path: Path, reference: str) -> None:
+    data = v2()
+    entry(data, D.JOB_ID_LEADING_ZERO_SIGNIFICANCE)["authority"][0]["reference"] = reference
+    message = fails(data)
+    assert "governance document" in message and reference not in message
+
+
+def test_symlink_escaping_the_governance_area_is_rejected(tmp_path: Path) -> None:
+    root = _governance_root(tmp_path, with_document=False)
+    outside = tmp_path / "outside.md"
+    outside.write_text("synthetic\n", encoding="utf-8")
+    (root / GOVERNANCE).symlink_to(outside)
+    with pytest.raises(ad.DecisionRecordError, match="outside the governance area|missing"):
+        parse_decision_record(v2(), repository_root=root)
+
+
+def test_rejected_decisions_also_need_a_local_reference_and_proposed_gain_nothing(tmp_path: Path) -> None:
+    data = v2()
+    item = entry(data, D.JOB_ID_LEADING_ZERO_SIGNIFICANCE)
+    item.pop("resolution")
+    item.update(status="REJECTED", rejected="SYNTH rejection")
+    data = _finish(data)
+    parse_decision_record(data)                                                  # existing reference: valid
+    with pytest.raises(ad.DecisionRecordError, match="missing"):
+        parse_decision_record(data, repository_root=_governance_root(tmp_path, with_document=False))
+    record = load_decision_record(V2)
+    for decision in record.decisions:
+        if decision.status is DecisionStatus.PROPOSED:
+            assert not decision.authority and record.approved_resolution(decision.id) is None
+
+
+def test_schema_1_records_are_unaffected(tmp_path: Path) -> None:
+    root = _governance_root(tmp_path, with_document=False)
+    assert load_decision_record(V1, repository_root=root).schema_version == 1
+    assert parse_decision_record(_finish(approved_record()), repository_root=root).schema_version == 1

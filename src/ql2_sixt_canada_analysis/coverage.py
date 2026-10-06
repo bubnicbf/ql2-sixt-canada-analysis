@@ -26,12 +26,25 @@ declared in the central contract (``aliases``) also count, matched exactly.
 Composite keys are pairs such as ``(city, location)``: a location label
 observed under a different city is a different, *unexpected* key and never
 covers the expected pair. With ``label_column`` configured, a label observed
-under more than one combination of the other components is a **conflicting
-assignment** (``conflicting_location_label_count``) and fails the contract;
-city is never inferred from the label.
+under more than one combination of the other components, at least one of
+them outside the contract, is a **conflicting assignment**
+(``conflicting_location_label_count``) and fails the contract; a label the
+contract itself uses in several cities (``Downtown``) is not a conflict while
+every observed combination is expected. City is never inferred from the label.
+
+**Source spelling mismatch** (diagnostic only): an unexpected observed key
+that is a case/space/punctuation variant of an expected key - either the
+whole key (components in any order) or any single component compared with
+the same component of the expected keys - is counted in
+``spelling_variant_location_count`` and fails the contract
+(``source_spelling_mismatch``). The folding (case-folding, dropping
+everything but ASCII letters and digits) exists only to *detect* the
+mismatch; it never makes a variant cover an expected key, and no value is
+rewritten. Only approved aliases (``aliases``) cover, matched exactly.
 
 The contract passes when every expected location is covered, no label has a
-conflicting assignment and every source row has a complete location; in
+conflicting assignment, no spelling variant is observed and every source row
+has a complete location; in
 ``EXHAUSTIVE`` mode it additionally requires zero unexpected locations,
 while ``MINIMUM_REQUIRED`` mode only reports them.
 
@@ -46,13 +59,15 @@ are missing (configuration, not source values) - never observed values.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 
 import pandas as pd
 
 from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.schemas import (
-    EXPECTED_LOCATION_COVERAGE,
+    PROJECT_DEFAULT,
+    project_default,
     LocationCoverageConfigurationError,
     LocationCoverageDefinition,
     LocationCoverageMode,
@@ -65,6 +80,7 @@ __all__ = [
     "LocationCoverageReport",
     "assess_expected_location_coverage",
     "location_pair_evidence",
+    "spelling_variant_keys",
     "validate_expected_location_coverage",
 ]
 
@@ -82,6 +98,8 @@ class LocationCoverageReport:
     unexpected_location_count: int
     missing_location_row_count: int
     conflicting_location_label_count: int = 0
+    #: Unexpected observed keys that are spelling variants of expected keys (diagnostic count).
+    spelling_variant_location_count: int = 0
     missing_expected_locations: tuple[tuple[str, ...], ...] = ()
     expected_pairs: tuple[tuple[str, ...], ...] = ()
 
@@ -99,6 +117,7 @@ class LocationCoverageReport:
         # Without aliases, observed = covered + unexpected; authoritative
         # aliases can let several observed keys cover one expected location.
         assert self.unexpected_location_count <= self.observed_location_count
+        assert self.spelling_variant_location_count <= self.unexpected_location_count
         assert self.missing_location_row_count <= self.row_count
         assert self.observed_location_count <= self.row_count - self.missing_location_row_count
 
@@ -129,10 +148,14 @@ class LocationCoverageReport:
         return self.conflicting_location_label_count == 0
 
     @property
+    def no_spelling_variants(self) -> bool:
+        return self.spelling_variant_location_count == 0
+
+    @property
     def is_valid(self) -> bool:
         """The configured coverage contract holds."""
         return (self.all_expected_covered and self.all_rows_assigned and self.unexpected_locations_acceptable
-                and self.no_conflicting_assignments)
+                and self.no_conflicting_assignments and self.no_spelling_variants)
 
     @property
     def violations(self) -> tuple[str, ...]:
@@ -142,6 +165,7 @@ class LocationCoverageReport:
             ("unexpected_location", not self.unexpected_locations_acceptable),
             ("missing_location_assignment", not self.all_rows_assigned),
             ("conflicting_location_assignment", not self.no_conflicting_assignments),
+            ("source_spelling_mismatch", not self.no_spelling_variants),
         )
         return tuple(name for name, failed in checks if failed)
 
@@ -160,7 +184,7 @@ class LocationCoverageError(Exception):
 
 def assess_expected_location_coverage(
     jobs: pd.DataFrame,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> LocationCoverageReport:
     """Compare distinct cleaned-jobs locations with the expected contract.
 
@@ -171,6 +195,7 @@ def assess_expected_location_coverage(
         LocationCoverageConfigurationError: A location column is absent, or
             no authoritative expected locations are configured (fail closed).
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(jobs, pd.DataFrame):
         raise TypeError(f"expected a pandas DataFrame, got {type(jobs).__name__}")
     if not isinstance(coverage, LocationCoverageDefinition):
@@ -199,11 +224,13 @@ def assess_expected_location_coverage(
     ]
     covered = sum(covered_flags)
     missing = tuple(key for key, hit in zip(coverage.expected_locations, covered_flags) if not hit)
-    conflicts = len(_conflicting_labels(keys.loc[assigned].drop_duplicates(), coverage))
     accepted = pd.MultiIndex.from_tuples(
         [k for key in coverage.expected_locations for k in coverage.match_keys(key)], names=names
     )
-    unexpected = int((~observed.isin(accepted)).sum())
+    conflicts = len(_conflicting_labels(keys.loc[assigned].drop_duplicates(), coverage))
+    unexpected_mask = ~observed.isin(accepted)
+    unexpected = int(unexpected_mask.sum())
+    variants = _spelling_variant_count(observed[unexpected_mask], coverage.expected_locations)
 
     return LocationCoverageReport(
         mode=coverage.mode,
@@ -215,6 +242,7 @@ def assess_expected_location_coverage(
         unexpected_location_count=unexpected,
         missing_location_row_count=int((~assigned).sum()),
         conflicting_location_label_count=conflicts,
+        spelling_variant_location_count=variants,
         missing_expected_locations=missing,
         expected_pairs=tuple(coverage.expected_locations),
     )
@@ -222,13 +250,14 @@ def assess_expected_location_coverage(
 
 def location_pair_evidence(
     frame: pd.DataFrame,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> pd.DataFrame:
     """Distinct observed complete keys with ``expected`` and ``conflicting_label`` flags.
 
     In memory only (a new frame on every call), sorted by key; observed source
     values are confidential - never print, log or persist them.
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(frame, pd.DataFrame) or not isinstance(coverage, LocationCoverageDefinition):
         raise TypeError("frame must be a DataFrame and coverage a LocationCoverageDefinition")
     columns = coverage.location_columns
@@ -247,6 +276,40 @@ def location_pair_evidence(
     return observed.sort_values(list(columns), kind="mergesort").reset_index(drop=True)
 
 
+def _fold(value: object) -> str:
+    """Diagnostic-only folding (case, spacing, punctuation); never applied to data or matching."""
+    return re.sub(r"[^0-9a-z]+", "", str(value).casefold())
+
+
+def spelling_variant_keys(observed: object, expected: tuple[tuple[str, ...], ...]) -> list[tuple[object, ...]]:
+    """Observed keys (not exactly expected) that are spelling variants of the expected keys.
+
+    In memory only: a key is a variant when its folded components equal the
+    folded components of an expected key in some order, or when any component
+    differs from every exact expected value at that position but folds to one
+    of them. Exact keys are never variants. Nothing is rewritten.
+    """
+    exact = set(expected)
+    folded_keys = {tuple(sorted(_fold(v) for v in key)) for key in expected}
+    width = len(expected[0]) if expected else 0
+    exact_parts = [{key[i] for key in expected} for i in range(width)]
+    folded_parts = [{_fold(key[i]) for key in expected} for i in range(width)]
+    variants = []
+    for key in observed:
+        key = tuple(key)
+        if key in exact or len(key) != width:
+            continue
+        whole = tuple(sorted(_fold(v) for v in key)) in folded_keys
+        part = any(key[i] not in exact_parts[i] and _fold(key[i]) in folded_parts[i] for i in range(width))
+        if whole or part:
+            variants.append(key)
+    return variants
+
+
+def _spelling_variant_count(observed: pd.MultiIndex, expected: tuple[tuple[str, ...], ...]) -> int:
+    return len(spelling_variant_keys(list(observed), tuple(expected)))
+
+
 def _assigned_keys(frame: pd.DataFrame, columns: tuple[str, ...]) -> tuple[pd.DataFrame, "pd.Series"]:
     """Location columns and a mask of rows whose every component is present and non-blank."""
     keys = frame.loc[:, list(columns)]                             # location columns only
@@ -261,24 +324,36 @@ def _assigned_keys(frame: pd.DataFrame, columns: tuple[str, ...]) -> tuple[pd.Da
 
 
 def _conflicting_labels(distinct_keys: pd.DataFrame, coverage: LocationCoverageDefinition) -> set:
-    """Labels observed under more than one combination of the other key components."""
+    """Labels observed under more than one combination of the other key components, at least one unexpected.
+
+    The approved contract may itself use one label in several cities (for
+    example a ``Downtown`` branch per city); a label observed only under
+    expected (or approved-alias) keys is therefore not a conflict. As soon as
+    one of its observed combinations is outside the contract, the label is
+    conflicting. City is never inferred from the label.
+    """
     label = coverage.label_column
     others = [c for c in coverage.location_columns if c != label]
     if label is None or not others or distinct_keys.empty:
         return set()
-    counts = distinct_keys.groupby(label, dropna=False, sort=False).size()
-    return set(counts.index[counts > 1])
+    accepted = {k for key in (coverage.expected_locations or ()) for k in coverage.match_keys(key)}
+    columns = list(coverage.location_columns)
+    rows = distinct_keys.loc[:, columns].astype(object)
+    keyed = rows.assign(_accepted=[tuple(r) in accepted for r in rows.itertuples(index=False)])
+    grouped = keyed.groupby(label, dropna=False, sort=False)["_accepted"].agg(["size", "all"])
+    return set(grouped.index[(grouped["size"] > 1) & ~grouped["all"]])
 
 
 def assess_dataset_location_coverage(
     datasets: RawDatasets,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> LocationCoverageReport:
     """Assess coverage on the frame of ``datasets`` that the contract names.
 
     Selects ``datasets.<coverage.dataset>`` (cleaned frames expected) so
     callers never hard-code which dataset carries the locations.
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(datasets, RawDatasets):
         raise TypeError(f"expected RawDatasets, got {type(datasets).__name__}")
     return assess_expected_location_coverage(getattr(datasets, coverage.dataset.value), coverage)
@@ -286,9 +361,10 @@ def assess_dataset_location_coverage(
 
 def validate_expected_location_coverage(
     jobs: pd.DataFrame,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> LocationCoverageReport:
     """Assess, then return the report if valid or raise :class:`LocationCoverageError`."""
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     report = assess_expected_location_coverage(jobs, coverage)
     if not report.is_valid:
         raise LocationCoverageError(report)

@@ -64,7 +64,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # Cells that are required to report categorical gate results and aggregate
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
-REPORTING_STEPS = ("assess_job_linkage(", "assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+REPORTING_STEPS = ("current_expected_stream_contract(", "assess_job_linkage(", "assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
                    "investigate_location_stream(", "assess_completeness(")
@@ -1133,7 +1133,9 @@ def test_ingestion_notebook_blocks_resolved_policy_on_mapping_defect(state: str,
     # Governed keys / canonical key are repository configuration and are shown on their own lines.
     shown = comparison + "\n".join(line for line in outputs.splitlines()
                                    if not line.startswith(("Governed", "Supplied canonical")))
-    assert "SYNTH" not in shown and first not in shown and second not in shown and city not in shown
+    # Approved keys are ordinary words ("Vancouver", "Downtown"), so check the printed values, not the labels.
+    values = " ".join(line.split(":", 1)[1] for line in shown.splitlines() if ":" in line)
+    assert "SYNTH" not in shown and first not in values and second not in values and city not in values
     assert list(workdir.iterdir()) == []
 
 
@@ -1220,7 +1222,8 @@ def test_ingestion_notebook_blocks_when_one_expected_stream_is_partial(tmp_path:
     assert "Stream continuity: complete" in calgary                       # the investigated stream is fine
     streams = _step_output(result, "assess_expected_location_streams(")
     lines = dict(line.split(":", 1) for line in streams.splitlines() if ":" in line)
-    assert lines["Configured expected streams"].strip() == "3" and lines["Assessed streams"].strip() == "3"
+    population = str(len(cov.expected_locations))                         # every approved stream, not three
+    assert lines["Configured expected streams"].strip() == population and lines["Assessed streams"].strip() == population
     assert lines["Every expected stream assessed exactly once"].strip() == "True"
     assert lines["All expected streams healthy"].strip() == "False"
     assert "stream_continuity_partial" in lines["Expected streams blocked by"]
@@ -1311,7 +1314,7 @@ def test_ingestion_notebook_blocks_on_city_integrity_defects(defect: str, tmp_pa
     assert "Pricing analysis ready: False" in pricing
     assert PricingBlocker.SCOPE_INTEGRITY_NOT_PROVEN.value in pricing
     shown = integrity + join + complete + pricing
-    assert "SYNTH" not in shown and label1 not in shown          # the governed Vancouver keys are configuration
+    assert "SYNTH" not in shown and " / ".join(INVESTIGATED_LOCATION_STREAM) not in shown   # governed keys are configuration
     assert list(workdir.iterdir()) == []
 
 

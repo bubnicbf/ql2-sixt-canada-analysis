@@ -73,3 +73,19 @@ and notebook logic.
 - ~~An explicit identifier-normalisation step so detail rows link to jobs.~~ Done: authority-backed
   job linkage (`job_linkage`, pricing-authority record `v2`).
 - Upstream confirmation of why the branch was not returned in some runs.
+
+## Update (2026-10-06): approved exact source spelling
+
+Pricing-authority record `v3` approves the exhaustive seven-stream source
+contract with exact source spellings
+([governance reference](../decisions/governance/expected-stream-governance-2026-10-06.md)).
+`INVESTIGATED_LOCATION_STREAM` is now the approved key `Calgary / Downtown`.
+The observations above were made with the earlier project-owner key, whose
+spelling is the one the extract carries; under exact matching the extract
+does not contain the approved spelling, so the approved stream is reported
+`raw_stream_absent` and the extract's stream is an unexpected spelling
+variant (`source_spelling_mismatch`). The variant is never normalised into
+the approved key. The continuity finding is unchanged: the extract's Calgary
+Downtown stream is still missing from one of its city's capture events, as
+shown (anonymously, counts only) in the observed-stream health table of
+[`pricing_readiness_baseline.md`](pricing_readiness_baseline.md).

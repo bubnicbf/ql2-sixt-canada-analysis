@@ -71,8 +71,8 @@ from ql2_sixt_canada_analysis.streams import (
     ScheduledCoverageReport,
 )
 from ql2_sixt_canada_analysis.schemas import (
-    EXPECTED_LOCATION_COVERAGE,
-    VANCOUVER_LOCATION_POLICY,
+    PROJECT_DEFAULT,
+    project_default,
     LocationCoverageConfigurationError,
     LocationCoverageDefinition,
     LocationIdentityPolicy,
@@ -85,6 +85,7 @@ from ql2_sixt_canada_analysis.schemas import (
 )
 
 if TYPE_CHECKING:  # imported lazily at run time
+    from ql2_sixt_canada_analysis.expected_stream_contract import ExpectedStreamContract
     from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
 
 __all__ = [
@@ -109,6 +110,14 @@ class PricingBlocker(StrEnum):
     COMPLETENESS_UNAVAILABLE = "completeness_unavailable"
     DATA_INCOMPLETE = "data_incomplete"
     EXPECTED_STREAMS_NOT_PROVEN = "expected_streams_not_proven"
+    # Authority-backed exhaustive source-stream contract (values equal
+    # ExpectedStreamContractBlocker / CompletenessBlocker values).
+    EXPECTED_STREAM_AUTHORITY_UNAVAILABLE = "expected_stream_authority_unavailable"
+    EXPECTED_STREAM_UNIVERSE_NOT_EXHAUSTIVE = "expected_stream_universe_not_exhaustive"
+    EXPECTED_STREAM_CONTRACT_MISMATCH = "expected_stream_contract_mismatch"
+    EXPECTED_SOURCE_STREAMS_MISSING = "expected_pairs_missing"
+    UNEXPECTED_SOURCE_STREAMS = "unexpected_pairs"
+    SOURCE_SPELLING_MISMATCH = "source_spelling_mismatch"
     SCOPE_INTEGRITY_NOT_PROVEN = "scope_integrity_not_proven"
     KEY_CONTRACTS_INVALID = "key_contracts_invalid"
     ONE_TO_MANY_INVALID = "one_to_many_invalid"
@@ -354,6 +363,8 @@ class PricingReadinessReport:
     job_detail_join: JobDetailJoinReadiness | None = None
     #: The authority-backed job-linkage report (kept for audit; ``None`` = missing).
     job_linkage: JobLinkageReport | None = None
+    #: The authority-backed source-stream contract (kept for audit; ``None`` = missing).
+    expected_stream_contract: ExpectedStreamContract | None = None
 
     @property
     def ready(self) -> bool:
@@ -370,6 +381,11 @@ class PricingReadinessReport:
     @property
     def job_identifier_normalization_ready(self) -> bool:
         return self.job_linkage is not None and self.job_linkage.is_valid
+
+    @property
+    def expected_stream_contract_usable(self) -> bool:
+        """An approved, exhaustive source-stream contract was supplied (not that the streams are healthy)."""
+        return self.expected_stream_contract is not None and self.expected_stream_contract.usable
 
     @property
     def trusted_join_ready(self) -> bool:
@@ -391,7 +407,7 @@ class PricingNotReadyError(Exception):
 
 
 def apply_location_policy(
-    frame: pd.DataFrame, policy: LocationIdentityPolicy = VANCOUVER_LOCATION_POLICY,
+    frame: pd.DataFrame, policy: LocationIdentityPolicy = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> AnalyticalLocationKeys:
     """Analytical location keys for ``frame`` under ``policy`` (frame untouched).
 
@@ -406,6 +422,7 @@ def apply_location_policy(
     analytical key equals its source key. The mapping is built here from the
     validated fields, never taken from the policy object.
     """
+    policy = project_default(policy, "VANCOUVER_LOCATION_POLICY")
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("frame must be a pandas DataFrame")
     if not isinstance(policy, LocationIdentityPolicy):
@@ -430,7 +447,7 @@ def apply_location_policy(
 
 
 def assess_location_policy(
-    policy: LocationIdentityPolicy = VANCOUVER_LOCATION_POLICY,
+    policy: LocationIdentityPolicy = PROJECT_DEFAULT,  # type: ignore[assignment]
     comparison: LocationStreamComparisonReport | None = None,
     analytical_keys: AnalyticalLocationKeys | None = None,
 ) -> LocationPolicyReport:
@@ -457,6 +474,7 @@ def assess_location_policy(
     makes the policy authority-insufficient and is a pricing blocker of the
     same name, alongside every other applicable blocker.
     """
+    policy = project_default(policy, "VANCOUVER_LOCATION_POLICY")
     if not isinstance(policy, LocationIdentityPolicy):
         raise TypeError("policy must be a LocationIdentityPolicy")
     if comparison is not None and not isinstance(comparison, LocationStreamComparisonReport):
@@ -483,6 +501,7 @@ def assess_pricing_readiness(
     scheduled_coverage: ScheduledCoverageReport | None,
     job_detail_join: JobDetailJoinReadiness | None,
     job_linkage: JobLinkageReport | None,
+    expected_stream_contract: ExpectedStreamContract | None,
 ) -> PricingReadinessReport:
     """Combine every foundational gate with the location policy (all must pass).
 
@@ -506,7 +525,16 @@ def assess_pricing_readiness(
     otherwise it blocks: ``job_key_normalization_missing`` for ``None``, else
     ``job_key_normalization_not_ready`` plus every linkage blocker by the same
     value and ``job_linkage_report_mismatch`` when the trusted join was
-    assessed with a different report object. Completeness and keys computed on frames that
+    assessed with a different report object.
+    ``expected_stream_contract``
+    (:func:`~ql2_sixt_canada_analysis.expected_stream_contract.current_expected_stream_contract`)
+    must be approved and ``EXHAUSTIVE`` (``expected_stream_authority_unavailable``
+    for ``None`` or an unapproved universe/spelling,
+    ``expected_stream_universe_not_exhaustive`` otherwise), and completeness
+    must have assessed exactly that contract (``expected_stream_contract_mismatch``).
+    Missing expected streams, unexpected source streams and source spelling
+    mismatches found by completeness are repeated here by the same values, so
+    an unexpected stream fails pricing pending contract review. Completeness and keys computed on frames that
     were not linked under the approved policy are therefore never sufficient.
 
     Gate values must be real booleans; anything else is a ``TypeError`` so a
@@ -533,6 +561,10 @@ def assess_pricing_readiness(
 
     if job_linkage is not None and not isinstance(job_linkage, JobLinkageReport):
         raise TypeError("job_linkage must be a JobLinkageReport or None")
+    from ql2_sixt_canada_analysis.expected_stream_contract import ExpectedStreamContract
+
+    if expected_stream_contract is not None and not isinstance(expected_stream_contract, ExpectedStreamContract):
+        raise TypeError("expected_stream_contract must be an ExpectedStreamContract or None")
     gates = (
         (key_contracts_valid, PricingBlocker.KEY_CONTRACTS_INVALID),
         (one_to_many_contract_valid, PricingBlocker.ONE_TO_MANY_INVALID),
@@ -541,6 +573,7 @@ def assess_pricing_readiness(
     if not all(isinstance(value, bool) for value, _ in gates):
         raise TypeError("every readiness gate must be a bool")
     reasons = list(_completeness_blockers(completeness))
+    reasons.extend(_expected_stream_contract_blockers(expected_stream_contract, completeness))
     reasons.extend(blocker for value, blocker in gates if not value)
     reasons.extend(_stability_blockers(vehicle_stability))
     reasons.extend(_scheduled_coverage_blockers(scheduled_coverage, completeness))
@@ -549,7 +582,25 @@ def assess_pricing_readiness(
     reasons.extend(location_policy.blocking_reasons)
     return PricingReadinessReport(blocking_reasons=tuple(dict.fromkeys(reasons)), location_policy=location_policy,
                                   completeness=completeness, scheduled_coverage=scheduled_coverage,
-                                  job_detail_join=job_detail_join, job_linkage=job_linkage)
+                                  job_detail_join=job_detail_join, job_linkage=job_linkage,
+                                  expected_stream_contract=expected_stream_contract)
+
+
+def _expected_stream_contract_blockers(contract: ExpectedStreamContract | None,
+                                       completeness: CompletenessReport | None) -> list[PricingBlocker]:
+    """Source-stream contract blockers (central mapping; anything but an approved, exhaustive, applied contract blocks)."""
+    B = PricingBlocker
+    blockers = ([B.EXPECTED_STREAM_AUTHORITY_UNAVAILABLE, B.EXPECTED_STREAM_UNIVERSE_NOT_EXHAUSTIVE]
+                if contract is None else [B(b.value) for b in contract.blocking_reasons])
+    if completeness is not None:
+        streams = completeness.expected_streams
+        if contract is not None and contract.coverage.is_configured and (
+                streams is None or streams.coverage != contract.coverage):
+            blockers.append(B.EXPECTED_STREAM_CONTRACT_MISMATCH)
+        source_stream = (CompletenessBlocker.EXPECTED_PAIRS_MISSING, CompletenessBlocker.UNEXPECTED_PAIRS,
+                         CompletenessBlocker.SOURCE_SPELLING_MISMATCH)   # repeated at pricing level by value
+        blockers.extend(B(b.value) for b in source_stream if b in completeness.blocking_reasons)
+    return blockers
 
 
 def _linkage_blockers(report: JobLinkageReport | None,
@@ -631,6 +682,7 @@ class CompletenessBlocker(StrEnum):
     UNEXPECTED_PAIRS = "unexpected_pairs"
     UNASSIGNED_LOCATIONS = "unassigned_pairs"
     CONFLICTING_LOCATION_ASSIGNMENT = "conflicting_pair_assignment"
+    SOURCE_SPELLING_MISMATCH = "source_spelling_mismatch"
     EXPECTED_STREAM_ASSESSMENT_UNAVAILABLE = "expected_stream_assessment_unavailable"
     STREAM_CONTRACT_MISMATCH = "stream_contract_mismatch"
     EXPECTED_STREAM_REPORT_MISSING = "expected_stream_report_missing"
@@ -658,6 +710,7 @@ _COVERAGE_BLOCKERS = {
     "unexpected_location": CompletenessBlocker.UNEXPECTED_PAIRS,
     "missing_location_assignment": CompletenessBlocker.UNASSIGNED_LOCATIONS,
     "conflicting_location_assignment": CompletenessBlocker.CONFLICTING_LOCATION_ASSIGNMENT,
+    "source_spelling_mismatch": CompletenessBlocker.SOURCE_SPELLING_MISMATCH,
 }
 
 
@@ -724,7 +777,7 @@ def assess_completeness(
     streams: ExpectedLocationStreamsReport | None,
     reconciliation: JobDetailReconciliationReport | None,
     city_integrity: CityIntegrityReport | None,
-    expected_coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    expected_coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> CompletenessReport:
     """Combine source completeness, city-location coverage, every expected stream, counts and city integrity.
 
@@ -742,6 +795,7 @@ def assess_completeness(
     coverage never substitutes for job-level stream continuity. Every input
     must be present and pass; each failure is reported.
     """
+    expected_coverage = project_default(expected_coverage, "EXPECTED_LOCATION_COVERAGE")
     B = CompletenessBlocker
     if not isinstance(datasets, RawDatasets):
         raise TypeError("datasets must be RawDatasets")
