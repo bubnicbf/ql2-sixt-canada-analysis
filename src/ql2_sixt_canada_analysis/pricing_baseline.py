@@ -103,7 +103,9 @@ __all__ = [
     "ApprovedDateAgreement",
     "baseline_authority_inputs",
     "rental_date_fields",
+    "CollectionScheduleSummary",
     "LocationAuthoritySummary",
+    "StreamScheduleSummary",
     "BaselineInputError",
     "ContinuityFinding",
     "PlanReadinessGap",
@@ -280,6 +282,41 @@ class LocationAuthoritySummary:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamScheduleSummary:
+    """One stream's own scheduled coverage (counts only; exact approved key)."""
+
+    stream: tuple[str, ...]
+    expected_periods: int
+    covered_periods: int
+    unexcused_missing_periods: int
+    excused_periods: int
+    missing_by_failure: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionScheduleSummary:
+    """Aggregate per-stream schedule and coverage: statuses and counts only (no instants, no identifiers)."""
+
+    status: str                         # available | not_approved | record_unavailable | invalid | report_missing
+    schedule_version: str | None
+    sharing_model: str | None           # per_stream
+    capture_field: str | None           # jobs.finished_at
+    period_minutes: int
+    exceptions_model: str | None        # no_exceptions | listed_exceptions
+    excused_period_count: int
+    schedule_count: int
+    total_periods: int
+    city_periods: tuple[tuple[str, int], ...]
+    missing_city_periods: tuple[tuple[str, int], ...]
+    jobs_assessed: int
+    jobs_assigned: int
+    job_failures: tuple[tuple[str, int], ...]
+    detail_copy_mismatches: int
+    unexcused_missing_periods: int
+    streams: tuple[StreamScheduleSummary, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PricingReadinessBaseline:
     """Sanitized baseline: active typed blockers, plan gaps, populations, continuity."""
 
@@ -295,6 +332,7 @@ class PricingReadinessBaseline:
     observed_stream_health: tuple[ObservedStreamHealth, ...] = ()
     authority_record_version: int | None = None
     location_authority: LocationAuthoritySummary | None = None
+    collection_schedule: CollectionScheduleSummary | None = None
 
     def to_dict(self) -> dict:
         """Plain, sanitized structure; raises :class:`UnsafeBaselineValueError` on anything unsafe."""
@@ -390,7 +428,39 @@ def build_pricing_baseline(
         observed_stream_health=_observed_health(jobs, cars, coverage, relationship, observed_keys, expected_keys),
         authority_record_version=_record_version(contract),
         location_authority=_location_summary(pricing),
+        collection_schedule=_schedule_summary(pricing),
     )
+
+
+def _schedule_summary(pricing: PricingReadinessReport) -> CollectionScheduleSummary:
+    """Counts from the per-stream scheduled-coverage report (``report_missing`` for anything else)."""
+    from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
+
+    report = pricing.scheduled_coverage
+    if not isinstance(report, PerStreamScheduledCoverageReport):
+        return CollectionScheduleSummary(
+            status="report_missing", schedule_version=None, sharing_model=None, capture_field=None,
+            period_minutes=0, exceptions_model=None, excused_period_count=0, schedule_count=0, total_periods=0,
+            city_periods=(), missing_city_periods=(), jobs_assessed=0, jobs_assigned=0, job_failures=(),
+            detail_copy_mismatches=0, unexcused_missing_periods=0, streams=())
+    schedule = report.schedule
+    available = schedule.available
+    return CollectionScheduleSummary(
+        status=schedule.status.value, schedule_version=schedule.schedule_version if available else None,
+        sharing_model=schedule.sharing_mode.value.lower() if available else None,
+        capture_field=schedule.capture_field if available else None, period_minutes=60 if available else 0,
+        exceptions_model=schedule.exceptions.model.value.lower() if available else None,
+        excused_period_count=report.excused_total, schedule_count=len(schedule.schedules),
+        total_periods=schedule.total_period_count, city_periods=tuple(schedule.period_count_by_city.items()),
+        missing_city_periods=report.missing_city_periods, jobs_assessed=report.jobs_assessed,
+        jobs_assigned=report.jobs_assigned, job_failures=tuple(report.job_failure_counts.items()),
+        detail_copy_mismatches=report.detail_copy_mismatches,
+        unexcused_missing_periods=report.unexcused_missing_total,
+        streams=tuple(StreamScheduleSummary(
+            stream=tuple(c.stream), expected_periods=c.expected, covered_periods=c.covered,
+            unexcused_missing_periods=c.unexcused_missing, excused_periods=c.excused,
+            missing_by_failure=tuple((k.lower(), n) for k, n in c.missing_by_failure.items()))
+            for c in report.streams))
 
 
 def _location_summary(pricing: PricingReadinessReport) -> LocationAuthoritySummary:
@@ -657,7 +727,7 @@ def _sanitize(value: object, where: str):  # type: ignore[no-untyped-def]
 
 
 _SERIALIZABLE = (PricingReadinessBaseline, StreamPopulation, ObservedPopulation, StreamHealth, ObservedStreamHealth,
-                 ContinuityFinding, LocationAuthoritySummary)
+                 ContinuityFinding, LocationAuthoritySummary, CollectionScheduleSummary, StreamScheduleSummary)
 
 
 def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str, date: str) -> str:
@@ -705,8 +775,30 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
         lines += [f"  - {key(a)} versus {key(dn)}" for a, dn in la["keys"]]
         lines += [f"- Vancouver identity policy: `{la['vancouver_policy_state']}`; canonical location: {canonical}. "
                   "Both raw Vancouver source streams stay separately required by the source contract."]
+    cs = d["collection_schedule"]
+    if cs is not None:
+        lines += ["", "### Collection schedule (authority-backed, per stream)", "",
+                  f"- Schedule: `{cs['status']}`; version `{cs['schedule_version'] or 'none'}`; sharing model "
+                  f"`{cs['sharing_model'] or 'none'}`; capture timestamp `{cs['capture_field'] or 'none'}`; "
+                  f"period length {cs['period_minutes']} minutes; exceptions `{cs['exceptions_model'] or 'none'}` "
+                  f"({cs['excused_period_count']} excused).",
+                  f"- Stream schedules: {cs['schedule_count']}; expected stream-periods: {cs['total_periods']} ("
+                  + (", ".join(f"{c} {n}" for c, n in cs["city_periods"]) or "none") + ").",
+                  f"- Parent jobs: {cs['jobs_assessed']} assessed, {cs['jobs_assigned']} assigned to exactly one "
+                  "expected city-period; assignment failures: "
+                  + (", ".join(f"`{k}` {n}" for k, n in cs["job_failures"]) or "none")
+                  + f"; detail copies disagreeing with their parent: {cs['detail_copy_mismatches']}.",
+                  "- Expected city-periods without exactly one valid job: "
+                  + (", ".join(f"{c} {n}" for c, n in cs["missing_city_periods"]) or "none") + ".",
+                  f"- Unexcused missing stream-periods: {cs['unexcused_missing_periods']}.", "",
+                  "| Stream | Expected periods | Covered | Unexcused missing | Excused | Missing by failure |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        lines += [f"| {key(st['stream'])} | {st['expected_periods']} | {st['covered_periods']} | "
+                  f"{st['unexcused_missing_periods']} | {st['excused_periods']} | "
+                  + (", ".join(f"`{k}` {n}" for k, n in st["missing_by_failure"]) or "none") + " |"
+                  for st in cs["streams"]] or ["| none | | | | | |"]
     lines += ["", "### Expected stream health (per approved stream)", "",
-              "| Stream | Status | Continuity | Time coverage |", "| --- | --- | --- | --- |"]
+              "| Stream | Status | Continuity | Time coverage (legacy shared schedule) |", "| --- | --- | --- | --- |"]
     lines += [f"| {key(h['stream'])} | `{h['stream_status']}` | `{h['continuity']}` | `{h['time_coverage']}` |"
               for h in d["expected_stream_health"]] or ["| none | | | |"]
     lines += ["", "### Observed stream health (anonymous, exact job-based continuity)", "",
@@ -726,7 +818,8 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
                   f"{c['jobs_without_linked_details']} without linked detail rows.",
                   f"- Apparent source-continuity gap: {c['capture_events_lacking_stream']} of "
                   f"{c['in_scope_capture_events']} in-scope capture events (detail rows) carry no row of the stream.",
-                  "- " + ("An authoritative schedule is available." if c["schedule_available"] else
+                  "- " + ("An authoritative per-stream schedule is available; scheduled coverage is reported "
+                          "in the collection-schedule section." if c["schedule_available"] else
                           "No authoritative collection schedule exists, so these captures are not called "
                           "scheduled and the gap is pending a schedule.")]
     lines += ["", "Observations do not establish authority. No source-level values (identifiers, timestamps, "
@@ -743,12 +836,15 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         ANALYSIS_DATASET_DEFINITIONS, ANALYSIS_JOB_DETAIL_RELATIONSHIP, ANALYSIS_LOCATION_STREAM_COMPARISON,
         ANALYSIS_TEMPORAL_RECONCILIATION, COLLECTION_SCHEDULE, VANCOUVER_LOCATION_POLICY, VEHICLE_ATTRIBUTE_STABILITY,
         assess_job_linkage, load_job_linkage_policy,
-        apply_location_policy, assess_city_integrity, assess_collection_schedule, assess_completeness,
+        apply_location_policy, assess_city_integrity, assess_completeness,
         assess_dataset_location_coverage, assess_expected_location_streams, assess_job_detail_join_readiness,
         assess_job_detail_reconciliation, assess_location_policy, assess_one_to_many_join,
-        assess_pricing_readiness, assess_raw_dataset_unique_keys, assess_scheduled_time_coverage,
+        assess_pricing_readiness, assess_raw_dataset_unique_keys,
         assess_temporal_reconciliation, assess_vehicle_attribute_stability, compare_location_streams,
         load_raw_datasets, remove_blank_rows_from_raw_datasets, validate_raw_dataset_identifier_dtypes,
+    )
+    from ql2_sixt_canada_analysis.collection_schedule import (
+        ScheduleConfigurationError, assess_per_stream_scheduled_coverage, schedule_from_record,
     )
     from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
     from ql2_sixt_canada_analysis.location_authority import location_authority_from_record
@@ -782,8 +878,11 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
     join = assess_job_detail_join_readiness(jobs, cars, rel, job_linkage=linkage.report)
     streams = (assess_expected_location_streams(jobs, cars, coverage=cov, relationship=rel, loaded=raw,
                                                 schedule=COLLECTION_SCHEDULE) if configured else None)
-    scheduled = (assess_scheduled_time_coverage(assess_collection_schedule(COLLECTION_SCHEDULE), streams)
-                 if streams is not None else None)
+    # The authority-backed per-stream schedule (one schedule per approved stream; parent jobs.finished_at).
+    record = load_current_decision_record()
+    schedule = schedule_from_record(record, contract)
+    scheduled = attempt(lambda: assess_per_stream_scheduled_coverage(jobs, cars, schedule=schedule, contract=contract,
+                                                                     relationship=rel), ScheduleConfigurationError)
     temporal = attempt(lambda: assess_temporal_reconciliation(jobs, cars, ANALYSIS_TEMPORAL_RECONCILIATION),
                        RelationshipPreconditionError)
     comparison = attempt(lambda: compare_location_streams(jobs, cars, ANALYSIS_LOCATION_STREAM_COMPARISON),
@@ -801,7 +900,7 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         temporal_fields_trusted=bool(temporal is not None and temporal.is_valid),
         vehicle_stability=stability, scheduled_coverage=scheduled, job_detail_join=join,
         job_linkage=linkage.report, expected_stream_contract=contract,
-        location_authority=location_authority_from_record(load_current_decision_record(), contract,
+        location_authority=location_authority_from_record(record, contract,
                                                           VANCOUVER_LOCATION_POLICY))
     return build_pricing_baseline(pricing=pricing, jobs=jobs, cars=cars, temporal=temporal, vehicle_stability=stability,
                                   relationship=rel, temporal_contract=ANALYSIS_TEMPORAL_RECONCILIATION)

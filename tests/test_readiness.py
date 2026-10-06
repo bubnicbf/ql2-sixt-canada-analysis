@@ -26,6 +26,7 @@ from ql2_sixt_canada_analysis.comparison import (
     TemporalOverlap,
     compare_location_streams,
 )
+from ql2_sixt_canada_analysis.collection_schedule import ScheduleCoverageBlocker
 from ql2_sixt_canada_analysis.readiness import (
     AnalyticalLocationKeys,
     LocationPolicyReport,
@@ -196,6 +197,7 @@ def frame(labels: list[tuple[str, ...]]) -> pd.DataFrame:
 SCOPE_BLOCKERS = {B(d.value) for d in LocationPolicyScopeDefect}
 # Detailed schedule/join blockers (a missing assessment reports only its own "missing" blocker).
 SCHEDULE_AND_JOIN_DETAIL = ({B(b.value) for b in ScheduledCoverageBlocker} | {B(b.value) for b in JobDetailJoinBlocker}
+                            | {B(b.value) for b in ScheduleCoverageBlocker}
                             | {B.SCHEDULED_COVERAGE_CONTRACT_MISMATCH, B.TRUSTED_JOIN_NOT_READY}
                             | {B(b.value) for b in JobLinkageBlocker}
                             | {B.JOB_IDENTIFIER_NORMALIZATION_NOT_READY, B.JOB_LINKAGE_REPORT_MISMATCH})

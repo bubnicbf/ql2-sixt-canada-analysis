@@ -68,8 +68,8 @@ and notebook logic.
 
 ## Open dependencies
 
-- An authoritative collection schedule (`COLLECTION_SCHEDULE`) to assess
-  temporal completeness.
+- ~~An authoritative collection schedule to assess temporal completeness.~~
+  Done: the per-stream hourly schedule (record `v5`, see the update below).
 - ~~An explicit identifier-normalisation step so detail rows link to jobs.~~ Done: authority-backed
   job linkage (`job_linkage`, pricing-authority record `v2`).
 - Upstream confirmation of why the branch was not returned in some runs.
@@ -89,3 +89,18 @@ the approved key. The continuity finding is unchanged: the extract's Calgary
 Downtown stream is still missing from one of its city's capture events, as
 shown (anonymously, counts only) in the observed-stream health table of
 [`pricing_readiness_baseline.md`](pricing_readiness_baseline.md).
+
+## Update (2026-10-06): exact source keys and per-stream schedule (record `v5`)
+
+Pricing-authority record `v5` supersedes the display-style spelling with the
+exact raw source keys
+([governance reference](../decisions/governance/collection-schedule-governance-v1-2026-10-06.md)):
+`INVESTIGATED_LOCATION_STREAM` is now `calgary / Calgary Downtown`, which the
+extract carries exactly, so the spelling mismatch above no longer applies.
+The same record approves a per-stream hourly schedule anchored on the parent
+job's finish time in the city's IANA zone, with `NO_EXCEPTIONS`. Against its
+own 90 expected periods the stream is covered in 89 and missing in 1 (its
+parent job ran and returned the city's airport stream). The gap is not
+excused and remains a blocker (`scheduled_coverage_incomplete`). The open
+question for the collection owner: for that one Calgary hourly job, was the
+Downtown branch attempted, and what was the outcome?

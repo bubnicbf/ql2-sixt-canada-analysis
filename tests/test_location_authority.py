@@ -1,4 +1,5 @@
-"""Approved location roles, comparison pairs and the Vancouver alias policy (pricing-authorities-v4).
+"""Approved location roles, comparison pairs and the Vancouver alias policy (approved in pricing-authorities-v4,
+carried into v5 with the corrected exact raw source keys).
 
 The committed records are read as data; negative cases mutate parsed copies
 in memory, build synthetic role maps / pair sets, or use a temporary
@@ -20,7 +21,7 @@ import pandas as pd
 import pytest
 from stream_contract_fixtures import synthetic_contract
 from test_completeness import cars as cars_frame, jobs as jobs_frame
-from test_expected_stream_contract import SUPPLIED, completeness_of, healthy_frames, pricing_of
+from test_expected_stream_contract import DISPLAY_SPELLINGS, SUPPLIED, completeness_of, healthy_frames, pricing_of
 from test_readiness import GATES, evidence
 
 from ql2_sixt_canada_analysis.authority_decisions import (
@@ -75,11 +76,14 @@ from ql2_sixt_canada_analysis.schemas import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD_DIR = ROOT / "docs" / "decisions" / "pricing_authorities"
-V1, V2, V3, V4 = (RECORD_DIR / f"v{n}.toml" for n in (1, 2, 3, 4))
+V1, V2, V3, V4, V5 = (RECORD_DIR / f"v{n}.toml" for n in (1, 2, 3, 4, 5))
+SCHEDULE_GOVERNANCE = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
 GOVERNANCE = "docs/decisions/governance/location-roles-and-identity-governance-2026-10-06.md"
 HISTORY_SHA256 = {
     "v1.toml": "b13881b099885130e853207f872e62bfde9820f438e34859f3ddef0ebdbf1bd7",
     "v2.toml": "899c20e289d932868b1d430b8fd70edca6ebb2900ca963c4c040cc6f5840cb4c",
+    "v3.toml": "431ec36a8d60b058a9d2ede401ab0274dea0bc525f8b025f2b04cbdff0aa2d79",
+    "v4.toml": "28a412352884a28c7ebf6874aa1bfc25182c13f210357861933001886a25d552",
 }
 D = DecisionId
 CAL_DOWN, CAL_AIR, TOR_DOWN, TOR_AIR, VAN_DOWN, VAN_AIR, VAN_THUR = SUPPLIED
@@ -87,12 +91,20 @@ CAL_DOWN, CAL_AIR, TOR_DOWN, TOR_AIR, VAN_DOWN, VAN_AIR, VAN_THUR = SUPPLIED
 ROLES = {CAL_DOWN: R.DOWNTOWN, CAL_AIR: R.AIRPORT, TOR_DOWN: R.DOWNTOWN, TOR_AIR: R.AIRPORT,
          VAN_DOWN: R.DOWNTOWN, VAN_AIR: R.AIRPORT, VAN_THUR: R.DOWNTOWN}
 PAIRS = ((CAL_AIR, CAL_DOWN), (TOR_AIR, TOR_DOWN), (VAN_AIR, VAN_DOWN))
+#: History oracle: the same decisions under the display-style spellings recorded in v4.
+_DISPLAY = dict(zip(SUPPLIED, DISPLAY_SPELLINGS))
+ROLES_V4 = {_DISPLAY[k]: r for k, r in ROLES.items()}
+PAIRS_V4 = tuple((_DISPLAY[a], _DISPLAY[d]) for a, d in PAIRS)
 CONTRACT = current_expected_stream_contract()
 PROVENANCE = dict(record_id="pricing-authorities-synthetic", references=("SYNTH-GOVERNANCE-REFERENCE",))
 
 
 def v4() -> dict:
     return tomllib.loads(V4.read_text(encoding="utf-8"))
+
+
+def v5() -> dict:
+    return tomllib.loads(V5.read_text(encoding="utf-8"))
 
 
 def entry(data: dict, decision: DecisionId) -> dict:
@@ -137,22 +149,22 @@ def assess(role_map=None, pair_set=None, policy=POLICY, contract=CONTRACT):  # t
 UNDECIDED = dataclasses.replace(POLICY, state=PS.UNRESOLVED, authority=None, canonical_location=None)
 
 
-# ============================================================ authority record (v4)
+# ======================================================= authority record (v4, v5)
 
 
 def test_history_is_unchanged_and_valid() -> None:
     for name, digest in HISTORY_SHA256.items():
         assert hashlib.sha256((RECORD_DIR / name).read_bytes()).hexdigest() == digest
-    for path in (V1, V2, V3):
+    for path in (V1, V2, V3, V4):
         load_decision_record(path)
     v3 = load_decision_record(V3)
     assert all(v3.decision(d).status is DecisionStatus.PROPOSED for d in LOCATION_DECISIONS)
 
 
-def test_v4_is_current_and_approves_exactly_nine_decisions() -> None:
+def test_v4_is_history_and_approves_exactly_nine_decisions() -> None:
     record = load_decision_record(V4)
     assert (record.schema_version, record.record_version, record.supersedes) == (2, 4, "pricing-authorities-v3")
-    assert CURRENT_RECORD_PATH.name == "v4.toml" and load_current_decision_record() == record
+    assert CURRENT_RECORD_PATH.name == "v5.toml" and load_current_decision_record() != record
     approved = {d.id for d in record.decisions if d.is_approved}
     assert approved == set(JOB_IDENTIFIER_DECISIONS) | set(EXPECTED_STREAM_DECISIONS) | set(LOCATION_DECISIONS)
     counts = record.counts()
@@ -169,21 +181,40 @@ def test_v4_is_current_and_approves_exactly_nine_decisions() -> None:
 def test_v4_resolutions_are_exactly_the_supplied_decisions() -> None:
     record = load_decision_record(V4)
     assignments = record.approved_resolution(D.LOCATION_ROLE_ASSIGNMENTS)["assignments"]
+    assert {tuple(a["stream"]): R(a["role"]) for a in assignments} == ROLES_V4 and len(assignments) == 7
+    declared = record.approved_resolution(D.VALID_LOCATION_COMPARISON_PAIRS)["pairs"]
+    assert tuple((tuple(p["airport"]), tuple(p["downtown"])) for p in declared) == PAIRS_V4
+    identity = record.approved_resolution(D.VANCOUVER_LOCATION_IDENTITY)
+    assert identity["state"] == "CONFIRMED_ALIAS" and tuple(identity["canonical_location"]) == _DISPLAY[VAN_DOWN]
+    # v4 governs its own (superseded) spellings, which are not keys of the current contract: unresolved.
+    assert vancouver_policy_from_record(record, COV).state is PS.UNRESOLVED
+
+
+def test_v5_carries_the_location_decisions_with_the_corrected_keys() -> None:
+    record, v4_record = load_decision_record(V5), load_decision_record(V4)
+    assert (record.schema_version, record.record_version, record.supersedes) == (3, 5, "pricing-authorities-v4")
+    assert load_current_decision_record() == record
+    assignments = record.approved_resolution(D.LOCATION_ROLE_ASSIGNMENTS)["assignments"]
     assert {tuple(a["stream"]): R(a["role"]) for a in assignments} == ROLES and len(assignments) == 7
     declared = record.approved_resolution(D.VALID_LOCATION_COMPARISON_PAIRS)["pairs"]
     assert tuple((tuple(p["airport"]), tuple(p["downtown"])) for p in declared) == PAIRS
     identity = record.approved_resolution(D.VANCOUVER_LOCATION_IDENTITY)
     assert identity["state"] == "CONFIRMED_ALIAS" and tuple(identity["canonical_location"]) == VAN_DOWN
+    assert tuple(map(tuple, identity["governed_locations"])) == (VAN_DOWN, VAN_THUR)
+    for decision in LOCATION_DECISIONS:                               # same authority; respelling is traceable
+        assert record.decision(decision).authority == v4_record.decision(decision).authority
+        assert [e.reference for e in record.decision(decision).evidence] == [SCHEDULE_GOVERNANCE]
 
 
-def test_v4_authority_roles_and_governance_reference() -> None:
-    record = load_decision_record(V4)
+@pytest.mark.parametrize("path", [V4, V5])
+def test_location_authority_roles_and_governance_reference(path) -> None:
+    record = load_decision_record(path)
     for decision, kind in ((D.LOCATION_ROLE_ASSIGNMENTS, AuthorityKind.BUSINESS_OWNER),
                            (D.VALID_LOCATION_COMPARISON_PAIRS, AuthorityKind.BUSINESS_OWNER),
                            (D.VANCOUVER_LOCATION_IDENTITY, AuthorityKind.COLLECTION_OWNER)):
         authority = record.decision(decision).authority
         assert [a.kind for a in authority] == [kind] and authority[0].reference == GOVERNANCE
-        assert record.decision(decision).evidence == ()              # no observation presented as authority
+        assert all(e.kind.value != "RAW_DATA_OBSERVATION" for e in record.decision(decision).evidence)
     assert (ROOT / GOVERNANCE).is_file()
 
 
@@ -198,7 +229,7 @@ def test_governance_document_records_the_supplied_decisions_only() -> None:
                    "Not supplied", "pricing-authorities-v4", "collection schedule", "temporal rules",
                    "reporting-day rules", "rental-date rules", "explicit blocker"):
         assert phrase in text, phrase
-    for (city, location), role in ROLES.items():
+    for (city, location), role in ROLES_V4.items():                 # as spelled when supplied (history)
         assert f"| `{city}` | `{location}` | `{role.value}` |" in raw
     assert "@" not in raw and not re.search(r"#\d|[A-Z]{2,}-\d+", raw)
     assert not re.search(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}|\d{6,}|\d+\.\d{2}", raw)
@@ -220,50 +251,51 @@ def test_missing_or_external_governance_reference_fails_closed(tmp_path: Path) -
     assert vancouver_policy_from_record(None, COV).state is PS.UNRESOLVED   # unavailable record -> unresolved
 
 
-@pytest.mark.parametrize("canonical", [CAL_DOWN, TOR_DOWN, VAN_AIR, ("Vancouver", "SYNTH Branch"),
-                                       ("Vancouver", "downtown")])
+@pytest.mark.parametrize("canonical", [CAL_DOWN, TOR_DOWN, VAN_AIR, ("vancouver", "SYNTH Branch"),
+                                       ("vancouver", "vancouver downtown")])
 def test_canonical_key_outside_the_governed_vancouver_keys_is_rejected(canonical) -> None:
-    data = v4()
+    data = v5()
     entry(data, D.VANCOUVER_LOCATION_IDENTITY)["resolution"]["canonical_location"] = list(canonical)
     assert "canonical key must be one of the two governed keys" in fails(data)
 
 
 def test_record_rejects_pairs_and_roles_that_contradict_the_alias() -> None:
-    data = v4()                                                      # a second comparison through Thurlow
+    data = v5()                                                      # a second comparison through Thurlow
     entry(data, D.VALID_LOCATION_COMPARISON_PAIRS)["resolution"]["pairs"].append(
         {"airport": list(VAN_AIR), "downtown": list(VAN_THUR)})
     assert "canonical locations" in fails(data)
-    data = v4()                                                      # a reversed copy fails the role rule
+    data = v5()                                                      # a reversed copy fails the role rule
     entry(data, D.VALID_LOCATION_COMPARISON_PAIRS)["resolution"]["pairs"].append(
         {"airport": list(CAL_DOWN), "downtown": list(CAL_AIR)})
     assert "airport/downtown roles" in fails(data)
-    data = v4()
+    data = v5()
     entry(data, D.VALID_LOCATION_COMPARISON_PAIRS)["resolution"]["pairs"].append(
         {"airport": list(CAL_AIR), "downtown": list(TOR_DOWN)})
     assert "within one city" in fails(data)
-    data = v4()
+    data = v5()
     entry(data, D.VALID_LOCATION_COMPARISON_PAIRS)["resolution"]["pairs"].append(copy.deepcopy(
         entry(data, D.VALID_LOCATION_COMPARISON_PAIRS)["resolution"]["pairs"][0]))
     assert "duplicate" in fails(data)
-    data = v4()                                                      # aliases need one role
+    data = v5()                                                      # aliases need one role
     next(a for a in entry(data, D.LOCATION_ROLE_ASSIGNMENTS)["resolution"]["assignments"]
          if a["stream"] == list(VAN_THUR))["role"] = "OTHER"
     assert "same approved role" in fails(data)
 
 
-def test_checklist_is_regenerated_from_v4() -> None:
-    checklist = render_authority_request_checklist(load_decision_record(V4))
+def test_checklist_is_regenerated_from_the_current_record() -> None:
+    checklist = render_authority_request_checklist(load_decision_record(V5))
     assert (RECORD_DIR / "authority_request_checklist.md").read_text(encoding="utf-8") == checklist
     resolved, requests = checklist.split("## Resolved decisions")[1].split("\n## ", 1)
     for decision in LOCATION_DECISIONS:
         assert f"`{decision.value}`" in resolved and f"`{decision.value}`" not in requests
     assert GOVERNANCE in resolved
-    assert len([line for line in requests.splitlines() if line.startswith("| `")]) == 13
+    assert len([line for line in requests.splitlines() if line.startswith("| `")]) == 8
 
 
-def test_record_readme_identifies_v4_as_current() -> None:
+def test_record_readme_identifies_v5_as_current() -> None:
     readme = (RECORD_DIR / "README.md").read_text(encoding="utf-8")
-    for phrase in ("v4.toml", "current revision", "CONFIRMED_ALIAS", Path(GOVERNANCE).name):
+    for phrase in ("v4.toml", "v5.toml", "current revision", "CONFIRMED_ALIAS", Path(GOVERNANCE).name,
+                   Path(SCHEDULE_GOVERNANCE).name):
         assert phrase in readme, phrase
 
 
@@ -404,7 +436,7 @@ def test_project_policy_is_the_approved_alias_with_authority() -> None:
     assert POLICY == vancouver_policy_from_record(load_current_decision_record(), COV)
     assert POLICY.state is PS.CONFIRMED_ALIAS and (POLICY.first, POLICY.second) == (VAN_DOWN, VAN_THUR)
     assert POLICY.canonical_location == VAN_DOWN and POLICY.scope.is_valid
-    assert POLICY.authority.reference == GOVERNANCE and "pricing-authorities-v4" in POLICY.authority.note
+    assert POLICY.authority.reference == GOVERNANCE and "pricing-authorities-v5" in POLICY.authority.note
     assert dict(POLICY.alias_mapping) == {VAN_DOWN: VAN_DOWN, VAN_THUR: VAN_DOWN}
 
 
@@ -458,7 +490,7 @@ def test_absent_or_proposed_authority_is_unresolved() -> None:
     for record in (None, load_decision_record(V3)):
         assert vancouver_policy_from_record(record, COV).state is PS.UNRESOLVED
     proposed = {}
-    data = tomllib.loads(V4.read_text(encoding="utf-8"))
+    data = v5()
     for decision in (D.VALID_LOCATION_COMPARISON_PAIRS, D.VANCOUVER_LOCATION_IDENTITY):
         proposed = unapprove(data, decision)
     record = parse_decision_record(proposed)
@@ -576,8 +608,8 @@ def test_baseline_reports_the_location_authority_in_aggregate() -> None:
     assert ("location_role_map", "approved") in baseline.statuses and ("comparison_pairs", "approved") in baseline.statuses
     assert [h.stream for h in baseline.expected_stream_health] == list(SUPPLIED)     # both raw Vancouver streams
     markdown = render_baseline_markdown(baseline, commit="abc1234", date="2026-10-06")
-    assert "Vancouver / Int Airport versus Vancouver / Downtown" in markdown
-    assert "Vancouver / Thurlow" in markdown and "versus Vancouver / Thurlow" not in markdown
+    assert "vancouver / Vancouver Int Airport versus vancouver / Vancouver Downtown" in markdown
+    assert "vancouver / Vancouver Thurlow" in markdown and "versus vancouver / Vancouver Thurlow" not in markdown
     assert "SYNTH" not in markdown and "**NOT PRICING READY**" in markdown
     json.dumps(baseline.to_dict())
 
@@ -594,7 +626,7 @@ def test_notebook_consumes_the_authority_without_duplicating_policy_logic() -> N
 
 def test_documentation_describes_the_approved_identity() -> None:
     readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
-    for phrase in ("CONFIRMED_ALIAS", "canonical", "Vancouver / Thurlow", "comparison pairs",
+    for phrase in ("CONFIRMED_ALIAS", "canonical", "vancouver / Vancouver Thurlow", "comparison pairs",
                    "branch_role_authority_unavailable", "canonical_offer_combination_unresolved",
                    "governed_source_stream_missing"):
         assert phrase in readme, phrase

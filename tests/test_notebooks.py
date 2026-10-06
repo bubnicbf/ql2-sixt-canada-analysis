@@ -65,7 +65,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # Cells that are required to report categorical gate results and aggregate
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
-REPORTING_STEPS = ("current_expected_stream_contract(", "current_location_authority(", "assess_job_linkage(", "assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+REPORTING_STEPS = ("current_expected_stream_contract(", "current_location_authority(", "assess_job_linkage(", "assess_per_stream_scheduled_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
                    "investigate_location_stream(", "assess_completeness(")
@@ -940,13 +940,19 @@ def test_ingestion_notebook_gates_pricing_on_schedule_coverage_and_trusted_join(
     notebook = read_notebook(INGESTION_NOTEBOOK)
     sources = [c.source for c in _code_cells(notebook)]
     code = "\n".join(sources)
-    for name in ("COLLECTION_SCHEDULE", "assess_collection_schedule", "assess_scheduled_time_coverage"):
+    for name in ("current_per_stream_schedule", "assess_per_stream_scheduled_coverage"):
         assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+    for legacy in ("COLLECTION_SCHEDULE", "assess_collection_schedule", "assess_scheduled_time_coverage",
+                   "scraped_at"):                                   # no shared schedule, no observation-time key
+        assert legacy not in code, legacy
     streams = next(s for s in sources if "assess_expected_location_streams(" in s)
-    assert "schedule=COLLECTION_SCHEDULE" in streams
-    coverage = next(s for s in sources if "assess_scheduled_time_coverage(" in s)
-    assert "assess_collection_schedule(COLLECTION_SCHEDULE)" in coverage
-    assert "expected_streams_report" in coverage                       # every expected stream, not one
+    coverage = next(s for s in sources if "assess_per_stream_scheduled_coverage(" in s)
+    assert "collection_schedule = current_per_stream_schedule()" in coverage
+    assert "schedule=collection_schedule" in coverage and "contract=expected_stream_contract" in coverage
+    assert "relationship=ANALYSIS_JOB_DETAIL_RELATIONSHIP" in coverage
+    assert "for position, entry in enumerate(scheduled_coverage_report.streams" in coverage   # every stream
+    # Production APIs only: no timezone, period or matching logic in the notebook.
+    assert not re.search(r"ZoneInfo|tz_localize|astimezone|strptime|floor\(|timedelta|\.hour\b", code)
     pricing = next(s for s in sources if "assess_pricing_readiness(" in s)
     assert "scheduled_coverage=scheduled_coverage_report" in pricing
     assert "job_detail_join=job_detail_join" in pricing
@@ -958,33 +964,35 @@ def test_ingestion_notebook_gates_pricing_on_schedule_coverage_and_trusted_join(
     assert order == sorted(order)
 
 
-def test_ingestion_notebook_reports_missing_schedule_as_a_pricing_blocker(
+def test_ingestion_notebook_reports_the_per_stream_schedule_and_blocks_on_coverage(
     synthetic_raw_dir: Path, tmp_path: Path
 ) -> None:
-    # With the committed configuration (no schedule) the truthful result is not ready.
+    # The committed record supplies the per-stream schedule; synthetic rows match no approved city or period,
+    # so every stream-period stays missing and pricing is blocked on scheduled coverage (never "unavailable").
     from ql2_sixt_canada_analysis.readiness import PricingBlocker
 
     workdir = tmp_path / "kernel"
     workdir.mkdir()
     result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
                                    env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
-    coverage = _step_output(result, "assess_scheduled_time_coverage(")
+    coverage = _step_output(result, "assess_per_stream_scheduled_coverage(")
     lines = dict(line.split(":", 1) for line in coverage.splitlines() if ":" in line)
-    assert lines["Collection schedule"].strip() == "unavailable"
-    assert lines["Collection schedule available and valid"].strip() == "False"
-    assert len([k for k in lines if k.startswith("Expected stream ")]) == len(EXPECTED_LOCATION_COVERAGE.expected_locations)
-    assert all(v.strip() in ("not_assessed", "no single report") for k, v in lines.items()
-               if k.startswith("Expected stream "))
-    assert lines["All expected streams complete against the schedule"].strip() == "False"
-    assert "collection_schedule_unavailable" in lines["Scheduled coverage blocked by"]
+    assert lines["Collection schedule"].strip() == "available"
+    assert lines["Stream schedules"].split("|")[0].strip() == str(len(EXPECTED_LOCATION_COVERAGE.expected_locations))
+    streams = [v for k, v in lines.items() if k.startswith("Expected stream ")]
+    assert len(streams) == len(EXPECTED_LOCATION_COVERAGE.expected_locations)
+    assert all(v.strip().startswith("0 of 90 periods covered") for v in streams)
+    assert lines["All expected streams complete against their own schedules"].strip() == "False"
+    assert "scheduled_coverage_incomplete" in lines["Scheduled coverage blocked by"]
+    assert "collection_schedule_unavailable" not in lines["Scheduled coverage blocked by"]
     pricing = _step_output(result, "assess_pricing_readiness(")
     plines = dict(line.split(":", 1) for line in pricing.splitlines() if ":" in line)
-    assert plines["Authoritative schedule available"].strip() == "False"
+    assert plines["Authoritative schedule available"].strip() == "True"
     assert plines["Scheduled coverage complete for every expected stream"].strip() == "False"
-    assert plines["Trusted join ready"].strip() == "False"
     assert plines["Pricing analysis ready"].strip() == "False"
-    for blocker in (PricingBlocker.COLLECTION_SCHEDULE_UNAVAILABLE, PricingBlocker.TRUSTED_JOIN_NOT_READY):
+    for blocker in (PricingBlocker.SCHEDULED_COVERAGE_INCOMPLETE, PricingBlocker.TRUSTED_JOIN_NOT_READY):
         assert blocker.value in plines["Pricing blocked by"]
+    assert PricingBlocker.COLLECTION_SCHEDULE_UNAVAILABLE.value not in plines["Pricing blocked by"]
     assert "SYNTH" not in coverage + pricing and list(workdir.iterdir()) == []
 
 

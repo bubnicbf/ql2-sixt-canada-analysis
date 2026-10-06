@@ -34,8 +34,19 @@ Schema 2 (``v2`` onwards) replaces those four shapes with an explicit
 opaque-text identifier policy (:data:`OPAQUE_TEXT_IDENTIFIER_POLICY`), a
 narrowly defined legacy decimal-zero repair (:data:`LEGACY_DECIMAL_ZERO_REPAIR`)
 and cross-decision consistency checks; any contradiction fails validation.
-Every other decision has the same shape in both schemas, and each record is
-validated only under its own ``schema_version``.
+Schema 3 (``v5`` onwards) keeps the schema-2 rules and replaces the shapes of
+the five schedule decisions: ``SCHEDULE_CAPTURE_TIMESTAMP`` (the parent anchor
+``jobs.finished_at`` with its detail copy and the observation-only field),
+``FINISHED_AT_TIMEZONE`` (an exhaustive city -> region IANA zone map),
+``SCHEDULE_EXPECTED_PERIODS`` (schedule version, ``PT1H`` cadence, local
+top-of-hour phase, one parent job per city period and one explicit local
+window per approved stream - never a global list of instants),
+``SCHEDULE_SHARING_MODEL`` and ``SCHEDULE_EXCEPTIONS`` (explicit
+``NO_EXCEPTIONS`` or fully typed listed exceptions); ``VANCOUVER_LOCATION_IDENTITY``
+names its two ``governed_locations`` explicitly (earlier schemas govern
+:data:`SCHEMA_2_VANCOUVER_GOVERNED_KEYS`). Every other decision has the same
+shape in all schemas, and each record is validated only under its own
+``schema_version``.
 
 This module records decisions; it implements none of them. Production
 contracts consume approved decisions only in separate implementation work
@@ -60,7 +71,6 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ql2_sixt_canada_analysis.schemas import (
-    COMPARED_LOCATION_STREAMS,
     DATASET_DEFINITIONS,
     JOB_DETAIL_RELATIONSHIP,
     DatasetKey,
@@ -73,7 +83,11 @@ __all__ = [
     "LEGACY_DECIMAL_ZERO_REPAIR",
     "OPAQUE_TEXT_IDENTIFIER_POLICY",
     "RETIRED_DOWNSTREAM_CODES",
+    "SCHEDULE_ANCHOR_FIELDS",
+    "SCHEMA_2_VANCOUVER_GOVERNED_KEYS",
     "SUPPORTED_SCHEMA_VERSIONS",
+    "city_timezones",
+    "governed_vancouver_keys",
     "AuthorityDecisionRecord",
     "AuthorityKind",
     "AuthorityReference",
@@ -93,9 +107,15 @@ __all__ = [
 ]
 
 #: Record schema versions this module understands.
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+#: Schema 1 and 2 records name no governed keys for ``VANCOUVER_LOCATION_IDENTITY``; they
+#: govern these two keys, as spelled when those records were written (history; schema 3
+#: records name their governed keys explicitly in the resolution).
+SCHEMA_2_VANCOUVER_GOVERNED_KEYS: tuple[tuple[str, str], ...] = (("Vancouver", "Downtown"), ("Vancouver", "Thurlow"))
+#: Canonical UTC instant text used by schema-3 schedule exceptions (``YYYYMMDDTHHMMSSZ``).
+UTC_INSTANT_PATTERN = re.compile(r"\d{8}T\d{6}Z")
 #: The current committed revision (repository-relative).
-CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v4.toml")
+CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v5.toml")
 
 
 class DecisionRecordError(ValueError):
@@ -689,20 +709,41 @@ def _approved_alias_mapping(by_id: Mapping) -> dict[tuple[str, ...], tuple[str, 
     if not isinstance(res, Mapping) or res.get("state") != "CONFIRMED_ALIAS":
         return {}
     canonical = res.get("canonical_location")
-    governed = [tuple(k) for k in COMPARED_LOCATION_STREAMS]
+    governed = list(_governed_keys(res))
     if not isinstance(canonical, tuple) or tuple(canonical) not in governed:
         return {}                    # an invalid canonical key is rejected by the identity validator itself
     return {k: tuple(canonical) for k in governed}
 
 
-def _vancouver(res, by_id, d):  # type: ignore[no-untyped-def]
+def governed_vancouver_keys(res: Mapping) -> tuple[tuple[str, ...], ...]:
+    """The two keys an approved ``VANCOUVER_LOCATION_IDENTITY`` resolution governs."""
+    return _governed_keys(res)
+
+
+def _governed_keys(res: Mapping) -> tuple[tuple[str, ...], ...]:
+    """The two keys a Vancouver identity resolution governs (explicit in schema 3, historical before)."""
+    explicit = res.get("governed_locations") if isinstance(res, Mapping) else None
+    if isinstance(explicit, tuple) and len(explicit) == 2 and all(isinstance(k, tuple) for k in explicit):
+        return tuple(tuple(k) for k in explicit)
+    return SCHEMA_2_VANCOUVER_GOVERNED_KEYS
+
+
+def _vancouver(res, by_id, d, *, explicit_governed: bool = False):  # type: ignore[no-untyped-def]
     state = _choice(res, "state", {"CONFIRMED_ALIAS", "CONFIRMED_DISTINCT"}, d.value)
-    governed = {tuple(k) for k in COMPARED_LOCATION_STREAMS}
+    extra = {"governed_locations"} if explicit_governed else set()
+    if explicit_governed:
+        raw = res.get("governed_locations")
+        if not isinstance(raw, tuple) or len(raw) != 2:
+            raise DecisionRecordError(f"{d.value}: governed_locations must name exactly two keys")
+        keys = tuple(_stream_key(k, f"{d.value}: governed_locations") for k in raw)
+        if keys[0] == keys[1] or keys[0][0] != keys[1][0]:
+            raise DecisionRecordError(f"{d.value}: governed_locations must be two different keys of one city")
+    governed = set(_governed_keys(res))
     if by_id[_D.EXPECTED_STREAM_UNIVERSE].status is DecisionStatus.APPROVED and not governed <= _universe(by_id, d.value):
         raise DecisionRecordError(f"{d.value}: both governed keys must be approved expected streams")
     roles_entry = by_id[_D.LOCATION_ROLE_ASSIGNMENTS]
     if state == "CONFIRMED_ALIAS":
-        _keys(res, {"state", "canonical_location"}, d.value)
+        _keys(res, {"state", "canonical_location"} | extra, d.value)
         if _stream_key(res.get("canonical_location"), f"{d.value}: canonical_location") not in governed:
             raise DecisionRecordError(f"{d.value}: the canonical key must be one of the two governed keys")
         if roles_entry.status is DecisionStatus.APPROVED and isinstance(roles_entry.resolution, Mapping):
@@ -711,7 +752,7 @@ def _vancouver(res, by_id, d):  # type: ignore[no-untyped-def]
             if len({roles.get(k) for k in governed}) != 1:
                 raise DecisionRecordError(f"{d.value}: aliased keys must carry the same approved role")
     else:
-        _keys(res, {"state"}, d.value)
+        _keys(res, {"state"} | extra, d.value)
         roles = by_id[_D.LOCATION_ROLE_ASSIGNMENTS]
         if roles.status is not DecisionStatus.APPROVED or not governed <= {
                 tuple(a["stream"]) for a in roles.resolution["assignments"]}:
@@ -952,8 +993,174 @@ _RESOLVERS_V2 = {
 assert set(_RESOLVERS_V2) == set(JOB_IDENTIFIER_DECISIONS)
 
 
+# ------------------------------------------------ schema 3: per-stream schedule
+
+#: The only parent-level timestamp that can anchor a scheduled collection job.
+SCHEDULE_ANCHOR_FIELDS = (f"{_PARENT}.finished_at",)
+SCHEDULE_DETAIL_COPY_FIELD = f"{_DETAIL}.job_finished_at"
+SCHEDULE_DETAIL_OBSERVATION_FIELD = f"{_DETAIL}.scraped_at"
+_LOCAL_INSTANT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")   # naive local wall clock, no offset
+
+
+def _approved_resolution(by_id: Mapping, decision: DecisionId) -> Mapping | None:
+    entry = by_id[decision]
+    return entry.resolution if entry.status is DecisionStatus.APPROVED else None
+
+
+def _v3_capture(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"field", "detail_copy", "detail_observation"}, d.value)
+    _field_ref(res, "field", SCHEDULE_ANCHOR_FIELDS, d.value)                 # a parent job, never a detail row
+    _field_ref(res, "detail_copy", (SCHEDULE_DETAIL_COPY_FIELD,), d.value)
+    _field_ref(res, "detail_observation", (SCHEDULE_DETAIL_OBSERVATION_FIELD,), d.value)
+
+
+def _iana_zone(value: object, name: str) -> str:
+    """A region-style IANA zone (``Area/Location``); fixed offsets and aliases such as UTC are refused."""
+    try:
+        if (not isinstance(value, str) or "/" not in value or value.startswith(("Etc/", "SystemV/"))
+                or value != value.strip()):
+            raise ValueError
+        ZoneInfo(value)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise DecisionRecordError(f"{name}: timezone must be a region IANA zone name") from None
+    return value
+
+
+def _v3_city_timezones(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"city_timezones"}, d.value)
+    raw = res.get("city_timezones")
+    if not isinstance(raw, tuple) or not raw:
+        raise DecisionRecordError(f"{d.value}: city_timezones must be a non-empty array")
+    cities = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise DecisionRecordError(f"{d.value}: each city timezone must be a table")
+        _keys(item, {"city", "timezone"}, d.value)
+        city = item.get("city")
+        if not isinstance(city, str) or not city or city != city.strip():
+            raise DecisionRecordError(f"{d.value}: city must be an exact non-blank value")
+        _iana_zone(item.get("timezone"), d.value)
+        cities.append(city)
+    if len(set(cities)) != len(cities):
+        raise DecisionRecordError(f"{d.value}: duplicate city")
+    if by_id[_D.EXPECTED_STREAM_UNIVERSE].status is DecisionStatus.APPROVED and set(cities) != {
+            k[0] for k in _universe(by_id, d.value)}:
+        raise DecisionRecordError(f"{d.value}: the city mapping must cover exactly the approved cities")
+
+
+def city_timezones(res: Mapping) -> dict[str, str]:
+    """``{city: IANA zone}`` from a validated schema-3 ``FINISHED_AT_TIMEZONE`` resolution."""
+    return {item["city"]: item["timezone"] for item in res["city_timezones"]}
+
+
+def _v3_expected_periods(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"schedule_version", "cadence", "phase", "parent_jobs_per_city_period", "streams"}, d.value)
+    version = res.get("schedule_version")
+    if not isinstance(version, str) or not _CODE.match(version.replace("-", "_")):
+        raise DecisionRecordError(f"{d.value}: schedule_version must be a short code")
+    if res.get("cadence") != "PT1H":
+        raise DecisionRecordError(f"{d.value}: cadence must be the ISO-8601 duration PT1H (the only supported cadence)")
+    _choice(res, "phase", {"LOCAL_TOP_OF_HOUR"}, d.value)
+    if type(res.get("parent_jobs_per_city_period")) is not int or res["parent_jobs_per_city_period"] != 1:
+        raise DecisionRecordError(f"{d.value}: exactly one parent job per city period is supported")
+    universe = _universe(by_id, d.value)
+    zones = _approved_resolution(by_id, _D.FINISHED_AT_TIMEZONE)
+    if zones is None or "city_timezones" not in zones:
+        raise DecisionRecordError(f"{d.value}: requires the per-city FINISHED_AT_TIMEZONE mapping to be APPROVED")
+    _v3_city_timezones(zones, by_id, _D.FINISHED_AT_TIMEZONE)          # the zone map is valid before it is used
+    cities = {item["city"] for item in zones["city_timezones"]}
+    raw = res.get("streams")
+    if not isinstance(raw, tuple) or not raw:
+        raise DecisionRecordError(f"{d.value}: streams must be a non-empty array")
+    keys = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise DecisionRecordError(f"{d.value}: each stream schedule must be a table")
+        _keys(item, {"stream", "local_start", "local_end", "end_inclusive"}, d.value)
+        key = _stream_key(item.get("stream"), f"{d.value}: stream")
+        if key not in universe:
+            raise DecisionRecordError(f"{d.value}: a stream schedule names a key outside the approved universe")
+        if key[0] not in cities:
+            raise DecisionRecordError(f"{d.value}: a stream's city has no approved timezone")
+        bounds = []
+        for field_name in ("local_start", "local_end"):
+            value = item.get(field_name)
+            if not isinstance(value, str) or not _LOCAL_INSTANT.fullmatch(value):
+                raise DecisionRecordError(f"{d.value}: {field_name} must be a naive local YYYY-MM-DDTHH:MM:SS")
+            try:
+                bounds.append(dt.datetime.fromisoformat(value))
+            except ValueError:
+                raise DecisionRecordError(f"{d.value}: {field_name} is not a valid local time") from None
+        if bounds[1] < bounds[0]:
+            raise DecisionRecordError(f"{d.value}: local_end precedes local_start")
+        if any(b.minute or b.second for b in bounds):
+            raise DecisionRecordError(f"{d.value}: boundaries must be at the top of a local hour")
+        _flag(item, "end_inclusive", d.value)
+        keys.append(key)
+    if len(set(keys)) != len(keys) or set(keys) != universe:
+        raise DecisionRecordError(f"{d.value}: every approved stream needs exactly one schedule")
+
+
+def _v3_sharing(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"mode"}, d.value)
+    if _choice(res, "mode", {"SHARED", "PER_STREAM"}, d.value) == "PER_STREAM":
+        _approved(by_id, _D.SCHEDULE_EXPECTED_PERIODS, d.value)
+
+
+def _v3_exceptions(res, by_id, d):  # type: ignore[no-untyped-def]
+    model = _choice(res, "model", {"NO_EXCEPTIONS", "LISTED_EXCEPTIONS"}, d.value)
+    if model == "NO_EXCEPTIONS":
+        _keys(res, {"model"}, d.value)
+        return
+    _keys(res, {"model", "exceptions"}, d.value)
+    periods = _approved(by_id, _D.SCHEDULE_EXPECTED_PERIODS, d.value).resolution
+    raw = res.get("exceptions")
+    if not isinstance(raw, tuple) or not raw:
+        raise DecisionRecordError(f"{d.value}: listed exceptions must be a non-empty array")
+    seen = set()
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise DecisionRecordError(f"{d.value}: each exception must be a table")
+        _keys(item, {"stream", "period_start_utc", "failure", "reason", "authority_kind", "reference",
+                     "schedule_version"}, d.value)
+        key = _stream_key(item.get("stream"), f"{d.value}: exception stream")
+        if key not in _universe(by_id, d.value):
+            raise DecisionRecordError(f"{d.value}: an exception names a stream outside the approved universe")
+        if not isinstance(item.get("period_start_utc"), str) or not UTC_INSTANT_PATTERN.fullmatch(
+                item["period_start_utc"]):
+            raise DecisionRecordError(f"{d.value}: period_start_utc must be YYYYMMDDTHHMMSSZ")
+        _choice(item, "failure", {"STREAM_ABSENT_FROM_CAPTURE", "PARENT_JOB_ABSENT"}, d.value)
+        _text(item.get("reason"), f"{d.value}: exception reason")
+        _choice(item, "authority_kind", {k.value for k in AuthorityKind}, d.value)
+        if not isinstance(item.get("reference"), str) or not _REFERENCE_PATH.fullmatch(item["reference"]):
+            raise DecisionRecordError(f"{d.value}: an exception needs a durable governance reference")
+        if item.get("schedule_version") != periods["schedule_version"]:
+            raise DecisionRecordError(f"{d.value}: an exception must name the approved schedule version")
+        marker = (key, item["period_start_utc"], item["failure"])
+        if marker in seen:
+            raise DecisionRecordError(f"{d.value}: duplicate exception")
+        seen.add(marker)
+
+
+def _v3_vancouver(res, by_id, d):  # type: ignore[no-untyped-def]
+    _vancouver(res, by_id, d, explicit_governed=True)
+
+
+_RESOLVERS_V3 = {
+    **_RESOLVERS_V2,
+    _D.SCHEDULE_CAPTURE_TIMESTAMP: _v3_capture,
+    _D.FINISHED_AT_TIMEZONE: _v3_city_timezones,
+    _D.SCHEDULE_EXPECTED_PERIODS: _v3_expected_periods,
+    _D.SCHEDULE_SHARING_MODEL: _v3_sharing,
+    _D.SCHEDULE_EXCEPTIONS: _v3_exceptions,
+    _D.VANCOUVER_LOCATION_IDENTITY: _v3_vancouver,
+}
+
+
 def _resolver(schema_version: int, decision: DecisionId):  # type: ignore[no-untyped-def]
-    """Schema-specific resolution validator (schema 1 and 2 shapes never mix)."""
+    """Schema-specific resolution validator (schema 1, 2 and 3 shapes never mix)."""
+    if schema_version >= 3 and decision in _RESOLVERS_V3:
+        return _RESOLVERS_V3[decision]
     if schema_version >= 2 and decision in _RESOLVERS_V2:
         return _RESOLVERS_V2[decision]
     return _RESOLVERS[decision]
@@ -1054,12 +1261,16 @@ _RESPONSE_SHAPE = {
     _D.EXPECTED_STREAM_SOURCE_SPELLING: "the exact source spelling of every [city, location] key in the universe",
     _D.LOCATION_ROLE_ASSIGNMENTS: "one role (AIRPORT or DOWNTOWN or OTHER) for every approved stream key",
     _D.VALID_LOCATION_COMPARISON_PAIRS: "list of within-city {airport, downtown} pairs of approved keys",
-    _D.VANCOUVER_LOCATION_IDENTITY: "CONFIRMED_ALIAS with one of the two keys as canonical, or CONFIRMED_DISTINCT",
-    _D.SCHEDULE_CAPTURE_TIMESTAMP: "one of jobs.finished_at, cars.job_finished_at, cars.scraped_at",
-    _D.SCHEDULE_EXPECTED_PERIODS: "period duration (e.g. PT1H) and every period start with an explicit UTC offset",
+    _D.VANCOUVER_LOCATION_IDENTITY: ("the two governed keys (schema 3), and CONFIRMED_ALIAS with one of them as "
+                                     "canonical, or CONFIRMED_DISTINCT"),
+    _D.SCHEDULE_CAPTURE_TIMESTAMP: ("the parent anchor jobs.finished_at, its detail copy cars.job_finished_at and "
+                                    "the observation-only field cars.scraped_at (schema 3)"),
+    _D.SCHEDULE_EXPECTED_PERIODS: ("schedule version, cadence PT1H, phase LOCAL_TOP_OF_HOUR, one parent job per "
+                                   "city period, and per stream an explicit local start and end (end inclusive)"),
     _D.SCHEDULE_SHARING_MODEL: "SHARED or PER_STREAM",
-    _D.SCHEDULE_EXCEPTIONS: "NO_EXCEPTIONS, or listed exceptions (period start with offset, reason, reference)",
-    _D.FINISHED_AT_TIMEZONE: "an IANA timezone name",
+    _D.SCHEDULE_EXCEPTIONS: ("NO_EXCEPTIONS, or listed exceptions (stream, UTC period, failure kind, reason, "
+                             "authority kind, governance reference, schedule version)"),
+    _D.FINISHED_AT_TIMEZONE: "an exhaustive map of exact parent-job city to region IANA zone (schema 3)",
     _D.SCRAPED_FINISHED_ORDERING: "earlier field, later field, whether equality is allowed",
     _D.SCRAPED_FINISHED_TOLERANCE: "non-negative integer and unit (SECONDS or MINUTES or HOURS)",
     _D.REPORTING_DAY_SOURCE: "a dataset.column reference",

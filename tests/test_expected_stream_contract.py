@@ -77,16 +77,21 @@ from ql2_sixt_canada_analysis.streams import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD_DIR = ROOT / "docs" / "decisions" / "pricing_authorities"
-V1, V2, V3 = (RECORD_DIR / f"v{n}.toml" for n in (1, 2, 3))
+V1, V2, V3, V4, V5 = (RECORD_DIR / f"v{n}.toml" for n in (1, 2, 3, 4, 5))
 GOVERNANCE = "docs/decisions/governance/expected-stream-governance-2026-10-06.md"
+SCHEDULE_GOVERNANCE = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
 JOB_GOVERNANCE = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
 #: Committed history: these bytes must never change.
 V1_SHA256 = "b13881b099885130e853207f872e62bfde9820f438e34859f3ddef0ebdbf1bd7"
 V2_SHA256 = "899c20e289d932868b1d430b8fd70edca6ebb2900ca963c4c040cc6f5840cb4c"
-#: The seven pairs exactly as supplied in the written governance decision (test oracle).
-SUPPLIED = (("Calgary", "Downtown"), ("Calgary", "Int Airport"), ("Toronto", "Downtown"),
-            ("Toronto", "Int Airport"), ("Vancouver", "Downtown"), ("Vancouver", "Int Airport"),
-            ("Vancouver", "Thurlow"))
+#: History oracle: the display-style spellings recorded as exact keys in v3 and v4 (superseded in v5).
+DISPLAY_SPELLINGS = (("Calgary", "Downtown"), ("Calgary", "Int Airport"), ("Toronto", "Downtown"),
+                     ("Toronto", "Int Airport"), ("Vancouver", "Downtown"), ("Vancouver", "Int Airport"),
+                     ("Vancouver", "Thurlow"))
+#: The seven corrected exact raw source keys as supplied (v5, current; test oracle).
+SUPPLIED = (("calgary", "Calgary Downtown"), ("calgary", "Calgary Int Airport"), ("toronto", "Toronto Downtown"),
+            ("toronto", "Toronto Int Airport"), ("vancouver", "Vancouver Downtown"),
+            ("vancouver", "Vancouver Int Airport"), ("vancouver", "Vancouver Thurlow"))
 D = DecisionId
 COV = EXPECTED_LOCATION_COVERAGE
 CITY_COL, LABEL_COL = COV.location_columns
@@ -137,14 +142,24 @@ def test_v1_and_v2_are_unchanged_and_still_valid() -> None:
     assert load_decision_record(V2).counts()[DecisionStatus.APPROVED] == 4
 
 
-def test_v3_is_a_valid_revision_superseding_v2_and_carried_into_v4() -> None:
+def test_v3_is_a_valid_revision_superseding_v2_carried_into_v4_and_respelled_in_v5() -> None:
     record = load_decision_record(V3)
     assert (record.schema_version, record.record_version, record.record_id) == (2, 3, "pricing-authorities-v3")
-    assert record.supersedes == "pricing-authorities-v2" and CURRENT_RECORD_PATH.name == "v4.toml"
-    current = load_current_decision_record()                       # v4 keeps both expected-stream approvals
+    assert record.supersedes == "pricing-authorities-v2" and CURRENT_RECORD_PATH.name == "v5.toml"
+    v4 = load_decision_record(V4)                                  # v4 kept both expected-stream approvals
     for decision in EXPECTED_STREAM_DECISIONS:
-        assert current.decision(decision).resolution == record.decision(decision).resolution
-        assert current.decision(decision).authority == record.decision(decision).authority
+        assert v4.decision(decision).resolution == record.decision(decision).resolution
+        assert v4.decision(decision).authority == record.decision(decision).authority
+    current = load_current_decision_record()                       # v5 supersedes the spelling (history kept)
+    assert current.record_id == "pricing-authorities-v5" and current.supersedes == "pricing-authorities-v4"
+    for decision in EXPECTED_STREAM_DECISIONS:
+        assert tuple(map(tuple, current.approved_resolution(decision)["streams"])) == SUPPLIED
+    assert current.approved_resolution(D.EXPECTED_STREAM_UNIVERSE)["mode"] == "EXHAUSTIVE"
+    spelling = current.decision(D.EXPECTED_STREAM_SOURCE_SPELLING)
+    assert [a.reference for a in spelling.authority] == [SCHEDULE_GOVERNANCE]
+    assert [e.reference for e in spelling.evidence] == [GOVERNANCE]   # traceability to the superseded spelling
+    universe = current.decision(D.EXPECTED_STREAM_UNIVERSE).authority
+    assert [a.reference for a in universe] == [GOVERNANCE, GOVERNANCE, SCHEDULE_GOVERNANCE]
 
 
 def test_v3_approves_exactly_the_job_and_expected_stream_decisions() -> None:
@@ -170,8 +185,8 @@ def test_v3_universe_is_exactly_the_seven_supplied_pairs_exhaustive_and_spelled_
     universe = record.approved_resolution(D.EXPECTED_STREAM_UNIVERSE)
     spelling = record.approved_resolution(D.EXPECTED_STREAM_SOURCE_SPELLING)
     keys = tuple(tuple(k) for k in universe["streams"])
-    assert universe["mode"] == "EXHAUSTIVE" and keys == SUPPLIED and len(set(keys)) == 7
-    assert tuple(tuple(k) for k in spelling["streams"]) == SUPPLIED
+    assert universe["mode"] == "EXHAUSTIVE" and keys == DISPLAY_SPELLINGS and len(set(keys)) == 7
+    assert tuple(tuple(k) for k in spelling["streams"]) == DISPLAY_SPELLINGS
 
 
 def test_every_approval_names_its_required_roles_and_an_existing_governance_reference() -> None:
@@ -211,7 +226,7 @@ def test_governance_document_records_the_supplied_decision_only() -> None:
                    "requires a new authority-record version", "VANCOUVER_LOCATION_IDENTITY",
                    "collection owner and business owner (joint)", "Not supplied", "pricing-authorities-v3"):
         assert phrase in text, phrase
-    for city, location in SUPPLIED:
+    for city, location in DISPLAY_SPELLINGS:                  # history: the spelling as then supplied
         assert f"| `{city}` | `{location}` |" in raw
     for unresolved in ("location roles", "Vancouver location identity", "schedule periods", "schedule exceptions",
                        "temporal rules", "reporting-day rules", "rental-date rules"):
@@ -310,7 +325,7 @@ def test_project_coverage_is_the_one_resolution_of_the_current_record() -> None:
     assert contract.coverage is EXPECTED_LOCATION_COVERAGE                  # one object, no second list
     assert contract.expected_keys == SUPPLIED and contract.exhaustive
     assert contract.record_id == CURRENT_RECORD_PATH.stem.replace("v", "pricing-authorities-v")
-    assert contract.references == (GOVERNANCE,)
+    assert set(contract.references) == {GOVERNANCE, SCHEDULE_GOVERNANCE}
     assert COV.mode is LocationCoverageMode.EXHAUSTIVE and COV.aliases == {}
     assert INVESTIGATED_LOCATION_STREAM in COV.expected_locations
     assert set(COMPARED_LOCATION_STREAMS) <= set(COV.expected_locations)  # Downtown and Thurlow stay separate
@@ -358,16 +373,16 @@ def test_all_seven_exact_pairs_cover_the_contract() -> None:
 
 
 @pytest.mark.parametrize("index, variant", [
-    (0, ("calgary", "Downtown")),             # case-only city difference
-    (0, ("CALGARY", "Downtown")),
-    (0, ("Calgary", "downtown")),             # case-only location difference
-    (0, (" Calgary", "Downtown")),            # leading whitespace
-    (0, ("Calgary ", "Downtown")),            # trailing whitespace
-    (1, ("Calgary", "Int  Airport")),         # doubled internal whitespace
-    (1, ("Calgary", "Int. Airport")),         # punctuation
-    (1, ("Calgary", "Int-Airport")),
-    (6, ("Vancouver", "Thurlow ")),           # trailing whitespace on the location
-    (4, ("Downtown", "Vancouver")),           # component order
+    (0, ("Calgary", "Calgary Downtown")),     # case-only city difference
+    (0, ("CALGARY", "Calgary Downtown")),
+    (0, ("calgary", "calgary downtown")),     # case-only location difference
+    (0, (" calgary", "Calgary Downtown")),    # leading whitespace
+    (0, ("calgary ", "Calgary Downtown")),    # trailing whitespace
+    (1, ("calgary", "Calgary Int  Airport")),  # doubled internal whitespace
+    (1, ("calgary", "Calgary Int. Airport")),  # punctuation
+    (1, ("calgary", "Calgary Int-Airport")),
+    (6, ("vancouver", "Vancouver Thurlow ")),  # trailing whitespace on the location
+    (4, ("Vancouver Downtown", "vancouver")),  # component order
 ])
 def test_spelling_variants_never_cover_and_are_reported(index: int, variant: tuple[str, str]) -> None:
     keys = [*SUPPLIED[:index], variant, *SUPPLIED[index + 1:]]
@@ -388,7 +403,7 @@ def frame_inputs(cars: pd.DataFrame):  # type: ignore[no-untyped-def]
 
 
 def test_display_labels_and_unresolved_aliases_establish_no_coverage() -> None:
-    display = [(city, f"{city} {label}") for city, label in SUPPLIED]          # display-style labels
+    display = list(DISPLAY_SPELLINGS)                                          # display-style labels
     report = assess_expected_location_coverage(frame_for(display), COV)
     assert report.covered_expected_location_count == 0 and report.missing_expected_location_count == 7
     assert report.unexpected_location_count == 7 and not report.is_valid
@@ -403,9 +418,9 @@ def test_display_labels_and_unresolved_aliases_establish_no_coverage() -> None:
 
 
 def test_spelling_variant_detection_is_diagnostic_only() -> None:
-    observed = [("calgary", "Calgary Downtown"), ("Calgary", "Downtown"), ("Toronto", "SYNTH Branch")]
-    assert spelling_variant_keys(observed, SUPPLIED) == [("calgary", "Calgary Downtown")]
-    assert observed[0] == ("calgary", "Calgary Downtown")                     # nothing rewritten
+    observed = [("Calgary", "Calgary Downtown"), ("calgary", "Calgary Downtown"), ("toronto", "SYNTH Branch")]
+    assert spelling_variant_keys(observed, SUPPLIED) == [("Calgary", "Calgary Downtown")]
+    assert observed[0] == ("Calgary", "Calgary Downtown")                     # nothing rewritten
 
 
 # ====================================================== exhaustiveness & completeness
@@ -473,7 +488,7 @@ def test_several_missing_expected_streams_fail():
 
 
 def test_one_unexpected_stream_fails_pending_contract_review():
-    j, c = healthy_frames((*SUPPLIED, ("Toronto", "SYNTH Branch")))
+    j, c = healthy_frames((*SUPPLIED, ("toronto", "SYNTH Branch")))
     coverage = assess_expected_location_coverage(c, COV)
     assert coverage.unexpected_location_count == 1 and coverage.spelling_variant_location_count == 0
     report = completeness_of(j, c)
@@ -481,11 +496,11 @@ def test_one_unexpected_stream_fails_pending_contract_review():
         CMP.UNEXPECTED_PAIRS in report.blocking_reasons)
     pricing = pricing_of(j, c, report)
     assert PB.UNEXPECTED_SOURCE_STREAMS in pricing.blocking_reasons and not pricing.ready
-    assert ("Toronto", "SYNTH Branch") not in COV.expected_locations                 # never added to the universe
+    assert ("toronto", "SYNTH Branch") not in COV.expected_locations                 # never added to the universe
 
 
 def test_unexpected_stream_resembling_an_expected_one_is_a_spelling_mismatch():
-    resembling = ("Vancouver", "thurlow")
+    resembling = ("vancouver", "Vancouver thurlow")
     j, c = healthy_frames((*SUPPLIED[:-1], resembling))
     report = completeness_of(j, c)
     assert {CMP.EXPECTED_PAIRS_MISSING, CMP.UNEXPECTED_PAIRS, CMP.SOURCE_SPELLING_MISMATCH} <= set(report.blocking_reasons)
@@ -495,7 +510,7 @@ def test_unexpected_stream_resembling_an_expected_one_is_a_spelling_mismatch():
 
 
 def test_missing_and_unexpected_streams_are_both_reported():
-    j, c = healthy_frames((*SUPPLIED[:-1], ("Vancouver", "SYNTH Branch")))
+    j, c = healthy_frames((*SUPPLIED[:-1], ("vancouver", "SYNTH Branch")))
     report = completeness_of(j, c)
     assert {CMP.EXPECTED_PAIRS_MISSING, CMP.UNEXPECTED_PAIRS} <= set(report.blocking_reasons)
     assert CMP.SOURCE_SPELLING_MISMATCH not in report.blocking_reasons
@@ -596,33 +611,33 @@ def baseline_for(j, c):  # type: ignore[no-untyped-def]
 
 
 def test_baseline_reports_seven_expected_streams_and_a_separate_observed_population():
-    j, c = healthy_frames((*SUPPLIED[1:], ("calgary", "Downtown")))       # one approved stream misspelled
+    j, c = healthy_frames((*SUPPLIED[1:], ("Calgary", "Calgary Downtown")))   # one approved stream misspelled
     baseline = baseline_for(j, c)
     expected, observed = baseline.expected_population, baseline.observed_population
     assert expected.count == 7 and expected.keys == SUPPLIED
     assert (expected.authority, expected.coverage_mode) == ("authoritative_exhaustive", "exhaustive")
     assert (observed.count, observed.exact_expected_count, observed.unexpected_count,
             observed.spelling_variant_count, observed.expected_missing_count) == (7, 6, 1, 1, 1)
-    assert ("calgary", "Downtown") not in observed.keys and observed.keys == SUPPLIED[1:]
+    assert ("Calgary", "Calgary Downtown") not in observed.keys and observed.keys == SUPPLIED[1:]
     assert [h.stream for h in baseline.expected_stream_health] == list(SUPPLIED)
     # The misspelled observation is a case variant: an unverified alias, never applied.
     assert baseline.expected_stream_health[0].stream_status == LocationStreamStatus.UNVERIFIED_ALIAS.value
     assert sum(h.spelling_variant for h in baseline.observed_stream_health) == 1
-    assert baseline.authority_record_version == 4
+    assert baseline.authority_record_version == 5
     assert ("expected_stream_authority", "approved") in baseline.statuses
     assert ("expected_stream_universe_mode", "exhaustive") in baseline.statuses
     assert {"source_spelling_mismatch", "unexpected_pairs", "expected_pairs_missing"} <= set(baseline.pricing_blockers)
     markdown = render_baseline_markdown(baseline, commit="abc1234", date="2026-10-06")
     assert "Configured expected streams: 7" in markdown and "Observed streams (cleaned detail rows): 7" in markdown
-    assert "calgary" not in markdown and "SYNTH" not in markdown           # unapproved source value withheld
+    assert "Calgary / Calgary" not in markdown and "SYNTH" not in markdown   # unapproved source value withheld
     assert "**NOT PRICING READY**" in markdown
     json.dumps(baseline.to_dict())
 
 
 def test_observed_stream_health_keeps_a_partial_stream_visible_without_labels():
-    extra_job = ("SYNTH-JOB-009", 1, 1, "Calgary")
+    extra_job = ("SYNTH-JOB-009", 1, 1, "calgary")
     j, c = healthy_frames(extra_jobs=(extra_job,))
-    c = pd.concat([c, cars_frame(("SYNTH-JOB-009", "Int Airport", "Calgary"))], ignore_index=True).astype(
+    c = pd.concat([c, cars_frame(("SYNTH-JOB-009", "Calgary Int Airport", "calgary"))], ignore_index=True).astype(
         dict(REL.detail_definition.identifier_dtypes))
     baseline = baseline_for(j, c)
     partial = [h for h in baseline.observed_stream_health if h.continuity == "partial"]

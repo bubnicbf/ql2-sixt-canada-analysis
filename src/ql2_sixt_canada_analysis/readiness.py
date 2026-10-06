@@ -88,6 +88,7 @@ if TYPE_CHECKING:  # imported lazily at run time
     from ql2_sixt_canada_analysis.expected_stream_contract import ExpectedStreamContract
     from ql2_sixt_canada_analysis.location_authority import LocationAuthorityReport
     from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
+    from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
 
 __all__ = [
     "CompletenessBlocker",
@@ -159,6 +160,9 @@ class PricingBlocker(StrEnum):
     SCHEDULED_COVERAGE_SCHEDULE_NOT_APPLIED = "scheduled_coverage_schedule_not_applied"
     SCHEDULED_COVERAGE_INCOMPLETE = "scheduled_coverage_incomplete"
     SCHEDULED_COVERAGE_CONTRACT_MISMATCH = "scheduled_coverage_contract_mismatch"
+    # Per-stream schedule (values equal ScheduleCoverageBlocker values).
+    SCHEDULED_JOB_ASSIGNMENT_FAILED = "scheduled_job_assignment_failed"
+    SCHEDULED_DETAIL_COPY_MISMATCH = "scheduled_detail_copy_mismatch"
     # Trusted job-detail join (JOIN_* values equal JobDetailJoinBlocker values).
     TRUSTED_JOIN_ASSESSMENT_MISSING = "trusted_join_assessment_missing"
     TRUSTED_JOIN_NOT_READY = "trusted_join_not_ready"
@@ -390,8 +394,10 @@ class PricingReadinessReport:
     location_policy: LocationPolicyReport
     #: The completeness decision this readiness rests on (kept for audit).
     completeness: CompletenessReport | None = None
-    #: The schedule / all-stream scheduled-coverage assessment (kept for audit; ``None`` = missing).
-    scheduled_coverage: ScheduledCoverageReport | None = None
+    #: The schedule / all-stream scheduled-coverage assessment (kept for audit; ``None`` = missing):
+    #: the authority-backed per-stream report, or the legacy single-schedule report (which never passes
+    #: while no shared schedule is configured).
+    scheduled_coverage: PerStreamScheduledCoverageReport | ScheduledCoverageReport | None = None
     #: The trusted-join gate (kept for audit; ``None`` = missing).
     job_detail_join: JobDetailJoinReadiness | None = None
     #: The authority-backed job-linkage report (kept for audit; ``None`` = missing).
@@ -542,7 +548,7 @@ def assess_pricing_readiness(
     one_to_many_contract_valid: bool,
     temporal_fields_trusted: bool,
     vehicle_stability: VehicleStabilityReport | None,
-    scheduled_coverage: ScheduledCoverageReport | None,
+    scheduled_coverage: PerStreamScheduledCoverageReport | ScheduledCoverageReport | None,
     job_detail_join: JobDetailJoinReadiness | None,
     job_linkage: JobLinkageReport | None,
     expected_stream_contract: ExpectedStreamContract | None,
@@ -554,11 +560,17 @@ def assess_pricing_readiness(
     omit a prerequisite and receive ``ready=True``; ``None`` is accepted only
     to be reported as a blocker.
 
-    ``scheduled_coverage`` (:func:`~ql2_sixt_canada_analysis.streams.assess_scheduled_time_coverage`)
-    must prove an available, valid authoritative schedule and ``COMPLETE``
-    time coverage for exactly the configured expected streams, all assessed
-    against that schedule and the same contract as ``completeness``.
-    ``NOT_ASSESSED`` (for example ``COLLECTION_SCHEDULE is None``) fails: no
+    ``scheduled_coverage``
+    (:func:`~ql2_sixt_canada_analysis.collection_schedule.assess_per_stream_scheduled_coverage`)
+    must prove the available authority-backed per-stream schedule, exactly one
+    schedule per configured expected stream, every parent job assigned to one
+    expected city-period, every detail copy agreeing with its parent and every
+    stream-period of every stream covered by its own exact key or excused by a
+    governed exception, assessed against the same contract as
+    ``completeness``. One stream's presence never satisfies another. The
+    legacy single-schedule report
+    (:func:`~ql2_sixt_canada_analysis.streams.assess_scheduled_time_coverage`)
+    is still accepted and fails while no shared schedule is configured: no
     schedule is not "no schedule required". Stream health and temporal field
     trust are separate gates and never substitute for it.
     ``job_detail_join`` (:func:`~ql2_sixt_canada_analysis.join_readiness.assess_job_detail_join_readiness`)
@@ -598,11 +610,16 @@ def assess_pricing_readiness(
         raise TypeError("vehicle_stability must be a VehicleStabilityReport or None")
     if completeness is not None and not isinstance(completeness, CompletenessReport):
         raise TypeError("completeness must be a CompletenessReport or None")
-    if scheduled_coverage is not None and not isinstance(scheduled_coverage, ScheduledCoverageReport):
-        raise TypeError("scheduled_coverage must be a ScheduledCoverageReport or None")
+    from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
+
+    if scheduled_coverage is not None and not isinstance(
+            scheduled_coverage, (PerStreamScheduledCoverageReport, ScheduledCoverageReport)):
+        raise TypeError("scheduled_coverage must be a PerStreamScheduledCoverageReport, a ScheduledCoverageReport "
+                        "or None")
     if job_detail_join is not None and not isinstance(job_detail_join, JobDetailJoinReadiness):
         raise TypeError("job_detail_join must be a JobDetailJoinReadiness or None")
     from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
+    from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
 
     if job_linkage is not None and not isinstance(job_linkage, JobLinkageReport):
         raise TypeError("job_linkage must be a JobLinkageReport or None")
@@ -695,15 +712,18 @@ def _linkage_blockers(report: JobLinkageReport | None,
     return blockers
 
 
-def _scheduled_coverage_blockers(report: ScheduledCoverageReport | None,
+def _scheduled_coverage_blockers(report: PerStreamScheduledCoverageReport | ScheduledCoverageReport | None,
                                  completeness: CompletenessReport | None) -> list[PricingBlocker]:
     """Schedule and all-stream coverage blockers (central mapping; every non-pass blocks)."""
     if report is None:
         return [PricingBlocker.SCHEDULED_COVERAGE_ASSESSMENT_MISSING]
     blockers = [PricingBlocker(b.value) for b in report.blocking_reasons]
-    if (report.expected_streams is not None and completeness is not None
-            and completeness.expected_streams is not None
-            and report.expected_streams.coverage != completeness.expected_streams.coverage):
+    if isinstance(report, ScheduledCoverageReport):
+        assessed = report.expected_streams.coverage if report.expected_streams is not None else None
+    else:
+        assessed = report.coverage
+    if (assessed is not None and completeness is not None and completeness.expected_streams is not None
+            and assessed != completeness.expected_streams.coverage):
         blockers.append(PricingBlocker.SCHEDULED_COVERAGE_CONTRACT_MISMATCH)
     if not report.is_valid and not blockers:                       # fail closed on any unforeseen non-pass
         blockers.append(PricingBlocker.SCHEDULED_COVERAGE_INCOMPLETE)

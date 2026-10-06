@@ -102,4 +102,6 @@ identical offers and identical prices do not prove physical identity.
   results above remain diagnostic evidence only; they neither established nor
   can change the decision. Both raw source streams stay separately required,
   their raw labels are preserved, and the two are never compared with each
-  other for pricing.
+  other for pricing. Record `v5` respells the governed keys to the exact raw source keys
+  (`vancouver / Vancouver Downtown`, canonical, and `vancouver / Vancouver Thurlow`);
+  the decision is unchanged in meaning.

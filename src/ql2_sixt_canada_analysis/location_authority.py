@@ -49,6 +49,7 @@ from ql2_sixt_canada_analysis.authority_decisions import (
     AuthorityDecisionRecord,
     DecisionId,
     DecisionStatus,
+    governed_vancouver_keys,
     LocationRoleDecision,
     load_current_decision_record,
 )
@@ -57,6 +58,7 @@ from ql2_sixt_canada_analysis.schemas import (
     COMPARED_LOCATION_STREAMS,
     LocationCoverageDefinition,
     LocationIdentityPolicy,
+    LocationPolicyConfigurationError,
     LocationPolicyAuthority,
     LocationPolicyState,
     assess_location_policy_scope,
@@ -295,10 +297,12 @@ def vancouver_policy_from_record(record: AuthorityDecisionRecord | None,
                                  coverage: LocationCoverageDefinition) -> LocationIdentityPolicy:
     """The Vancouver :class:`LocationIdentityPolicy` from the APPROVED decision; ``UNRESOLVED`` otherwise.
 
-    The governed keys are :data:`COMPARED_LOCATION_STREAMS`; authority
-    metadata names the record and its governance reference. A missing,
-    proposed or rejected decision (or no valid record) yields ``UNRESOLVED``;
-    behavioural evidence is never consulted.
+    The governed keys are the ones the approved decision names (schema 3:
+    explicit ``governed_locations``; earlier schemas: the keys as spelled when
+    those records were written), else :data:`COMPARED_LOCATION_STREAMS`;
+    authority metadata names the record and its governance reference. A
+    missing, proposed or rejected decision (or no valid record) yields
+    ``UNRESOLVED``; behavioural evidence is never consulted.
     """
     first, second = COMPARED_LOCATION_STREAMS
     unresolved = LocationIdentityPolicy(first=first, second=second, coverage=coverage,
@@ -307,16 +311,20 @@ def vancouver_policy_from_record(record: AuthorityDecisionRecord | None,
         return unresolved
     entry = record.decision(D.VANCOUVER_LOCATION_IDENTITY)
     resolution = entry.resolution
+    first, second = governed_vancouver_keys(resolution)
     authority = entry.authority[0]
     metadata = LocationPolicyAuthority(
         source=authority.source, reference=authority.reference,
         note=f"{record.record_id}: {authority.kind.value} decision {D.VANCOUVER_LOCATION_IDENTITY.value}")
-    if resolution["state"] == "CONFIRMED_ALIAS":
+    try:
+        if resolution["state"] == "CONFIRMED_ALIAS":
+            return LocationIdentityPolicy(first=first, second=second, coverage=coverage,
+                                          state=LocationPolicyState.CONFIRMED_ALIAS, authority=metadata,
+                                          canonical_location=tuple(resolution["canonical_location"]))
         return LocationIdentityPolicy(first=first, second=second, coverage=coverage,
-                                      state=LocationPolicyState.CONFIRMED_ALIAS, authority=metadata,
-                                      canonical_location=tuple(resolution["canonical_location"]))
-    return LocationIdentityPolicy(first=first, second=second, coverage=coverage,
-                                  state=LocationPolicyState.CONFIRMED_DISTINCT, authority=metadata)
+                                      state=LocationPolicyState.CONFIRMED_DISTINCT, authority=metadata)
+    except LocationPolicyConfigurationError:     # governed keys outside ``coverage`` (e.g. a superseded spelling)
+        return unresolved
 
 
 # ------------------------------------------------------------------- validation

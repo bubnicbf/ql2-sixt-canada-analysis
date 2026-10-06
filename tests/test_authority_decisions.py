@@ -31,7 +31,7 @@ from ql2_sixt_canada_analysis.pricing_baseline import (
     rental_date_fields,
 )
 from ql2_sixt_canada_analysis.readiness import PricingBlocker
-from ql2_sixt_canada_analysis.schemas import COMPARED_LOCATION_STREAMS, JOB_DETAIL_RELATIONSHIP, LocationPolicyAuthority
+from ql2_sixt_canada_analysis.schemas import JOB_DETAIL_RELATIONSHIP, LocationPolicyAuthority
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD_DIR = ROOT / "docs" / "decisions" / "pricing_authorities"
@@ -39,7 +39,7 @@ V1 = RECORD_DIR / "v1.toml"
 D = DecisionId
 
 A_AIR, A_DOWN = ["alpha", "Alpha Airport"], ["alpha", "Alpha Downtown"]
-V_DOWN, V_THUR = (list(k) for k in COMPARED_LOCATION_STREAMS)      # the two governed Vancouver keys
+V_DOWN, V_THUR = (list(k) for k in ad.SCHEMA_2_VANCOUVER_GOVERNED_KEYS)   # governed keys of schema 1 and 2 records
 UNIVERSE = [A_AIR, A_DOWN, V_DOWN, V_THUR]
 
 RESOLUTIONS = {
@@ -243,7 +243,7 @@ def test_rejected_decision_needs_authority_and_rejection_statement() -> None:
 
 
 def test_versions_ids_and_supersession_fail_closed() -> None:
-    for change, needle in ((dict(schema_version=3), "schema_version"), (dict(schema_version="1"), "schema_version"),
+    for change, needle in ((dict(schema_version=4), "schema_version"), (dict(schema_version="1"), "schema_version"),
                            (dict(schema_version=0), "schema_version"),
                            (dict(record_version=0), "record_version"),
                            (dict(record_id="pricing-authorities-v9"), "record_id"),
