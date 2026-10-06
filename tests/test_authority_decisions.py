@@ -26,7 +26,6 @@ from ql2_sixt_canada_analysis.authority_decisions import (
 )
 from ql2_sixt_canada_analysis.pricing_baseline import (
     ApprovedDateAgreement,
-    LocationRole,
     PlanReadinessGap,
     baseline_authority_inputs,
     rental_date_fields,
@@ -54,7 +53,7 @@ RESOLUTIONS = {
     D.EXPECTED_STREAM_SOURCE_SPELLING: {"streams": UNIVERSE},
     D.LOCATION_ROLE_ASSIGNMENTS: {"assignments": [
         {"stream": A_AIR, "role": "AIRPORT"}, {"stream": A_DOWN, "role": "DOWNTOWN"},
-        {"stream": V_DOWN, "role": "DOWNTOWN"}, {"stream": V_THUR, "role": "OTHER"}]},
+        {"stream": V_DOWN, "role": "DOWNTOWN"}, {"stream": V_THUR, "role": "DOWNTOWN"}]},
     D.VALID_LOCATION_COMPARISON_PAIRS: {"pairs": [{"airport": A_AIR, "downtown": A_DOWN}]},
     D.VANCOUVER_LOCATION_IDENTITY: {"state": "CONFIRMED_ALIAS", "canonical_location": V_DOWN},
     D.SCHEDULE_CAPTURE_TIMESTAMP: {"field": "cars.scraped_at"},
@@ -177,9 +176,10 @@ def test_committed_v1_holds_no_source_level_values() -> None:
 def test_downstream_codes_are_known_blockers_or_plan_gaps() -> None:
     known = {b.value for b in PricingBlocker} | {g.value for g in PlanReadinessGap}
     assert set(ad.RETIRED_DOWNSTREAM_CODES.values()) <= known and not set(ad.RETIRED_DOWNSTREAM_CODES) & known
-    for decision in load_decision_record(V1).decisions:         # history: retired codes map to current ones
-        assert set(decision.downstream) <= known | set(ad.RETIRED_DOWNSTREAM_CODES), decision.id
-    for decision in load_decision_record(RECORD_DIR / "v3.toml").decisions:   # current revision: current codes only
+    for version in (1, 2, 3):                                     # history: retired codes map to current ones
+        for decision in load_decision_record(RECORD_DIR / f"v{version}.toml").decisions:
+            assert set(decision.downstream) <= known | set(ad.RETIRED_DOWNSTREAM_CODES), decision.id
+    for decision in load_decision_record(RECORD_DIR / "v4.toml").decisions:   # current revision: current codes only
         assert set(decision.downstream) <= known, decision.id
 
 
@@ -406,13 +406,21 @@ def test_vancouver_identity_alias_and_distinct_rules() -> None:
     parse_decision_record(_finish(data))
     entry(data, D.VANCOUVER_LOCATION_IDENTITY)["resolution"]["canonical_location"] = V_DOWN
     assert "required fields" in fails(data)
-    data = approved_record()
-    entry(data, D.VANCOUVER_LOCATION_IDENTITY)["resolution"] = {"state": "CONFIRMED_DISTINCT"}
+    data = approved_record()                                       # a governed key outside the universe
     universe = [A_AIR, A_DOWN, V_DOWN]
     entry(data, D.EXPECTED_STREAM_UNIVERSE)["resolution"]["streams"] = universe
     entry(data, D.EXPECTED_STREAM_SOURCE_SPELLING)["resolution"]["streams"] = universe
     entry(data, D.LOCATION_ROLE_ASSIGNMENTS)["resolution"]["assignments"].pop()
+    assert "governed keys must be approved expected streams" in fails(data)
+    data = approved_record()                                       # distinct needs approved roles for both keys
+    entry(data, D.VANCOUVER_LOCATION_IDENTITY)["resolution"] = {"state": "CONFIRMED_DISTINCT"}
+    unapproved = {D.LOCATION_ROLE_ASSIGNMENTS.value, D.VALID_LOCATION_COMPARISON_PAIRS.value}
+    data["decisions"] = [_proposed_entry(D(e["id"])) if e["id"] in unapproved else e for e in data["decisions"]]
     assert "approved roles for both keys" in fails(data)
+    data = approved_record()                                       # aliases must share one role
+    roles = entry(data, D.LOCATION_ROLE_ASSIGNMENTS)["resolution"]["assignments"]
+    next(a for a in roles if a["stream"] == V_THUR)["role"] = "OTHER"
+    assert "same approved role" in fails(data)
     assert "unsupported value" in fails(with_resolution(D.VANCOUVER_LOCATION_IDENTITY, state="UNRESOLVED"))
 
 
@@ -530,15 +538,13 @@ def test_cli_prints_sanitized_summary_and_exit_codes(tmp_path: Path, capsys: pyt
 
 def test_v1_supplies_no_baseline_authority_inputs() -> None:
     inputs = baseline_authority_inputs(load_decision_record(V1))
-    assert inputs == dict(location_role_map=None, location_role_authority=None,
-                          rental_period_rule_authority=None, approved_rental_date_agreements=None)
+    assert inputs == dict(rental_period_rule_authority=None, approved_rental_date_agreements=None)
 
 
 def test_approved_record_supplies_typed_baseline_inputs() -> None:
     inputs = baseline_authority_inputs(parse_decision_record(approved_record()))
-    assert isinstance(inputs["location_role_authority"], AuthorityReference)
     assert isinstance(inputs["rental_period_rule_authority"], AuthorityReference)
-    assert inputs["location_role_map"][tuple(V_THUR)] is LocationRole.OTHER
+    assert "location_role_map" not in inputs          # roles are a central gate (location_authority), not an input
     agreements = inputs["approved_rental_date_agreements"]
     assert all(isinstance(a, ApprovedDateAgreement) for a in agreements)
     assert {a.target for a in agreements} == set(rental_date_fields(JOB_DETAIL_RELATIONSHIP)[2:])
@@ -546,10 +552,8 @@ def test_approved_record_supplies_typed_baseline_inputs() -> None:
         baseline_authority_inputs(approved_record())          # type: ignore[arg-type]
 
 
-def test_location_policy_authority_no_longer_satisfies_baseline_authority() -> None:
+def test_rental_rules_need_a_neutral_authority_reference() -> None:
     from ql2_sixt_canada_analysis import pricing_baseline as pb
 
     legacy = LocationPolicyAuthority(source="SYNTH", reference="SYNTH")
-    assert not pb._role_map_sufficient({("a", "b"): LocationRole.AIRPORT}, legacy, {("a", "b")}, 2)
-    neutral = AuthorityReference(kind=AuthorityKind.BUSINESS_OWNER, source="SYNTH", reference="SYNTH")
-    assert pb._role_map_sufficient({("a", "b"): LocationRole.OTHER}, neutral, {("a", "b")}, 2)
+    assert not pb._rental_rules_sufficient(pb.TEMPORAL_RECONCILIATION, JOB_DETAIL_RELATIONSHIP, legacy, ())

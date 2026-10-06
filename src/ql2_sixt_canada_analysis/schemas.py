@@ -1597,22 +1597,17 @@ def assess_location_policy_scope(policy: object) -> LocationPolicyScope:
 
 
 #: ``VANCOUVER_LOCATION_POLICY`` (resolved lazily, see :func:`__getattr__`):
-#: identity policy for the Vancouver pair in ``COMPARED_LOCATION_STREAMS``.
-#: UNRESOLVED: no authoritative decision exists in the repository or project
-#: documentation. Behavioural comparison (``LOCATION_STREAM_COMPARISON``) is
-#: diagnostic evidence only. Set CONFIRMED_ALIAS (with a canonical location)
-#: or CONFIRMED_DISTINCT only with ``LocationPolicyAuthority`` naming the
-#: supplier / collection-owner / business decision. Its governed scope is the
+#: identity policy for the Vancouver pair in ``COMPARED_LOCATION_STREAMS``,
+#: built only from the APPROVED ``VANCOUVER_LOCATION_IDENTITY`` decision of the
+#: current authority record
+#: (:func:`~ql2_sixt_canada_analysis.location_authority.vancouver_policy_from_record`):
+#: in record v4, ``CONFIRMED_ALIAS`` with canonical key ``Vancouver / Downtown``
+#: and ``LocationPolicyAuthority`` naming the collection-owner decision and its
+#: governance reference. Without a valid approved decision it is UNRESOLVED.
+#: Behavioural comparison (``LOCATION_STREAM_COMPARISON``) is diagnostic
+#: evidence only and never sets or changes the state. Its governed scope is the
 #: one city both keys share; a confirmed alias may canonicalise only to one of
 #: the two governed keys, never to another city or configured stream.
-def _vancouver_location_policy(coverage: LocationCoverageDefinition) -> LocationIdentityPolicy:
-    return LocationIdentityPolicy(
-        first=COMPARED_LOCATION_STREAMS[0],
-        second=COMPARED_LOCATION_STREAMS[1],
-        coverage=coverage,
-        state=LocationPolicyState.UNRESOLVED,
-    )
-
 
 # ----------------------------------------------------- vehicle-attribute stability
 
@@ -1894,7 +1889,9 @@ def project_default(value: object, name: str) -> object:
 def __getattr__(name: str):  # PEP 562: resolve the authority-backed contract on first access
     if name not in _LAZY_CONTRACT_NAMES:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from ql2_sixt_canada_analysis.authority_decisions import load_current_decision_record
     from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
+    from ql2_sixt_canada_analysis.location_authority import vancouver_policy_from_record
 
     coverage = current_expected_stream_contract().coverage
     governed = coverage if coverage.is_configured and set(COMPARED_LOCATION_STREAMS) <= set(
@@ -1905,7 +1902,8 @@ def __getattr__(name: str):  # PEP 562: resolve the authority-backed contract on
         "LOCATION_STREAM_COMPARISON": comparison,
         "ANALYSIS_LOCATION_STREAM_COMPARISON": dataclass_replace(
             comparison, relationship=ANALYSIS_JOB_DETAIL_RELATIONSHIP, temporal=ANALYSIS_TEMPORAL_RECONCILIATION),
-        "VANCOUVER_LOCATION_POLICY": _vancouver_location_policy(governed),
+        # The authority-backed identity decision (UNRESOLVED unless the current record approves one).
+        "VANCOUVER_LOCATION_POLICY": vancouver_policy_from_record(load_current_decision_record(), governed),
     }
     globals().update(values)
     return globals()[name]

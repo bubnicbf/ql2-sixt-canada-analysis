@@ -15,6 +15,10 @@ import pytest
 from conftest import SYNTH_LINKAGE_POLICY, link, linked_join
 from test_readiness import DISTINCT, GATES, scheduled_frames
 
+import dataclasses
+
+from ql2_sixt_canada_analysis.schemas import VANCOUVER_LOCATION_POLICY, LocationPolicyState
+
 from ql2_sixt_canada_analysis import (
     ANALYSIS_DATASET_DEFINITIONS,
     ANALYSIS_JOB_DETAIL_RELATIONSHIP as REL,
@@ -187,7 +191,9 @@ def test_valid_linkage_never_bypasses_unrelated_blockers() -> None:
                                                    "temporal_fields_trusted": False, "key_contracts_valid": False}))
     assert pricing.job_identifier_normalization_ready and not pricing.ready
     assert pricing.blocking_reasons == (B.KEY_CONTRACTS_INVALID, B.TEMPORAL_FIELDS_UNTRUSTED)
-    unresolved = assess_pricing_readiness(location_policy=assess_location_policy(),
+    undecided = dataclasses.replace(VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.UNRESOLVED, authority=None,
+                                    canonical_location=None)
+    unresolved = assess_pricing_readiness(location_policy=assess_location_policy(undecided),
                                           **(GATES | {"job_detail_join": join, "job_linkage": join.job_linkage_report}))
     assert B.LOCATION_POLICY_UNRESOLVED in unresolved.blocking_reasons and not unresolved.ready
 

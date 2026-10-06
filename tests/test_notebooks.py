@@ -33,6 +33,7 @@ from ql2_sixt_canada_analysis.schemas import (
     INVESTIGATED_LOCATION_STREAM,
     JOB_DETAIL_RELATIONSHIP,
     TEMPORAL_RECONCILIATION,
+    VANCOUVER_LOCATION_POLICY,
     DatasetKey,
 )
 
@@ -64,7 +65,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # Cells that are required to report categorical gate results and aggregate
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
-REPORTING_STEPS = ("current_expected_stream_contract(", "assess_job_linkage(", "assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+REPORTING_STEPS = ("current_expected_stream_contract(", "current_location_authority(", "assess_job_linkage(", "assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
                    "investigate_location_stream(", "assess_completeness(")
@@ -747,7 +748,8 @@ def test_ingestion_notebook_reports_inconclusive_single_pair_partial_overlap(tmp
         b.value for b in (DB.INSUFFICIENT_PAIRED_CAPTURES, DB.INCOMPLETE_TEMPORAL_OVERLAP, DB.BASELINE_UNAVAILABLE))
     assert first not in outputs and second not in outputs and "SYNTH" not in outputs
     policy = _step_output(result, "assess_pricing_readiness(")
-    assert "Vancouver identity policy state: unresolved" in policy and "Pricing analysis ready: False" in policy
+    # The approved decision comes from the record; inconclusive behaviour never changes it.
+    assert "Vancouver identity policy state: confirmed_alias" in policy and "Pricing analysis ready: False" in policy
 
 
 def test_ingestion_notebook_reports_missing_prices_as_invalid_not_duplicate(tmp_path: Path) -> None:
@@ -986,7 +988,7 @@ def test_ingestion_notebook_reports_missing_schedule_as_a_pricing_blocker(
     assert "SYNTH" not in coverage + pricing and list(workdir.iterdir()) == []
 
 
-def test_ingestion_notebook_reports_unresolved_policy_and_blocked_pricing(
+def test_ingestion_notebook_reports_the_approved_alias_and_blocked_pricing(
     synthetic_raw_dir: Path, tmp_path: Path
 ) -> None:
     from ql2_sixt_canada_analysis.readiness import PricingBlocker
@@ -998,18 +1000,27 @@ def test_ingestion_notebook_reports_unresolved_policy_and_blocked_pricing(
                                    env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)})
     outputs = _step_output(result, "assess_pricing_readiness(")
     lines = dict(line.split(":", 1) for line in outputs.splitlines() if ":" in line)
-    assert lines["Vancouver identity policy state"].strip() == "unresolved"
-    assert lines["Policy authority-backed and resolved"].strip() == "False"
+    # Record v4: the approved alias, canonical Vancouver / Downtown. The synthetic rows carry neither governed
+    # raw Vancouver stream, so the alias is recorded but not usable and pricing stays blocked.
+    assert lines["Vancouver identity policy state"].strip() == "confirmed_alias"
+    assert lines["Policy authority-backed and resolved"].strip() == "True"
     assert lines["Canonical scope validation passed"].strip() == "True"
-    assert lines["Supplied canonical key"].strip() == "none"
+    assert lines["Supplied canonical key"].strip() == " / ".join(VANCOUVER_LOCATION_POLICY.canonical_location)
+    assert lines["Governed raw Vancouver streams both present"].strip() == "False"
     assert lines["Canonicalization permitted"].strip() == "False"
     assert lines["Identity evidence conflicts with policy"].strip() == "False"
     assert lines["Policy authority sufficient for analysis"].strip() == "False"
     assert lines["Vancouver labels confirmed aliases"].strip() == "False"
     assert lines["Vancouver labels comparable independently"].strip() == "False"
-    assert lines["Canonicalization required"].strip() == "False | applied: False"
     assert lines["Pricing analysis ready"].strip() == "False"
-    assert PricingBlocker.LOCATION_POLICY_UNRESOLVED.value in lines["Pricing blocked by"]
+    blocked = lines["Pricing blocked by"]
+    assert PricingBlocker.GOVERNED_SOURCE_STREAM_MISSING.value in blocked
+    assert PricingBlocker.LOCATION_POLICY_UNRESOLVED.value not in blocked
+    for cleared in ("branch_role_authority_unavailable", "comparison_pair_authority_unavailable"):
+        assert cleared not in blocked
+    authority = _step_output(result, "current_location_authority(")
+    assert "Location-role map: approved | exact for every approved stream: True" in authority
+    assert "Comparison pairs: approved | valid: True" in authority
     assert "SYNTH" not in outputs and "synthetic_r" not in outputs and not re.search(r"\d", outputs)
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
 

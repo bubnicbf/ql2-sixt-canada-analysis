@@ -47,6 +47,7 @@ from ql2_sixt_canada_analysis.expected_stream_contract import (
     resolve_expected_stream_contract,
 )
 from ql2_sixt_canada_analysis.ingestion import RawDatasets
+from ql2_sixt_canada_analysis.location_authority import current_location_authority
 from ql2_sixt_canada_analysis.pricing_baseline import build_pricing_baseline, render_baseline_markdown
 from ql2_sixt_canada_analysis.readiness import (
     CompletenessBlocker as CMP,
@@ -64,6 +65,7 @@ from ql2_sixt_canada_analysis.schemas import (
     SOURCE_STREAM_COVERAGE_TEMPLATE,
     VANCOUVER_LOCATION_POLICY,
     LocationCoverageMode,
+    LocationPolicyState,
 )
 from ql2_sixt_canada_analysis.stability import assess_vehicle_attribute_stability
 from ql2_sixt_canada_analysis.streams import (
@@ -135,11 +137,14 @@ def test_v1_and_v2_are_unchanged_and_still_valid() -> None:
     assert load_decision_record(V2).counts()[DecisionStatus.APPROVED] == 4
 
 
-def test_v3_is_the_current_valid_revision_superseding_v2() -> None:
+def test_v3_is_a_valid_revision_superseding_v2_and_carried_into_v4() -> None:
     record = load_decision_record(V3)
     assert (record.schema_version, record.record_version, record.record_id) == (2, 3, "pricing-authorities-v3")
-    assert record.supersedes == "pricing-authorities-v2" and CURRENT_RECORD_PATH.name == "v3.toml"
-    assert load_current_decision_record() == record
+    assert record.supersedes == "pricing-authorities-v2" and CURRENT_RECORD_PATH.name == "v4.toml"
+    current = load_current_decision_record()                       # v4 keeps both expected-stream approvals
+    for decision in EXPECTED_STREAM_DECISIONS:
+        assert current.decision(decision).resolution == record.decision(decision).resolution
+        assert current.decision(decision).authority == record.decision(decision).authority
 
 
 def test_v3_approves_exactly_the_job_and_expected_stream_decisions() -> None:
@@ -280,8 +285,7 @@ def test_a_minimum_required_universe_is_approved_but_not_exhaustive() -> None:
 
 def test_checklist_is_regenerated_from_v3() -> None:
     record = load_decision_record(V3)
-    checklist = render_authority_request_checklist(record)
-    assert (RECORD_DIR / "authority_request_checklist.md").read_text(encoding="utf-8") == checklist
+    checklist = render_authority_request_checklist(record)       # the committed file follows v4 (test_location_authority)
     assert "(pricing-authorities-v3)" in checklist
     resolved, requests = checklist.split("## Resolved decisions")[1].split("\n## ", 1)
     for decision in (*JOB_IDENTIFIER_DECISIONS, *EXPECTED_STREAM_DECISIONS):
@@ -305,7 +309,8 @@ def test_project_coverage_is_the_one_resolution_of_the_current_record() -> None:
     assert contract.status is AS.APPROVED and contract.usable and contract.blocking_reasons == ()
     assert contract.coverage is EXPECTED_LOCATION_COVERAGE                  # one object, no second list
     assert contract.expected_keys == SUPPLIED and contract.exhaustive
-    assert contract.record_id == "pricing-authorities-v3" and contract.references == (GOVERNANCE,)
+    assert contract.record_id == CURRENT_RECORD_PATH.stem.replace("v", "pricing-authorities-v")
+    assert contract.references == (GOVERNANCE,)
     assert COV.mode is LocationCoverageMode.EXHAUSTIVE and COV.aliases == {}
     assert INVESTIGATED_LOCATION_STREAM in COV.expected_locations
     assert set(COMPARED_LOCATION_STREAMS) <= set(COV.expected_locations)  # Downtown and Thurlow stay separate
@@ -387,11 +392,14 @@ def test_display_labels_and_unresolved_aliases_establish_no_coverage() -> None:
     report = assess_expected_location_coverage(frame_for(display), COV)
     assert report.covered_expected_location_count == 0 and report.missing_expected_location_count == 7
     assert report.unexpected_location_count == 7 and not report.is_valid
-    # The unresolved Vancouver policy maps nothing: both source streams keep their own keys.
-    keys = apply_location_policy(frame_for(SUPPLIED), VANCOUVER_LOCATION_POLICY)
-    assert not keys.alias_mapping_applied and keys.analytical_keys.tolist() == keys.source_keys.tolist()
-    assert dict(VANCOUVER_LOCATION_POLICY.alias_mapping) == {} and COV.aliases == {}
-    assert assess_expected_location_coverage(frame_for(SUPPLIED), COV).is_valid
+    # The approved alias is analytical only: source keys are kept and coverage still needs both raw streams.
+    frame = frame_for(SUPPLIED)
+    keys = apply_location_policy(frame, VANCOUVER_LOCATION_POLICY)
+    assert keys.alias_mapping_applied and keys.source_keys.tolist() == list(SUPPLIED)
+    assert COV.aliases == {}                                                  # never a coverage alias
+    assert assess_expected_location_coverage(frame, COV).is_valid
+    without_thurlow = frame_for(SUPPLIED[:-1])
+    assert assess_expected_location_coverage(without_thurlow, COV).missing_expected_locations == (SUPPLIED[-1],)
 
 
 def test_spelling_variant_detection_is_diagnostic_only() -> None:
@@ -423,10 +431,14 @@ def completeness_of(j, c, streams=None):  # type: ignore[no-untyped-def]
         expected_coverage=COV)
 
 
-def pricing_of(j, c, report, contract=None, policy=DISTINCT):  # type: ignore[no-untyped-def]
+def pricing_of(j, c, report, contract=None, policy=None):  # type: ignore[no-untyped-def]
+    """Pricing with the project contract, location authority and identity policy (applied to these rows)."""
+    policy = policy if policy is not None else VANCOUVER_LOCATION_POLICY
     gates = gates_for(j, c, COV, report) | {
-        "expected_stream_contract": contract if contract is not None else current_expected_stream_contract()}
-    return assess_pricing_readiness(location_policy=assess_location_policy(policy), **gates)
+        "expected_stream_contract": contract if contract is not None else current_expected_stream_contract(),
+        "location_authority": current_location_authority()}
+    return assess_pricing_readiness(
+        location_policy=assess_location_policy(policy, None, apply_location_policy(c, policy)), **gates)
 
 
 def test_exactly_one_healthy_report_per_approved_stream_is_complete():
@@ -438,7 +450,9 @@ def test_exactly_one_healthy_report_per_approved_stream_is_complete():
     report = completeness_of(j, c, streams)
     assert report.complete and report.expected_streams is streams
     pricing = pricing_of(j, c, report)
-    assert pricing.blocking_reasons == () and pricing.expected_stream_contract_usable   # synthetic gates only
+    # Every gate under test passes; the aliased Vancouver streams' offer combination stays explicitly unresolved.
+    assert pricing.blocking_reasons == (PB.CANONICAL_OFFER_COMBINATION_UNRESOLVED,)
+    assert pricing.expected_stream_contract_usable and pricing.location_roles_and_pairs_ready
 
 
 def test_one_missing_expected_stream_fails_completeness_and_pricing():
@@ -552,7 +566,9 @@ def test_unrelated_blockers_remain_with_the_approved_contract():
     report = completeness_of(j, c)
     gates = gates_for(j, c, COV, report) | {"expected_stream_contract": current_expected_stream_contract(),
                                             "scheduled_coverage": None, "temporal_fields_trusted": False}
-    pricing = assess_pricing_readiness(location_policy=assess_location_policy(), **gates)  # unresolved policy
+    undecided = dataclasses.replace(VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.UNRESOLVED,
+                                    authority=None, canonical_location=None)
+    pricing = assess_pricing_readiness(location_policy=assess_location_policy(undecided), **gates)
     assert not pricing.ready
     assert {PB.SCHEDULED_COVERAGE_ASSESSMENT_MISSING, PB.TEMPORAL_FIELDS_UNTRUSTED,
             PB.LOCATION_POLICY_UNRESOLVED} <= set(pricing.blocking_reasons)
@@ -592,7 +608,7 @@ def test_baseline_reports_seven_expected_streams_and_a_separate_observed_populat
     # The misspelled observation is a case variant: an unverified alias, never applied.
     assert baseline.expected_stream_health[0].stream_status == LocationStreamStatus.UNVERIFIED_ALIAS.value
     assert sum(h.spelling_variant for h in baseline.observed_stream_health) == 1
-    assert baseline.authority_record_version == 3
+    assert baseline.authority_record_version == 4
     assert ("expected_stream_authority", "approved") in baseline.statuses
     assert ("expected_stream_universe_mode", "exhaustive") in baseline.statuses
     assert {"source_spelling_mismatch", "unexpected_pairs", "expected_pairs_missing"} <= set(baseline.pricing_blockers)

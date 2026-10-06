@@ -10,7 +10,9 @@ import dataclasses
 
 import pytest
 from test_completeness import CITY, J1, J2, J3, cars, jobs, reconcile
-from test_readiness import GATES, assess_location_policy, gates_for
+from test_readiness import GATES, assess_location_policy, core_blockers, gates_for
+
+from ql2_sixt_canada_analysis.schemas import VANCOUVER_LOCATION_POLICY, LocationPolicyState
 
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.city_integrity import assess_city_integrity
@@ -63,7 +65,10 @@ def completeness(j, c, streams, coverage=COV3):  # type: ignore[no-untyped-def]
 
 
 def pricing(report):  # type: ignore[no-untyped-def]
-    return assess_pricing_readiness(location_policy=assess_location_policy(), **gates_for(*healthy(), COV3, report))
+    undecided = dataclasses.replace(VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.UNRESOLVED, authority=None,
+                                    canonical_location=None)
+    return assess_pricing_readiness(location_policy=assess_location_policy(undecided),
+                                    **gates_for(*healthy(), COV3, report))
 
 
 # ------------------------------------------------------------------ exact population
@@ -82,7 +87,7 @@ def test_exact_expected_population_is_assessed_once_and_can_complete():
     readiness = pricing(report)
     # Other pricing gates still apply (here the unresolved location policy).
     assert readiness.completeness is report and PB.DATA_INCOMPLETE not in readiness.blocking_reasons
-    assert readiness.blocking_reasons == (PB.LOCATION_POLICY_UNRESOLVED,)
+    assert core_blockers(readiness) == (PB.LOCATION_POLICY_UNRESOLVED,)     # COV3 has no airport/downtown pair
 
 
 def test_omitted_expected_stream_blocks_completeness_and_pricing():

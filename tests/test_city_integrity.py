@@ -16,7 +16,7 @@ import pandas as pd
 import pytest
 from conftest import linked_join, require_linked_join
 from test_completeness import COV, J1, J2, J3, cars, jobs, reconcile
-from test_readiness import DISTINCT, GATES, gates_for
+from test_readiness import DISTINCT, GATES, core_blockers, gates_for
 
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.city_integrity import (
@@ -140,7 +140,9 @@ def test_healthy_frames_pass_every_control():
     assert validate_city_integrity(j, c, coverage=COV) == report
     assert reconcile(j, c).is_reconciled
     assert linked_join(j, c).trusted_jobs_with_details is not None
-    assert completeness(j, c).complete and pricing(completeness(j, c)).ready
+    # Every gate under test passes; only the synthetic world's location-authority detail remains
+    # (this three-stream contract has no airport, so it has no valid comparison pair).
+    assert completeness(j, c).complete and core_blockers(pricing(completeness(j, c))) == ()
 
 
 # ------------------------------------------------------- unassignable job city
@@ -174,8 +176,8 @@ def test_unassignable_job_city_blocks_integrity_completeness_and_pricing(value):
     assert {CB.CITY_SCOPE_UNASSIGNABLE, CB.STREAM_SCOPE_UNASSIGNABLE} <= set(complete.blocking_reasons)
     readiness = pricing(complete)
     assert not readiness.ready
-    assert readiness.blocking_reasons == (PB.DATA_INCOMPLETE, PB.EXPECTED_STREAMS_NOT_PROVEN,
-                                          PB.SCOPE_INTEGRITY_NOT_PROVEN)
+    assert core_blockers(readiness) == (PB.DATA_INCOMPLETE, PB.EXPECTED_STREAMS_NOT_PROVEN,
+                                        PB.SCOPE_INTEGRITY_NOT_PROVEN)
     with pytest.raises(PricingNotReadyError):
         validate_pricing_readiness(location_policy=assess_location_policy(DISTINCT), **PROJECT_GATES(complete))
     join = linked_join(j, c)
@@ -303,7 +305,7 @@ def test_healthy_coverage_streams_and_counts_cannot_override_a_mismatch():
     report = completeness(j, c, streams=assess_expected_location_streams(clean_j, clean_c, coverage=COV),
                           reconciliation=reconcile(clean_j, clean_c))
     assert not report.complete and report.blocking_reasons == (CB.PARENT_DETAIL_CITY_MISMATCH,)
-    assert pricing(report).blocking_reasons == (PB.DATA_INCOMPLETE, PB.SCOPE_INTEGRITY_NOT_PROVEN)
+    assert core_blockers(pricing(report)) == (PB.DATA_INCOMPLETE, PB.SCOPE_INTEGRITY_NOT_PROVEN)
 
 
 # ------------------------------------------------ required input and contract
@@ -398,15 +400,18 @@ def test_inputs_are_not_modified():
 
 
 def test_city_agreement_does_not_decide_vancouver_identity():
-    # Both Vancouver labels sharing their job's city says nothing about whether they
-    # are one pickup location: the policy stays unresolved and blocks pricing.
+    # Both Vancouver labels sharing their job's city says nothing about whether they are one
+    # pickup location: identity comes only from the authority record (v4: an approved alias);
+    # without that decision the policy is unresolved and blocks pricing.
     j, c = healthy()
     assert assess_city_integrity(j, c, coverage=COV).is_valid
-    assert VANCOUVER_LOCATION_POLICY.state is LocationPolicyState.UNRESOLVED
-    policy = assess_location_policy()
+    assert VANCOUVER_LOCATION_POLICY.state is LocationPolicyState.CONFIRMED_ALIAS     # from the record, not the data
+    undecided = dataclasses.replace(VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.UNRESOLVED,
+                                    authority=None, canonical_location=None)
+    policy = assess_location_policy(undecided)
     assert not policy.locations_are_aliases and not policy.locations_comparable_independently
     readiness = assess_pricing_readiness(location_policy=policy, **PROJECT_GATES(completeness(j, c)))
-    assert readiness.blocking_reasons == (PB.LOCATION_POLICY_UNRESOLVED,)
+    assert core_blockers(readiness) == (PB.LOCATION_POLICY_UNRESOLVED,)
 
 
 def test_blocker_values_name_no_source_columns_and_exports():

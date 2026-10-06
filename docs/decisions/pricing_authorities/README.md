@@ -12,10 +12,12 @@ agreements (22 atomic decisions, `DecisionId` in
 | --- | --- |
 | [`v1.toml`](v1.toml) | Revision 1 (schema 1, historical, unchanged) - every decision `PROPOSED` (no attributable authority found). |
 | [`v2.toml`](v2.toml) | Revision 2 (schema 2, historical, unchanged) - supersedes v1; the four job-identifier decisions are `APPROVED` by the collection owner, the other 18 remain `PROPOSED`. |
-| [`v3.toml`](v3.toml) | Revision 3 (schema 2, **current revision**) - supersedes v2; keeps the four job-identifier approvals and approves `EXPECTED_STREAM_UNIVERSE` (`EXHAUSTIVE`, seven streams; collection owner and business owner) and `EXPECTED_STREAM_SOURCE_SPELLING` (collection owner); the other 16 remain `PROPOSED`. |
-| [`authority_request_checklist.md`](authority_request_checklist.md) | Generated from the current revision: the resolved decisions with their references, and neutral questions for the 16 decisions still blocked on external input. |
+| [`v3.toml`](v3.toml) | Revision 3 (schema 2, historical, unchanged) - supersedes v2; keeps the four job-identifier approvals and approves `EXPECTED_STREAM_UNIVERSE` (`EXHAUSTIVE`, seven streams; collection owner and business owner) and `EXPECTED_STREAM_SOURCE_SPELLING` (collection owner); the other 16 remain `PROPOSED`. |
+| [`v4.toml`](v4.toml) | Revision 4 (schema 2, **current revision**) - supersedes v3; keeps the six earlier approvals and approves `LOCATION_ROLE_ASSIGNMENTS` and `VALID_LOCATION_COMPARISON_PAIRS` (business owner) and `VANCOUVER_LOCATION_IDENTITY` (`CONFIRMED_ALIAS`, canonical `Vancouver / Downtown`; collection owner); the other 13 remain `PROPOSED`. |
+| [`authority_request_checklist.md`](authority_request_checklist.md) | Generated from the current revision: the resolved decisions with their references, and neutral questions for the 13 decisions still blocked on external input. |
 | [`../governance/job-identifier-governance-2026-10-06.md`](../governance/job-identifier-governance-2026-10-06.md) | Durable authority reference for the job-identifier approvals (collection-governance outcome supplied by the repository owner, recorded 2026-10-06). |
 | [`../governance/expected-stream-governance-2026-10-06.md`](../governance/expected-stream-governance-2026-10-06.md) | Durable authority reference for the expected-stream approvals (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
+| [`../governance/location-roles-and-identity-governance-2026-10-06.md`](../governance/location-roles-and-identity-governance-2026-10-06.md) | Durable authority reference for the location-role, comparison-pair and Vancouver identity approvals (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
 
 ## Revision 2: approved job-identifier decisions
 
@@ -47,7 +49,7 @@ approved and consistent).
 
 ## Revision 3: approved exhaustive source-stream contract
 
-`v3.toml` (the current revision, `CURRENT_RECORD_PATH`) carries the four
+`v3.toml` (superseded by v4, unchanged) carries the four
 job-identifier approvals over unchanged and approves:
 
 * `EXPECTED_STREAM_UNIVERSE` - mode `EXHAUSTIVE`, exactly seven
@@ -82,6 +84,38 @@ the implementation replaced are mapped in `RETIRED_DOWNSTREAM_CODES` (for
 example `expected_streams_minimum_required_not_exhaustive` ->
 `expected_stream_universe_not_exhaustive`); committed revisions are never
 edited.
+
+## Revision 4: location roles, comparison pairs and the Vancouver alias
+
+`v4.toml` (the current revision, `CURRENT_RECORD_PATH`) carries the six
+earlier approvals over unchanged and approves, with reference
+[`location-roles-and-identity-governance-2026-10-06.md`](../governance/location-roles-and-identity-governance-2026-10-06.md):
+
+* `LOCATION_ROLE_ASSIGNMENTS` (business owner) - exactly one role per
+  approved source stream: `Calgary / Downtown` DOWNTOWN,
+  `Calgary / Int Airport` AIRPORT, `Toronto / Downtown` DOWNTOWN,
+  `Toronto / Int Airport` AIRPORT, `Vancouver / Downtown` DOWNTOWN,
+  `Vancouver / Int Airport` AIRPORT, `Vancouver / Thurlow` DOWNTOWN.
+* `VALID_LOCATION_COMPARISON_PAIRS` (business owner) - exactly three
+  within-city airport/downtown pairs: Calgary `Int Airport` versus `Downtown`,
+  Toronto `Int Airport` versus `Downtown`, Vancouver `Int Airport` versus the
+  canonical Vancouver `Downtown`.
+* `VANCOUVER_LOCATION_IDENTITY` (collection owner) - `CONFIRMED_ALIAS`:
+  Vancouver `Downtown` and Vancouver `Thurlow` are one governed location;
+  canonical key `Vancouver / Downtown`.
+
+The validator now also rejects: a canonical key that is not one of the two
+governed keys (another city, `Vancouver / Int Airport` or any other key);
+governed keys outside the approved universe; aliases with different roles;
+self-pairs; pairs whose member is a non-canonical alias (a second comparison
+through `Thurlow`); pairs resolving to one canonical location; duplicate and
+reversed pairs. The roles, pairs and identity are implemented separately,
+with their own tests, in `ql2_sixt_canada_analysis.location_authority`
+(`vancouver_policy_from_record` builds the existing `LocationIdentityPolicy`;
+there is no second alias mechanism). Source coverage still requires both raw
+Vancouver streams; canonicalization is analytical only and never hides a
+missing raw stream. The schedule, temporal, reporting-day, scrape/clean-date
+and rental-date decisions remain `PROPOSED`.
 
 ## Status semantics
 
@@ -140,6 +174,7 @@ Old revisions stay in place as history.
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v1.toml
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v2.toml
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v3.toml
+python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v4.toml
 ```
 
 prints a sanitized status summary (decision ids, statuses, roles and counts
@@ -157,6 +192,8 @@ implementation. Contracts in `schemas.py`, the coverage, schedule and temporal
 rules and the pricing gate consume an approved decision only through separate
 implementation work with its own tests - for the four job-identifier
 decisions, `ql2_sixt_canada_analysis.job_linkage`; for the two expected-stream
-decisions, `ql2_sixt_canada_analysis.expected_stream_contract`.
+decisions, `ql2_sixt_canada_analysis.expected_stream_contract`; for the
+location roles, comparison pairs and Vancouver identity,
+`ql2_sixt_canada_analysis.location_authority`.
 `pricing_baseline.baseline_authority_inputs` reads APPROVED decisions only, so
-no revision clears a location-role or rental-date plan gap.
+no revision clears the rental-date plan gap.

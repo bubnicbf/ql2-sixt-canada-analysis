@@ -76,7 +76,7 @@ def test_v2_validates_under_schema_2_and_supersedes_v1() -> None:
     assert (record.schema_version, record.record_version, record.record_id) == (2, 2, "pricing-authorities-v2")
     assert record.supersedes == "pricing-authorities-v1" and record.created == dt.date(2026, 10, 6)
     assert re.fullmatch(r"[0-9a-f]{40}", record.source_commit)
-    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v3.toml"   # superseded by v3
+    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v4.toml"   # superseded by v3, v4
     assert 2 in ad.SUPPORTED_SCHEMA_VERSIONS and 1 in ad.SUPPORTED_SCHEMA_VERSIONS
 
 
@@ -236,7 +236,7 @@ def test_v2_produces_the_expected_typed_policy() -> None:
     assert [a.kind for a in policy.authority] == [AuthorityKind.COLLECTION_OWNER]
     assert policy.authority[0].reference == GOVERNANCE
     current = load_job_linkage_policy()                                         # the committed current record (v3)
-    assert current is not None and current.record_id == "pricing-authorities-v3"
+    assert current is not None and current.record_id == "pricing-authorities-v4"
     assert {f: getattr(current, f) for f in ("authority", "semantics", "legacy_decimal_zero_repair",
                                              "legacy_offer_position_repair")} == {
         f: getattr(policy, f) for f in ("authority", "semantics", "legacy_decimal_zero_repair",

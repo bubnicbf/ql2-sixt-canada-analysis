@@ -86,6 +86,7 @@ from ql2_sixt_canada_analysis.schemas import (
 
 if TYPE_CHECKING:  # imported lazily at run time
     from ql2_sixt_canada_analysis.expected_stream_contract import ExpectedStreamContract
+    from ql2_sixt_canada_analysis.location_authority import LocationAuthorityReport
     from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
 
 __all__ = [
@@ -118,6 +119,18 @@ class PricingBlocker(StrEnum):
     EXPECTED_SOURCE_STREAMS_MISSING = "expected_pairs_missing"
     UNEXPECTED_SOURCE_STREAMS = "unexpected_pairs"
     SOURCE_SPELLING_MISMATCH = "source_spelling_mismatch"
+    # Authority-backed location roles and comparison pairs (values equal
+    # LocationAuthorityBlocker values) and their consistency with the policy and contract.
+    BRANCH_ROLE_AUTHORITY_UNAVAILABLE = "branch_role_authority_unavailable"
+    BRANCH_ROLES_NOT_EXACT = "branch_roles_not_exact"
+    COMPARISON_PAIR_AUTHORITY_UNAVAILABLE = "comparison_pair_authority_unavailable"
+    COMPARISON_PAIRS_INVALID = "comparison_pairs_invalid"
+    COMPARISON_PAIR_IDENTITY_UNRESOLVED = "comparison_pair_identity_unresolved"
+    CANONICAL_OFFER_COMBINATION_UNRESOLVED = "canonical_offer_combination_unresolved"
+    LOCATION_AUTHORITY_POLICY_MISMATCH = "roles_pairs_policy_mismatch"
+    LOCATION_AUTHORITY_CONTRACT_MISMATCH = "roles_pairs_contract_mismatch"
+    # A confirmed alias whose governed raw source streams are not both present exactly.
+    GOVERNED_SOURCE_STREAM_MISSING = "governed_source_stream_missing"
     SCOPE_INTEGRITY_NOT_PROVEN = "scope_integrity_not_proven"
     KEY_CONTRACTS_INVALID = "key_contracts_invalid"
     ONE_TO_MANY_INVALID = "one_to_many_invalid"
@@ -247,6 +260,12 @@ class AnalyticalLocationKeys:
         """Keys to group analysis by (canonical for a confirmed alias); a copy."""
         return self._analytical.copy()
 
+    @property
+    def governed_sources_present(self) -> bool:
+        """Both governed raw source keys occur exactly (source keys; canonicalization never counts)."""
+        present = set(self._source.tolist())
+        return self.policy.first in present and self.policy.second in present
+
 
 @dataclass(frozen=True, slots=True)
 class LocationPolicyReport:
@@ -266,6 +285,11 @@ class LocationPolicyReport:
     canonicalization_applied: bool
     #: Governed-scope validation of the policy (``None`` = not assessed, which blocks).
     scope: LocationPolicyScope | None = None
+    #: Both governed raw source streams were present exactly in the keys the policy was
+    #: applied to (``None`` = not assessed). A confirmed alias needs ``True``.
+    governed_sources_present: bool | None = None
+    #: The policy this report was assessed from (``None`` for a hand-built report).
+    policy: LocationIdentityPolicy | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, LocationPolicyState):
@@ -281,6 +305,12 @@ class LocationPolicyReport:
             raise TypeError("scope must be a LocationPolicyScope or None")
         if self.canonicalization_applied and not self.scope_valid:
             raise ValueError("canonicalization cannot be applied under an invalid governed scope")
+        if self.governed_sources_present is not None and not isinstance(self.governed_sources_present, bool):
+            raise TypeError("governed_sources_present must be a bool or None")
+        if self.policy is not None and (not isinstance(self.policy, LocationIdentityPolicy)
+                                        or self.policy.state is not self.state
+                                        or self.policy.authority != self.authority):
+            raise ValueError("policy must be the LocationIdentityPolicy this report was assessed from")
 
     @property
     def scope_valid(self) -> bool:
@@ -315,7 +345,8 @@ class LocationPolicyReport:
         configured alias or distinct decision stays recorded (resolved) but is
         not sufficient for analysis while the defect exists.
         """
-        return self.location_policy_resolved and not self.identity_evidence_conflict and self.scope_valid
+        return (self.location_policy_resolved and not self.identity_evidence_conflict and self.scope_valid
+                and (self.state is not LocationPolicyState.CONFIRMED_ALIAS or self.governed_sources_present is True))
 
     @property
     def locations_are_aliases(self) -> bool:
@@ -346,6 +377,8 @@ class LocationPolicyReport:
         reasons.extend(PricingBlocker(d.value) for d in self.scope_defects)
         if self.canonicalization_required and not self.canonicalization_applied:
             reasons.append(PricingBlocker.ALIAS_CANONICALIZATION_NOT_APPLIED)
+        if self.canonicalization_required and self.governed_sources_present is not True:
+            reasons.append(PricingBlocker.GOVERNED_SOURCE_STREAM_MISSING)
         return tuple(reasons)
 
 
@@ -365,6 +398,8 @@ class PricingReadinessReport:
     job_linkage: JobLinkageReport | None = None
     #: The authority-backed source-stream contract (kept for audit; ``None`` = missing).
     expected_stream_contract: ExpectedStreamContract | None = None
+    #: Authority-backed roles and comparison pairs (kept for audit; ``None`` = missing).
+    location_authority: LocationAuthorityReport | None = None
 
     @property
     def ready(self) -> bool:
@@ -381,6 +416,12 @@ class PricingReadinessReport:
     @property
     def job_identifier_normalization_ready(self) -> bool:
         return self.job_linkage is not None and self.job_linkage.is_valid
+
+    @property
+    def location_roles_and_pairs_ready(self) -> bool:
+        """Approved, exact roles and valid comparison pairs were supplied (not that pricing is ready)."""
+        return (self.location_authority is not None and self.location_authority.roles_exact
+                and self.location_authority.pairs_valid)
 
     @property
     def expected_stream_contract_usable(self) -> bool:
@@ -486,8 +527,11 @@ def assess_location_policy(
     scope = assess_location_policy_scope(policy)
     applied = (scope.is_valid and analytical_keys is not None and analytical_keys.policy == policy
                and analytical_keys.alias_mapping_applied)
+    present = (analytical_keys.governed_sources_present
+               if analytical_keys is not None and analytical_keys.policy == policy else None)
     return LocationPolicyReport(state=policy.state, authority=policy.authority, behavioral_evidence=evidence,
-                                identity_evidence_conflict=conflict, canonicalization_applied=applied, scope=scope)
+                                identity_evidence_conflict=conflict, canonicalization_applied=applied, scope=scope,
+                                governed_sources_present=present, policy=policy)
 
 
 def assess_pricing_readiness(
@@ -502,6 +546,7 @@ def assess_pricing_readiness(
     job_detail_join: JobDetailJoinReadiness | None,
     job_linkage: JobLinkageReport | None,
     expected_stream_contract: ExpectedStreamContract | None,
+    location_authority: LocationAuthorityReport | None,
 ) -> PricingReadinessReport:
     """Combine every foundational gate with the location policy (all must pass).
 
@@ -565,6 +610,10 @@ def assess_pricing_readiness(
 
     if expected_stream_contract is not None and not isinstance(expected_stream_contract, ExpectedStreamContract):
         raise TypeError("expected_stream_contract must be an ExpectedStreamContract or None")
+    from ql2_sixt_canada_analysis.location_authority import LocationAuthorityReport
+
+    if location_authority is not None and not isinstance(location_authority, LocationAuthorityReport):
+        raise TypeError("location_authority must be a LocationAuthorityReport or None")
     gates = (
         (key_contracts_valid, PricingBlocker.KEY_CONTRACTS_INVALID),
         (one_to_many_contract_valid, PricingBlocker.ONE_TO_MANY_INVALID),
@@ -579,11 +628,40 @@ def assess_pricing_readiness(
     reasons.extend(_scheduled_coverage_blockers(scheduled_coverage, completeness))
     reasons.extend(_join_blockers(job_detail_join))
     reasons.extend(_linkage_blockers(job_linkage, job_detail_join))
+    reasons.extend(_location_authority_blockers(location_authority, location_policy, expected_stream_contract))
     reasons.extend(location_policy.blocking_reasons)
     return PricingReadinessReport(blocking_reasons=tuple(dict.fromkeys(reasons)), location_policy=location_policy,
                                   completeness=completeness, scheduled_coverage=scheduled_coverage,
                                   job_detail_join=job_detail_join, job_linkage=job_linkage,
-                                  expected_stream_contract=expected_stream_contract)
+                                  expected_stream_contract=expected_stream_contract,
+                                  location_authority=location_authority)
+
+
+def _location_authority_blockers(report: LocationAuthorityReport | None, policy: LocationPolicyReport,
+                                 contract: ExpectedStreamContract | None) -> list[PricingBlocker]:
+    """Role-map and comparison-pair blockers, re-validated under this gate's identity policy and contract.
+
+    The approved roles and pairs are re-assessed against the identity policy
+    the location-policy report was built from and the source contract given
+    to pricing, so a report validated under another policy or contract can
+    never pass: its own result is kept only when the re-assessment agrees
+    (``roles_pairs_policy_mismatch`` otherwise).
+    """
+    from ql2_sixt_canada_analysis.location_authority import assess_location_authority
+
+    B = PricingBlocker
+    if report is None:
+        return [B.BRANCH_ROLE_AUTHORITY_UNAVAILABLE, B.COMPARISON_PAIR_AUTHORITY_UNAVAILABLE]
+    blockers = [B(b.value) for b in report.blocking_reasons]
+    if contract is not None and report.contract.coverage != contract.coverage:
+        blockers.append(B.LOCATION_AUTHORITY_CONTRACT_MISMATCH)      # validated against another contract
+    if policy.policy is not None:
+        again = assess_location_authority(report.role_map, report.pair_set,
+                                          report.contract, policy.policy)
+        if again.blocking_reasons != report.blocking_reasons or again.effective_pairs != report.effective_pairs:
+            blockers.append(B.LOCATION_AUTHORITY_POLICY_MISMATCH)    # validated under another policy
+            blockers.extend(B(b.value) for b in again.blocking_reasons)
+    return blockers
 
 
 def _expected_stream_contract_blockers(contract: ExpectedStreamContract | None,

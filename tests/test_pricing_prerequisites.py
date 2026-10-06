@@ -16,7 +16,7 @@ from conftest import linked_join
 from test_city_integrity import COV, PROJECT_GATES, completeness as project_completeness, cross_city, healthy
 from test_completeness import SYNTH_COV
 from test_readiness import (
-    DISTINCT, GATES, JOIN_OK, SCHEDULE, SCHEDULED_OK, captured, scheduled_coverage, scheduled_frames,
+    DISTINCT, GATES, JOIN_OK, SCHEDULE, SCHEDULED_OK, captured, core_blockers, scheduled_coverage, scheduled_frames,
 )
 
 from ql2_sixt_canada_analysis import join_readiness
@@ -88,7 +88,7 @@ def project_ready(scheduled, join=None):  # type: ignore[no-untyped-def]
 
 def test_fixtures_pass_every_gate():
     assert SCHEDULED_OK.is_valid and SCHEDULED_OK.all_streams_complete
-    assert [e.time_coverage for e in SCHEDULED_OK.stream_coverage] == [T.COMPLETE]
+    assert [e.time_coverage for e in SCHEDULED_OK.stream_coverage] == [T.COMPLETE] * len(SYNTH_COV.expected_locations)
     assert JOIN_OK.join_ready
     report = ready()
     assert report.ready and report.schedule_available and report.scheduled_coverage_complete
@@ -99,7 +99,7 @@ def test_project_three_streams_with_complete_coverage_pass():
     scheduled = project_scheduled()
     assert [e.target for e in scheduled.stream_coverage] == list(COV.expected_locations)
     assert all(e.time_coverage is T.COMPLETE for e in scheduled.stream_coverage)
-    assert project_ready(scheduled).ready
+    assert core_blockers(project_ready(scheduled)) == ()       # no airport here: only pair detail remains
 
 
 # ---------------------------------------------------- schedule availability
@@ -204,7 +204,7 @@ def test_stream_health_and_temporal_trust_do_not_override_missing_coverage():
     j, c = scheduled_frames()
     unscheduled = assess_expected_location_streams(j, c, coverage=SYNTH_COV, schedule=None)
     assert unscheduled.all_expected_streams_healthy                                  # healthy, but not assessed
-    assert [r.report.time_coverage for r in unscheduled.results] == [T.NOT_ASSESSED]
+    assert [r.report.time_coverage for r in unscheduled.results] == [T.NOT_ASSESSED] * len(SYNTH_COV.expected_locations)
     report = ready(scheduled_coverage=coverage_of(unscheduled, schedule=None), temporal_fields_trusted=True)
     assert not report.ready and B.COLLECTION_SCHEDULE_UNAVAILABLE in report.blocking_reasons
     report = ready(scheduled_coverage=coverage_of(unscheduled))                     # schedule given, not applied

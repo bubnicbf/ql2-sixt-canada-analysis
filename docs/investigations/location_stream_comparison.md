@@ -94,3 +94,12 @@ identical offers and identical prices do not prove physical identity.
   in another city (for example the Calgary stream) or any other arbitrary
   tuple is rejected with a typed scope defect; no row is rewritten and
   pricing stays blocked.
+- Authority decision (2026-10-06, record `v4`): the identity was decided by
+  the collection owner, not by this investigation - `CONFIRMED_ALIAS` with
+  canonical key `Vancouver / Downtown`
+  ([governance reference](../decisions/governance/location-roles-and-identity-governance-2026-10-06.md)).
+  `VANCOUVER_LOCATION_POLICY` is now built from that decision. The behavioural
+  results above remain diagnostic evidence only; they neither established nor
+  can change the decision. Both raw source streams stay separately required,
+  their raw labels are preserved, and the two are never compared with each
+  other for pricing.

@@ -320,11 +320,15 @@ def test_reported_failure_valid_target_with_one_partial_comparator_capture():
 def test_insufficient_or_invalid_duplicate_evidence_resolves_nothing():
     for rows in (targets(a=MISSING_PRICE, b=MISSING_PRICE) + comparator((J1,)), targets() + comparator((J1,))):
         r = run(rows)
-        policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, r)
+        undecided = dataclasses.replace(VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.UNRESOLVED, authority=None,
+                                    canonical_location=None)
+        policy = assess_location_policy(undecided, r)               # evidence cannot resolve an undecided policy
         assert policy.state is LocationPolicyState.UNRESOLVED and not policy.location_policy_resolved
+        approved = assess_location_policy(VANCOUVER_LOCATION_POLICY, r)   # nor change the approved decision
+        assert approved.state is VANCOUVER_LOCATION_POLICY.state and approved.authority == VANCOUVER_LOCATION_POLICY.authority
         assert not policy.location_policy_authority_sufficient and not policy.canonicalization_permitted
         keys = apply_location_policy(pd.DataFrame({c: [k] for c, k in zip(
-            VANCOUVER_LOCATION_POLICY.coverage.location_columns, VANCOUVER_LOCATION_POLICY.first)}))
+            VANCOUVER_LOCATION_POLICY.coverage.location_columns, VANCOUVER_LOCATION_POLICY.first)}), undecided)
         assert not keys.alias_mapping_applied
         assert not assess_pricing_readiness(location_policy=policy, **GATES).ready
 

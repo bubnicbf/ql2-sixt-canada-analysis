@@ -634,9 +634,13 @@ def test_complete_affirmative_evidence_allows_likely_duplicate_but_never_authori
         validate_confirmed_location_alias(_jobs(), cars, DEF)
     from ql2_sixt_canada_analysis.readiness import assess_location_policy
     from ql2_sixt_canada_analysis.schemas import VANCOUVER_LOCATION_POLICY, LocationPolicyState
-    policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, r)
+    undecided = dataclasses.replace(VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.UNRESOLVED, authority=None,
+                                    canonical_location=None)
+    policy = assess_location_policy(undecided, r)                    # behaviour never resolves identity
     assert policy.state is LocationPolicyState.UNRESOLVED and not policy.locations_are_aliases
     assert not policy.location_policy_resolved
+    approved = assess_location_policy(VANCOUVER_LOCATION_POLICY, r)  # nor alters the approved decision
+    assert approved.state is VANCOUVER_LOCATION_POLICY.state
 
 
 def test_one_contradictory_pair_blocks_duplicate_and_is_retained():

@@ -95,7 +95,7 @@ __all__ = [
 #: Record schema versions this module understands.
 SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 #: The current committed revision (repository-relative).
-CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v3.toml")
+CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v4.toml")
 
 
 class DecisionRecordError(ValueError):
@@ -200,6 +200,7 @@ _CODE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 #: Committed revisions are immutable, so their codes are mapped, not edited.
 RETIRED_DOWNSTREAM_CODES: Mapping[str, str] = MappingProxyType({
     "expected_streams_minimum_required_not_exhaustive": "expected_stream_universe_not_exhaustive",
+    "airport_downtown_role_map_unavailable": "branch_role_authority_unavailable",
 })
 _EXPLICIT_OFFSET = re.compile(r"(?:Z|[+-]\d{2}:\d{2})$")
 #: Content that looks like source-level data is refused in free text.
@@ -656,30 +657,59 @@ def _comparison_pairs(res, by_id, d):  # type: ignore[no-untyped-def]
         raise DecisionRecordError(f"{d.value}: requires {_D.LOCATION_ROLE_ASSIGNMENTS.value} to be APPROVED")
     for item in role_entry.resolution["assignments"]:
         roles[tuple(item["stream"])] = item["role"]
+    canonical = _approved_alias_mapping(by_id)
     for item in raw:
         if not isinstance(item, Mapping):
             raise DecisionRecordError(f"{d.value}: each pair must be a table")
         _keys(item, {"airport", "downtown"}, d.value)
         airport = _stream_key(item.get("airport"), f"{d.value}: airport")
         downtown = _stream_key(item.get("downtown"), f"{d.value}: downtown")
+        if airport == downtown:
+            raise DecisionRecordError(f"{d.value}: a location cannot be compared with itself")
         if airport[0] != downtown[0]:
             raise DecisionRecordError(f"{d.value}: a comparison pair must stay within one city")
         if airport not in universe or downtown not in universe:
             raise DecisionRecordError(f"{d.value}: pairs must reference approved expected locations")
         if roles.get(airport) != "AIRPORT" or roles.get(downtown) != "DOWNTOWN":
             raise DecisionRecordError(f"{d.value}: pair members must carry the approved airport/downtown roles")
-        if (airport, downtown) in seen:
+        if any(canonical.get(k, k) != k for k in (airport, downtown)):
+            raise DecisionRecordError(f"{d.value}: pair members must be canonical locations under the approved identity")
+        resolved = frozenset({canonical.get(airport, airport), canonical.get(downtown, downtown)})
+        if len(resolved) < 2:
+            raise DecisionRecordError(f"{d.value}: a pair cannot resolve to one canonical location")
+        if resolved in seen:
             raise DecisionRecordError(f"{d.value}: duplicate comparison pair")
-        seen.add((airport, downtown))
+        seen.add(resolved)
+
+
+def _approved_alias_mapping(by_id: Mapping) -> dict[tuple[str, ...], tuple[str, ...]]:
+    """Governed key -> canonical key under an APPROVED CONFIRMED_ALIAS identity (else empty)."""
+    entry = by_id[_D.VANCOUVER_LOCATION_IDENTITY]
+    res = entry.resolution if entry.status is DecisionStatus.APPROVED else None
+    if not isinstance(res, Mapping) or res.get("state") != "CONFIRMED_ALIAS":
+        return {}
+    canonical = res.get("canonical_location")
+    governed = [tuple(k) for k in COMPARED_LOCATION_STREAMS]
+    if not isinstance(canonical, tuple) or tuple(canonical) not in governed:
+        return {}                    # an invalid canonical key is rejected by the identity validator itself
+    return {k: tuple(canonical) for k in governed}
 
 
 def _vancouver(res, by_id, d):  # type: ignore[no-untyped-def]
     state = _choice(res, "state", {"CONFIRMED_ALIAS", "CONFIRMED_DISTINCT"}, d.value)
     governed = {tuple(k) for k in COMPARED_LOCATION_STREAMS}
+    if by_id[_D.EXPECTED_STREAM_UNIVERSE].status is DecisionStatus.APPROVED and not governed <= _universe(by_id, d.value):
+        raise DecisionRecordError(f"{d.value}: both governed keys must be approved expected streams")
+    roles_entry = by_id[_D.LOCATION_ROLE_ASSIGNMENTS]
     if state == "CONFIRMED_ALIAS":
         _keys(res, {"state", "canonical_location"}, d.value)
         if _stream_key(res.get("canonical_location"), f"{d.value}: canonical_location") not in governed:
             raise DecisionRecordError(f"{d.value}: the canonical key must be one of the two governed keys")
+        if roles_entry.status is DecisionStatus.APPROVED and isinstance(roles_entry.resolution, Mapping):
+            roles = {tuple(a["stream"]): a["role"] for a in roles_entry.resolution.get("assignments", ())
+                     if isinstance(a, Mapping) and isinstance(a.get("stream"), tuple)}
+            if len({roles.get(k) for k in governed}) != 1:
+                raise DecisionRecordError(f"{d.value}: aliased keys must carry the same approved role")
     else:
         _keys(res, {"state"}, d.value)
         roles = by_id[_D.LOCATION_ROLE_ASSIGNMENTS]

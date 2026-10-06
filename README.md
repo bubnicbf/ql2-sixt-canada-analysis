@@ -434,9 +434,12 @@ all use this one resolution; there is no second stream list. The contract is
   `v<N>.toml` with its governance reference); committed versions are never
   edited.
 - **Source identity is not analytical identity:** Vancouver `Downtown` and
-  Vancouver `Thurlow` are two separate expected *source* streams. Whether they
-  are one physical location is the separate `VANCOUVER_LOCATION_IDENTITY`
-  decision (still `PROPOSED`), applied only through `VANCOUVER_LOCATION_POLICY`.
+  Vancouver `Thurlow` are two separate expected *source* streams, each still
+  required exactly. That they are one analytical location is the separate,
+  approved `VANCOUVER_LOCATION_IDENTITY` decision (`CONFIRMED_ALIAS`, canonical
+  `Vancouver / Downtown`; see "Location roles, comparison pairs and the
+  Vancouver alias"), applied only through `VANCOUVER_LOCATION_POLICY`, after
+  and separately from source-key validation.
 
 `INVESTIGATED_LOCATION_STREAM` (`Calgary / Downtown`) and
 `COMPARED_LOCATION_STREAMS` (the two Vancouver streams) are designations of
@@ -1012,6 +1015,81 @@ validate_confirmed_location_alias(jobs_df, cars_df)   # raises LocationAliasNotC
   paired-capture and price comparison exports are ignored by Git and must
   not be committed.
 
+## Location roles, comparison pairs and the Vancouver alias
+
+Authority record v4 approves three business and identity decisions
+([governance reference](docs/decisions/governance/location-roles-and-identity-governance-2026-10-06.md));
+`ql2_sixt_canada_analysis.location_authority` reads them from the current
+record (no hard-coded table) and validates them against the exhaustive
+source contract and the identity policy, fail closed:
+
+| Approved source stream | Role |
+| --- | --- |
+| `Calgary / Downtown` | DOWNTOWN |
+| `Calgary / Int Airport` | AIRPORT |
+| `Toronto / Downtown` | DOWNTOWN |
+| `Toronto / Int Airport` | AIRPORT |
+| `Vancouver / Downtown` | DOWNTOWN |
+| `Vancouver / Int Airport` | AIRPORT |
+| `Vancouver / Thurlow` | DOWNTOWN |
+
+Approved comparison pairs (airport versus downtown, on canonical keys):
+`Calgary / Int Airport` versus `Calgary / Downtown`, `Toronto / Int Airport`
+versus `Toronto / Downtown`, and `Vancouver / Int Airport` versus the
+canonical `Vancouver / Downtown`.
+
+- **Roles** (`role_map_from_record`): exactly one of AIRPORT, DOWNTOWN or
+  OTHER for every approved source key, compared exactly (no case, whitespace
+  or punctuation folding); a missing, extra, duplicated, invalid or
+  contradictory assignment (aliases with different roles) blocks
+  (`branch_roles_not_exact`); no approved map is
+  `branch_role_authority_unavailable`.
+- **Comparison pairs** (`comparison_pairs_from_record`): each pair stays
+  within one city, compares one AIRPORT with one DOWNTOWN key of the source
+  contract, uses canonical keys only and resolves to two different canonical
+  locations; cross-city, airport-to-airport, downtown-to-downtown, OTHER,
+  self, duplicated or reversed pairs, unknown keys, a second pair through
+  `Vancouver / Thurlow` and Vancouver `Downtown` versus `Thurlow` are all
+  rejected (`comparison_pairs_invalid`); no approved set is
+  `comparison_pair_authority_unavailable`; a pair touching the governed
+  Vancouver keys without a resolved identity is
+  `comparison_pair_identity_unresolved`. Pairs are never generated from rows
+  or names. The project comparison definitions are these three, so
+  `Vancouver / Thurlow` never yields an independent comparison.
+- **Vancouver alias** (`vancouver_policy_from_record` builds the existing
+  `LocationIdentityPolicy` - one alias mechanism): `CONFIRMED_ALIAS`,
+  governed keys `Vancouver / Downtown` and `Vancouver / Thurlow`, canonical
+  key `Vancouver / Downtown`, with the collection-owner authority and its
+  governance reference. `apply_location_policy` keeps the **raw source key**
+  of every row (`source_keys`, used for coverage and audit) and exposes a
+  separate **canonical analytical key** (`analytical_keys`, used for
+  analytical grouping); both Vancouver source keys map to
+  `Vancouver / Downtown`, nothing else changes, and no row is dropped.
+  Independent comparison of the two aliases is never permitted.
+- **Source coverage stays separate:** both raw Vancouver streams remain
+  required by the exhaustive source contract; one never covers the other. A
+  confirmed alias whose two raw streams are not both present exactly blocks
+  pricing (`governed_source_stream_missing`), so canonicalization cannot hide
+  a missing stream. A canonical key outside the governed keys (another city,
+  `Vancouver / Int Airport`) is rejected by the record validator and refused
+  by the scope rule; a mapping defect or contradicting authoritative identity
+  metadata still blocks (`identity_evidence_conflicts_with_policy`).
+- **Behaviour is not identity:** duplicate-looking or distinct-looking offer
+  behaviour is diagnostic only and never sets, changes or overrides the
+  approved state.
+- **Analytical population:** merging the two aliased raw streams into one
+  canonical location raises a question the data plan does not answer - how
+  their offers combine into one pricing population (they may carry the same
+  offers). It stays an explicit blocker,
+  `canonical_offer_combination_unresolved`; no offer is dropped, deduplicated
+  or averaged. Valid-offer and semantic-duplicate controls are unchanged.
+
+`assess_pricing_readiness` takes the `LocationAuthorityReport`
+(`location_authority`, from `current_location_authority()` or
+`location_authority_from_record`) as a required argument and re-validates its
+roles and pairs under the gate's own identity policy and source contract
+(`roles_pairs_policy_mismatch`, `roles_pairs_contract_mismatch` otherwise).
+
 ## Vancouver location policy and pricing readiness
 
 **Behavioural evidence is not identity authority.** Identical offers, full
@@ -1019,11 +1097,14 @@ temporal overlap, similar names or a `LIKELY_DUPLICATE_STREAMS` /
 `LIKELY_DISTINCT_STREAMS` comparison can justify an investigation, but never
 decide whether the two Vancouver labels are one analytical location.
 That decision is the authority-backed `VANCOUVER_LOCATION_POLICY`
-(`LocationIdentityPolicy` in `schemas.py`), with three states:
+(`LocationIdentityPolicy` in `schemas.py`), built only from the approved
+`VANCOUVER_LOCATION_IDENTITY` decision of the current authority record - in
+record v4 `CONFIRMED_ALIAS` with canonical `Vancouver / Downtown` - with three
+states:
 
 | State | Meaning | Analysis allowed |
 | --- | --- | --- |
-| `UNRESOLVED` (**default**) | No sufficient authoritative decision exists. | Neither independent comparison nor merging. Pricing is blocked. |
+| `UNRESOLVED` (without an approved decision) | No sufficient authoritative decision exists. | Neither independent comparison nor merging. Pricing is blocked. |
 | `CONFIRMED_ALIAS` | An authority established both labels are one analytical location. | Only through the approved `canonical_location`; never as two separate locations. |
 | `CONFIRMED_DISTINCT` | An authority established they are distinct analytical locations. | Independent comparison, subject to every other gate. |
 
@@ -1219,8 +1300,10 @@ a valid one-to-many relationship, trusted temporal fields, a stable,
 fully assessed vehicle population, an available and valid authoritative
 collection schedule with `COMPLETE` time coverage for every configured
 expected stream, a validated trusted job-detail join (no
-`join_construction_failed` or other join blocker) and an authority-sufficient
-location policy - and nothing else blocking.
+`join_construction_failed` or other join blocker), an approved exact role map
+and valid comparison pairs, an authority-sufficient location policy (with both
+governed raw streams present) and an approved rule for combining aliased
+streams' offers - and nothing else blocking.
 
 **Remaining blockers (current real-data baseline):** the observed source
 spellings do not match the approved keys (`expected_pairs_missing`,
@@ -1229,19 +1312,15 @@ spellings do not match the approved keys (`expected_pairs_missing`,
 (`collection_schedule_unavailable`, `scheduled_coverage_incomplete`) and the
 one Calgary Downtown capture gap that only a schedule or an approved exception
 could explain; untrusted temporal fields (`temporal_fields_untrusted`); the
-unresolved Vancouver identity (`vancouver_policy_unresolved`); and the plan
-prerequisites without authority (location roles and comparison pairs,
-rental-date rules). `expected_stream_authority_unavailable` and
-`expected_stream_universe_not_exhaustive` are cleared by the approved
-revision 3. The dataset is **not** pricing ready.
-
-**Still required:** an authoritative statement - from the supplier, the
-collection owner or the business - of whether the two Vancouver labels are
-the same pickup location (with the approved canonical key - one of the two
-governed Vancouver keys) or distinct
-locations, recorded as `LocationPolicyAuthority`. Until then no Vancouver
-pricing conclusion or airport-versus-downtown comparison involving these
-labels may proceed.
+raw Vancouver streams the confirmed alias governs are not present with their
+approved spelling (`governed_source_stream_missing`); the unresolved
+combination of the aliased Vancouver streams' offers
+(`canonical_offer_combination_unresolved`); and the rental-date rules (plan
+gap). `expected_stream_authority_unavailable` and
+`expected_stream_universe_not_exhaustive` are cleared by revision 3;
+`branch_role_authority_unavailable`, `comparison_pair_authority_unavailable`
+and `vancouver_policy_unresolved` are cleared by revision 4. The dataset is
+**not** pricing ready.
 
 ### Sanitized pricing-readiness baseline
 
@@ -1250,9 +1329,12 @@ runs the same assessments as the ingestion notebook on the real files and
 prints a sanitized Markdown baseline (`pricing_baseline.py`: a reporting
 layer only - it never re-decides readiness). It separates **active
 blockers** (the exact typed values the existing reports emitted) from
-**plan-level gaps** (`PlanReadinessGap`: no airport/downtown role map, no
-pickup/return-date rules - neither a `PricingBlocker`; the expected-stream
-universe is a central blocker, not a gap), reports the approved contract
+**plan-level gaps** (`PlanReadinessGap`: no pickup/return-date rules - not a
+`PricingBlocker`; the expected-stream universe, the role map and the
+comparison pairs are central blockers, not gaps), reports the location
+authority in aggregate (role-map and pair statuses, streams per role, the
+approved pairs on canonical keys, the Vancouver policy state and canonical
+key), reports the approved contract
 (authority status, `EXHAUSTIVE` mode, record version and the seven approved
 keys) and the observed population separately - the observed population as
 counts only (exact matches, unexpected streams, spelling variants, approved
@@ -1263,10 +1345,8 @@ continuity of every observed stream, so a partial observed stream stays
 visible without printing its source value. The investigated approved
 stream's continuity is reported in aggregate only. Serialization
 is fail closed: only counts, booleans, snake-case codes and digit-free
-location labels are accepted. Plan gaps close only on sufficient,
-authority-backed inputs: the role-map gap needs authority provenance
-(`location_role_authority`) and a typed `LocationRole` for every
-expected and observed stream; the rental-period gap needs
+location labels are accepted. The plan gap closes only on sufficient,
+authority-backed inputs: the rental-period gap needs
 `rental_period_rule_authority` plus `approved_rental_date_agreements` from the
 authority decision record that give each detail rental-date field
 (`cars.job_pickup_date`, `cars.job_return_date`, `cars.pickup_date`,
@@ -1283,16 +1363,18 @@ atomic decision per `DecisionId`, in the versioned record
 (`authority_decisions.py`). Revision 1 (`v1.toml`, schema 1, kept unchanged
 as history) marked all 22 decisions `PROPOSED`. Revision 2 (`v2.toml`,
 schema 2, unchanged) approved the four job-identifier decisions on
-collection-owner authority. The current revision 3 (`v3.toml`, schema 2,
-`CURRENT_RECORD_PATH`) keeps those four and approves the exhaustive
+collection-owner authority. Revision 3 (`v3.toml`, schema 2,
+`CURRENT_RECORD_PATH` until revision 4) keeps those four and approves the exhaustive
 seven-stream universe and its exact source spellings (collection owner and
-business owner; collection owner), leaving the other 16 `PROPOSED` and
+business owner; collection owner). The current revision 4 (`v4.toml`)
+additionally approves the location roles and comparison pairs (business
+owner) and the Vancouver `CONFIRMED_ALIAS` (collection owner), leaving the other 13 `PROPOSED` and
 blocking on external input; raw-data observations, behavioural analyses, repository notes and
 review notes remain non-authoritative evidence only. The questions still to
 send are in
 [`authority_request_checklist.md`](docs/decisions/pricing_authorities/authority_request_checklist.md).
 Validate a revision with
-`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v3.toml`
+`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v4.toml`
 (sanitized summary; non-zero exit when invalid). The baseline's
 `location_role_authority` and `rental_period_rule_authority` take the
 domain-neutral `AuthorityReference`, and `baseline_authority_inputs(record)`
@@ -1300,7 +1382,8 @@ passes on APPROVED decisions only, so a PROPOSED record clears nothing.
 Approved decisions are implemented in separate, tested changes: the
 job-identifier approvals by `job_linkage` (`job_linkage_policy_from_record`
 builds its policy only when all four are approved and consistent), the
-expected-stream approvals by `expected_stream_contract`.
+expected-stream approvals by `expected_stream_contract`, the location roles,
+pairs and Vancouver alias by `location_authority`.
 
 ## Vehicle-attribute stability
 

@@ -20,7 +20,6 @@ from test_readiness import DISTINCT, GATES, STABLE, scheduled_coverage, schedule
 from ql2_sixt_canada_analysis import pricing_baseline as pb
 from ql2_sixt_canada_analysis.authority_decisions import AuthorityKind, AuthorityReference
 from ql2_sixt_canada_analysis.pricing_baseline import (
-    LocationRole,
     BaselineInputError,
     ContinuityFinding,
     PlanReadinessGap as G,
@@ -81,7 +80,7 @@ def test_active_blockers_are_the_typed_report_values():
     sub = dict(baseline.subordinate_blockers)
     assert sub["scheduled_coverage"] == tuple(b.value for b in pricing.scheduled_coverage.blocking_reasons)
     assert sub["trusted_join"] == ("trusted_join_assessment_missing",)
-    assert sub["location_policy"] == ("vancouver_policy_unresolved",)
+    assert sub["location_policy"] == tuple(b.value for b in pricing.location_policy.blocking_reasons)
     assert ("collection_schedule", "unavailable") in baseline.statuses
     assert not baseline.pricing_ready
 
@@ -103,7 +102,7 @@ def test_active_blockers_and_plan_gaps_are_separate():
     assert not gap_values & set(baseline.pricing_blockers)
     assert not any(gap_values & set(codes) for _, codes in baseline.subordinate_blockers)
     assert not gap_values & {b.value for b in B}                  # gaps are not PricingBlocker values
-    assert baseline.plan_gaps == (G.LOCATION_ROLE_MAP_UNAVAILABLE, G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE)
+    assert baseline.plan_gaps == (G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE,)
     assert not any("exhaustive" in g.value for g in G)     # exhaustiveness is a central blocker, not a gap
 
 
@@ -127,46 +126,13 @@ AUTHORITY = AuthorityReference(kind=AuthorityKind.BUSINESS_OWNER, source="SYNTH-
                                reference="SYNTH-DECISION-003")
 
 
-def full_role_map(baseline, cars):  # type: ignore[no-untyped-def]
-    observed = location_pair_evidence(cars, COV).loc[:, list(COV.location_columns)]   # in memory only
-    keys = set(baseline.expected_population.keys) | set(map(tuple, observed.itertuples(index=False)))
-    return {k: LocationRole.DOWNTOWN for k in sorted(keys)}
-
-
-def test_missing_role_map_is_a_plan_gap():
-    assert G.LOCATION_ROLE_MAP_UNAVAILABLE in synth_baseline().plan_gaps
-
-
-def test_role_map_gap_closes_only_with_complete_typed_authority_backed_roles():
-    j, c = healthy()
-    # One extra observed (not expected) stream, so expected-only maps are incomplete.
-    c = pd.concat([c, c.iloc[[0]].assign(**{COV.label_column: "SYNTH Airport"})], ignore_index=True).astype(
-        dict(REL.detail_definition.identifier_dtypes))
-    complete = full_role_map(project_baseline(cars=c), c)
-    assert len(complete) == 4
-    one_key = dict(list(complete.items())[:1])
-
-    def gaps(**kwargs):  # type: ignore[no-untyped-def]
-        pricing = assess_pricing_readiness(location_policy=assess_location_policy(),
-                                           **PROJECT_GATES(project_completeness(j, c)))
-        return build_pricing_baseline(pricing=pricing, jobs=j, cars=c, temporal=None, vehicle_stability=STABLE,
-                                      **kwargs).plan_gaps
-
-    still_open = [
-        dict(location_role_map=complete),                                            # no authority
-        dict(location_role_map=one_key, location_role_authority=AUTHORITY),           # partial map
-        dict(location_role_map={k: "SYNTH-ROLE" for k in complete}, location_role_authority=AUTHORITY),
-        dict(location_role_map={k: "airport" for k in complete}, location_role_authority=AUTHORITY),  # untyped
-        dict(location_role_map={**complete, ("SYNTH",): LocationRole.AIRPORT}, location_role_authority=AUTHORITY),
-        dict(location_role_map={}, location_role_authority=AUTHORITY),
-        dict(location_role_map=complete, location_role_authority="SYNTH-AUTHORITY"),
-    ]
-    for kwargs in still_open:
-        assert G.LOCATION_ROLE_MAP_UNAVAILABLE in gaps(**kwargs), kwargs
-    # A map covering the expected streams only misses observed ones: still a gap.
-    expected_only = {k: LocationRole.DOWNTOWN for k in COV.expected_locations}
-    assert G.LOCATION_ROLE_MAP_UNAVAILABLE in gaps(location_role_map=expected_only, location_role_authority=AUTHORITY)
-    assert G.LOCATION_ROLE_MAP_UNAVAILABLE not in gaps(location_role_map=complete, location_role_authority=AUTHORITY)
+def test_role_map_is_a_central_gate_not_a_plan_gap():
+    assert not any("role" in g.value for g in G) and tuple(G) == (G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE,)
+    missing = synth_baseline(pricing=synth_pricing(location_authority=None))
+    assert {"branch_role_authority_unavailable", "comparison_pair_authority_unavailable"} <= set(
+        missing.pricing_blockers)
+    assert dict(missing.subordinate_blockers)["location_authority"] == (
+        "branch_role_authority_unavailable", "comparison_pair_authority_unavailable")
 
 
 J, C_ = DatasetKey.JOBS, DatasetKey.CARS

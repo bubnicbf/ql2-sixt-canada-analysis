@@ -11,11 +11,20 @@ re-deciding anything. It has two strictly separate parts:
   booleans and no new readiness rule is applied.
 * **Plan-level gaps** (:class:`PlanReadinessGap`) - prerequisites of the
   analysis plan that the central pricing gate does **not** model as
-  ``PricingBlocker`` values (no airport/downtown role map, no rental-period
-  date rules). They are derived from configuration only and are never
-  presented as active blockers. (The exhaustive expected-stream universe is a
-  central blocker - ``expected_stream_authority_unavailable`` /
-  ``expected_stream_universe_not_exhaustive`` - not a plan gap.)
+  ``PricingBlocker`` values (now only: no rental-period date rules). They are
+  derived from configuration only and are never presented as active
+  blockers. (The exhaustive expected-stream universe, the airport/downtown
+  role map and the comparison pairs are central blockers - for example
+  ``expected_stream_authority_unavailable``,
+  ``branch_role_authority_unavailable``,
+  ``comparison_pair_authority_unavailable`` - not plan gaps.)
+
+The location authority (:mod:`~ql2_sixt_canada_analysis.location_authority`:
+approved roles, comparison pairs and the Vancouver identity policy) is
+reported as aggregate statuses: decision statuses, whether the role map is
+exact, the number of streams per role, whether the pairs are valid, the
+approved pairs on canonical keys (approved configuration), the Vancouver
+policy state and its canonical key.
 
 Stream populations are reported separately. The configured expected
 population is the authority-backed source-stream contract
@@ -94,7 +103,7 @@ __all__ = [
     "ApprovedDateAgreement",
     "baseline_authority_inputs",
     "rental_date_fields",
-    "LocationRole",
+    "LocationAuthoritySummary",
     "BaselineInputError",
     "ContinuityFinding",
     "PlanReadinessGap",
@@ -149,12 +158,7 @@ def baseline_authority_inputs(
     """
     if not isinstance(record, AuthorityDecisionRecord):
         raise BaselineInputError("a validated AuthorityDecisionRecord is required")
-    inputs: dict[str, object] = dict(location_role_map=None, location_role_authority=None,
-                                     rental_period_rule_authority=None, approved_rental_date_agreements=None)
-    roles = record.approved_resolution(DecisionId.LOCATION_ROLE_ASSIGNMENTS)
-    if roles is not None:
-        inputs["location_role_map"] = {tuple(a["stream"]): LocationRole(a["role"].lower()) for a in roles["assignments"]}
-        inputs["location_role_authority"] = record.approved_authority(DecisionId.LOCATION_ROLE_ASSIGNMENTS)
+    inputs: dict[str, object] = dict(rental_period_rule_authority=None, approved_rental_date_agreements=None)
     agreements = record.approved_resolution(DecisionId.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS)
     validity = record.approved_resolution(DecisionId.RENTAL_DATE_VALIDITY)
     if agreements is not None and validity is not None:
@@ -179,24 +183,13 @@ class UnsafeBaselineValueError(ValueError):
     """A value outside the sanitized vocabulary would be serialized (message holds no value)."""
 
 
-class LocationRole(StrEnum):
-    """The only roles a location-role map may assign (an allowlist)."""
-
-    AIRPORT = "airport"
-    DOWNTOWN = "downtown"
-    OTHER = "other"
-
-
 class PlanReadinessGap(StrEnum):
     """Plan prerequisites NOT modeled as ``PricingBlocker`` values (never active blockers)."""
 
-    LOCATION_ROLE_MAP_UNAVAILABLE = "airport_downtown_role_map_unavailable"
     RENTAL_PERIOD_DATE_RULES_UNAVAILABLE = "rental_period_date_rules_unavailable"
 
 
 _GAP_TEXT = {
-    PlanReadinessGap.LOCATION_ROLE_MAP_UNAVAILABLE:
-        "No authoritative airport/downtown role map is configured; central readiness does not check roles.",
     PlanReadinessGap.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE:
         "Pickup/return dates have no temporal-contract rules; central readiness does not check them.",
 }
@@ -270,6 +263,23 @@ class ContinuityFinding:
 
 
 @dataclass(frozen=True, slots=True)
+class LocationAuthoritySummary:
+    """Aggregate location authority: statuses, counts and approved canonical keys only."""
+
+    role_map_status: str            # approved | not_approved | record_unavailable | report_missing
+    roles_exact: bool
+    airport_streams: int
+    downtown_streams: int
+    other_streams: int
+    comparison_pair_status: str
+    comparison_pairs_valid: bool
+    approved_pair_count: int
+    vancouver_policy_state: str
+    keys: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]   # approved pairs (airport, canonical downtown)
+    stream: tuple[str, ...] | None                                # Vancouver canonical key (approved configuration)
+
+
+@dataclass(frozen=True, slots=True)
 class PricingReadinessBaseline:
     """Sanitized baseline: active typed blockers, plan gaps, populations, continuity."""
 
@@ -284,6 +294,7 @@ class PricingReadinessBaseline:
     expected_stream_health: tuple[StreamHealth, ...] = ()
     observed_stream_health: tuple[ObservedStreamHealth, ...] = ()
     authority_record_version: int | None = None
+    location_authority: LocationAuthoritySummary | None = None
 
     def to_dict(self) -> dict:
         """Plain, sanitized structure; raises :class:`UnsafeBaselineValueError` on anything unsafe."""
@@ -304,8 +315,6 @@ def build_pricing_baseline(
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
     temporal_contract: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
     investigated_stream: tuple[str, ...] = INVESTIGATED_LOCATION_STREAM,
-    location_role_map: Mapping[tuple[str, ...], LocationRole] | None = None,
-    location_role_authority: AuthorityReference | None = None,
     rental_period_rule_authority: AuthorityReference | None = None,
     approved_rental_date_agreements: tuple[ApprovedDateAgreement, ...] | None = None,
 ) -> PricingReadinessBaseline:
@@ -313,10 +322,6 @@ def build_pricing_baseline(
 
     Plan gaps close only on sufficient, authority-backed evidence (fail closed):
 
-    * the role-map gap closes only with ``location_role_authority`` and a map
-      assigning a typed :class:`LocationRole` to **every** configured expected
-      and observed stream (partial maps, untyped roles or malformed keys keep
-      it open);
     * the rental-period gap closes only with ``rental_period_rule_authority``
       and ``approved_rental_date_agreements`` (from the authority decision
       record) that give **every** detail rental-date field
@@ -369,8 +374,7 @@ def build_pricing_baseline(
         pricing_blockers=tuple(dict.fromkeys(b.value for b in pricing.blocking_reasons)),
         subordinate_blockers=subordinate,
         statuses=statuses,
-        plan_gaps=_plan_gaps(coverage, relationship, temporal_contract, cars, location_role_map,
-                             location_role_authority, rental_period_rule_authority,
+        plan_gaps=_plan_gaps(relationship, temporal_contract, rental_period_rule_authority,
                              approved_rental_date_agreements),
         expected_population=StreamPopulation(
             population="configured_expected",
@@ -385,7 +389,29 @@ def build_pricing_baseline(
         expected_stream_health=_expected_health(pricing, expected_keys),
         observed_stream_health=_observed_health(jobs, cars, coverage, relationship, observed_keys, expected_keys),
         authority_record_version=_record_version(contract),
+        location_authority=_location_summary(pricing),
     )
+
+
+def _location_summary(pricing: PricingReadinessReport) -> LocationAuthoritySummary:
+    report = pricing.location_authority
+    policy = pricing.location_policy
+    canonical = policy.scope.canonical_location if policy.scope is not None else None
+    if report is None:
+        return LocationAuthoritySummary(
+            role_map_status="report_missing", roles_exact=False, airport_streams=0, downtown_streams=0,
+            other_streams=0, comparison_pair_status="report_missing", comparison_pairs_valid=False,
+            approved_pair_count=0, vancouver_policy_state=policy.state.value, keys=(),
+            stream=tuple(canonical) if isinstance(canonical, tuple) else None)
+    counts = report.role_counts
+    return LocationAuthoritySummary(
+        role_map_status=report.role_map.status.value, roles_exact=report.roles_exact,
+        airport_streams=counts.get("AIRPORT", 0), downtown_streams=counts.get("DOWNTOWN", 0),
+        other_streams=counts.get("OTHER", 0), comparison_pair_status=report.pair_set.status.value,
+        comparison_pairs_valid=report.pairs_valid, approved_pair_count=len(report.effective_pairs),
+        vancouver_policy_state=policy.state.value,
+        keys=tuple((tuple(p.airport), tuple(p.downtown)) for p in report.effective_pairs),
+        stream=tuple(canonical) if isinstance(canonical, tuple) else None)
 
 
 def _record_version(contract: ExpectedStreamContract | None) -> int | None:
@@ -502,6 +528,14 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
         statuses.append(("temporal_fields_trusted", "true" if temporal.is_valid else "false"))
         blockers.append(("temporal", _codes(temporal.violations)))
         blockers.append(("temporal_unavailable_rules", _codes(temporal.unavailable_rules)))
+    authority = pricing.location_authority
+    if authority is None:
+        blockers.append(("location_authority", ("branch_role_authority_unavailable",
+                                                "comparison_pair_authority_unavailable")))
+    else:
+        statuses.append(("location_role_map", authority.role_map.status.value))
+        statuses.append(("comparison_pairs", authority.pair_set.status.value))
+        blockers.append(("location_authority", _codes(authority.blocking_reasons)))
     policy = pricing.location_policy
     statuses.append(("location_policy_state", policy.state.value))
     blockers.append(("location_policy", _codes(policy.blocking_reasons)))
@@ -509,30 +543,13 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
     return tuple(blockers), tuple(statuses)
 
 
-def _plan_gaps(coverage: LocationCoverageDefinition, relationship: JobDetailRelationshipDefinition,
-               temporal_contract: TemporalReconciliationDefinition, cars: pd.DataFrame, role_map: object,
-               role_authority: object, rental_authority: object,
-               approved_agreements: object) -> tuple[PlanReadinessGap, ...]:
+def _plan_gaps(relationship: JobDetailRelationshipDefinition, temporal_contract: TemporalReconciliationDefinition,
+               rental_authority: object, approved_agreements: object) -> tuple[PlanReadinessGap, ...]:
     G = PlanReadinessGap
     gaps = []
-    required_keys = {tuple(k) for k in (coverage.expected_locations or ())} | set(_observed_keys(cars, coverage))
-    if not _role_map_sufficient(role_map, role_authority, required_keys, len(coverage.location_columns)):
-        gaps.append(G.LOCATION_ROLE_MAP_UNAVAILABLE)
     if not _rental_rules_sufficient(temporal_contract, relationship, rental_authority, approved_agreements):
         gaps.append(G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE)
     return tuple(g for g in G if g in gaps)
-
-
-def _role_map_sufficient(role_map: object, authority: object, required: set, width: int) -> bool:
-    """Authority-backed, typed roles for every expected and observed stream; anything less is a gap."""
-    if not isinstance(authority, AuthorityReference) or not isinstance(role_map, Mapping) or not role_map:
-        return False
-    for key, role in role_map.items():
-        if not (isinstance(key, tuple) and len(key) == width and all(isinstance(v, str) and v for v in key)):
-            return False
-        if not isinstance(role, LocationRole):
-            return False
-    return required <= set(role_map)
 
 
 def _rental_rules_sufficient(contract: object, relationship: JobDetailRelationshipDefinition, authority: object,
@@ -640,7 +657,7 @@ def _sanitize(value: object, where: str):  # type: ignore[no-untyped-def]
 
 
 _SERIALIZABLE = (PricingReadinessBaseline, StreamPopulation, ObservedPopulation, StreamHealth, ObservedStreamHealth,
-                 ContinuityFinding)
+                 ContinuityFinding, LocationAuthoritySummary)
 
 
 def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str, date: str) -> str:
@@ -677,6 +694,17 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
               f"- Of which spelling variants of approved keys: {o['spelling_variant_count']}",
               f"- Approved keys with no exact observed match: {o['expected_missing_count']}"]
     lines += [f"- Observed approved key: {key(k)}" for k in o["keys"]]
+    la = d["location_authority"]
+    if la is not None:
+        canonical = key(la["stream"]) if la["stream"] else "none"
+        lines += ["", "### Location authority (roles, comparison pairs, Vancouver identity)", "",
+                  f"- Role map: `{la['role_map_status']}`, exact for every approved stream: {la['roles_exact']} "
+                  f"(AIRPORT {la['airport_streams']}, DOWNTOWN {la['downtown_streams']}, OTHER {la['other_streams']}).",
+                  f"- Comparison pairs: `{la['comparison_pair_status']}`, valid: {la['comparison_pairs_valid']}, "
+                  f"approved within-city pairs on canonical keys: {la['approved_pair_count']}."]
+        lines += [f"  - {key(a)} versus {key(dn)}" for a, dn in la["keys"]]
+        lines += [f"- Vancouver identity policy: `{la['vancouver_policy_state']}`; canonical location: {canonical}. "
+                  "Both raw Vancouver source streams stay separately required by the source contract."]
     lines += ["", "### Expected stream health (per approved stream)", "",
               "| Stream | Status | Continuity | Time coverage |", "| --- | --- | --- | --- |"]
     lines += [f"| {key(h['stream'])} | `{h['stream_status']}` | `{h['continuity']}` | `{h['time_coverage']}` |"
@@ -723,6 +751,8 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         load_raw_datasets, remove_blank_rows_from_raw_datasets, validate_raw_dataset_identifier_dtypes,
     )
     from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
+    from ql2_sixt_canada_analysis.location_authority import location_authority_from_record
+    from ql2_sixt_canada_analysis.authority_decisions import load_current_decision_record
     from ql2_sixt_canada_analysis.paths import resolve_raw_data_dir
     from ql2_sixt_canada_analysis.relationships import RelationshipPreconditionError
     from ql2_sixt_canada_analysis.stability import VehicleStabilityPreconditionError
@@ -770,7 +800,9 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         one_to_many_contract_valid=bool(relationship is not None and relationship.is_valid),
         temporal_fields_trusted=bool(temporal is not None and temporal.is_valid),
         vehicle_stability=stability, scheduled_coverage=scheduled, job_detail_join=join,
-        job_linkage=linkage.report, expected_stream_contract=contract)
+        job_linkage=linkage.report, expected_stream_contract=contract,
+        location_authority=location_authority_from_record(load_current_decision_record(), contract,
+                                                          VANCOUVER_LOCATION_POLICY))
     return build_pricing_baseline(pricing=pricing, jobs=jobs, cars=cars, temporal=temporal, vehicle_stability=stability,
                                   relationship=rel, temporal_contract=ANALYSIS_TEMPORAL_RECONCILIATION)
 
