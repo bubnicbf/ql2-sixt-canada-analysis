@@ -34,7 +34,12 @@ the policy authority-insufficient, withdraws every permission, is never
 applied to data and blocks pricing with a typed scope blocker.
 
 :func:`assess_pricing_readiness` combines the policy with every existing
-foundational gate. Pricing is ready only when *all* pass; each failure is
+foundational gate, including authority-backed job linkage
+(:mod:`~ql2_sixt_canada_analysis.job_linkage`): a missing linkage report, a
+report that is not valid or one that differs from the report the trusted join
+was assessed with blocks pricing (``job_key_normalization_not_ready``
+plus the linkage blockers by the same value). Valid linkage never bypasses
+another gate. Pricing is ready only when *all* pass; each failure is
 reported as a :class:`PricingBlocker`. The location gate never overrides
 another gate.
 
@@ -49,6 +54,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -77,6 +83,9 @@ from ql2_sixt_canada_analysis.schemas import (
     LocationPolicyState,
     assess_location_policy_scope,
 )
+
+if TYPE_CHECKING:  # imported lazily at run time
+    from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
 
 __all__ = [
     "CompletenessBlocker",
@@ -141,6 +150,22 @@ class PricingBlocker(StrEnum):
     JOIN_CONSTRUCTION_FAILED = "join_construction_failed"
     JOIN_CITY_SCOPE_UNASSIGNABLE = "job_scope_unassignable"
     JOIN_PARENT_DETAIL_CITY_MISMATCH = "parent_detail_scope_mismatch"
+    JOIN_LINKAGE_REPORT_UNAVAILABLE = "job_linkage_report_unavailable"
+    JOIN_LINKAGE_NOT_VALID = "job_linkage_not_valid"
+    JOIN_LINKAGE_KEY_NOT_APPLIED = "job_linkage_key_not_applied"
+    # Authority-backed job linkage (job_linkage), a prerequisite of its own.
+    JOB_IDENTIFIER_NORMALIZATION_MISSING = "job_key_normalization_missing"
+    JOB_IDENTIFIER_NORMALIZATION_NOT_READY = "job_key_normalization_not_ready"
+    JOB_LINKAGE_REPORT_MISMATCH = "job_linkage_report_mismatch"
+    LINKAGE_POLICY_UNAVAILABLE = "job_linkage_policy_unavailable"
+    LINKAGE_PARENT_KEY_INVALID = "parent_linkage_key_invalid"
+    LINKAGE_PARENT_KEY_NOT_UNIQUE = "parent_linkage_key_not_unique"
+    LINKAGE_DETAIL_REFERENCE_MISSING = "detail_job_reference_missing"
+    LINKAGE_DETAIL_REFERENCE_UNMATCHED = "detail_job_reference_unmatched"
+    LINKAGE_DETAIL_REFERENCE_AMBIGUOUS = "detail_job_reference_ambiguous"
+    LINKAGE_COLLISION = "job_linkage_collision"
+    LINKAGE_OFFER_POSITION_MISSING = "offer_position_missing"
+    LINKAGE_OFFER_POSITION_INVALID = "offer_position_invalid"
 
 
 #: Authoritative identity evidence that contradicts *every* resolved policy.
@@ -327,6 +352,8 @@ class PricingReadinessReport:
     scheduled_coverage: ScheduledCoverageReport | None = None
     #: The trusted-join gate (kept for audit; ``None`` = missing).
     job_detail_join: JobDetailJoinReadiness | None = None
+    #: The authority-backed job-linkage report (kept for audit; ``None`` = missing).
+    job_linkage: JobLinkageReport | None = None
 
     @property
     def ready(self) -> bool:
@@ -339,6 +366,10 @@ class PricingReadinessReport:
     @property
     def scheduled_coverage_complete(self) -> bool:
         return self.scheduled_coverage is not None and self.scheduled_coverage.all_streams_complete
+
+    @property
+    def job_identifier_normalization_ready(self) -> bool:
+        return self.job_linkage is not None and self.job_linkage.is_valid
 
     @property
     def trusted_join_ready(self) -> bool:
@@ -451,6 +482,7 @@ def assess_pricing_readiness(
     vehicle_stability: VehicleStabilityReport | None,
     scheduled_coverage: ScheduledCoverageReport | None,
     job_detail_join: JobDetailJoinReadiness | None,
+    job_linkage: JobLinkageReport | None,
 ) -> PricingReadinessReport:
     """Combine every foundational gate with the location policy (all must pass).
 
@@ -469,6 +501,13 @@ def assess_pricing_readiness(
     must be join-ready; every join blocker (including
     ``join_construction_failed``) is propagated with the same value, plus
     ``trusted_join_not_ready``. A non-``None`` joined frame is never evidence.
+    ``job_linkage`` (:func:`~ql2_sixt_canada_analysis.job_linkage.assess_job_linkage`)
+    must be a valid report - the same one the trusted join was assessed with;
+    otherwise it blocks: ``job_key_normalization_missing`` for ``None``, else
+    ``job_key_normalization_not_ready`` plus every linkage blocker by the same
+    value and ``job_linkage_report_mismatch`` when the trusted join was
+    assessed with a different report object. Completeness and keys computed on frames that
+    were not linked under the approved policy are therefore never sufficient.
 
     Gate values must be real booleans; anything else is a ``TypeError`` so a
     missing result can never be read as a pass. ``completeness`` is the
@@ -490,6 +529,10 @@ def assess_pricing_readiness(
         raise TypeError("scheduled_coverage must be a ScheduledCoverageReport or None")
     if job_detail_join is not None and not isinstance(job_detail_join, JobDetailJoinReadiness):
         raise TypeError("job_detail_join must be a JobDetailJoinReadiness or None")
+    from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
+
+    if job_linkage is not None and not isinstance(job_linkage, JobLinkageReport):
+        raise TypeError("job_linkage must be a JobLinkageReport or None")
     gates = (
         (key_contracts_valid, PricingBlocker.KEY_CONTRACTS_INVALID),
         (one_to_many_contract_valid, PricingBlocker.ONE_TO_MANY_INVALID),
@@ -502,10 +545,25 @@ def assess_pricing_readiness(
     reasons.extend(_stability_blockers(vehicle_stability))
     reasons.extend(_scheduled_coverage_blockers(scheduled_coverage, completeness))
     reasons.extend(_join_blockers(job_detail_join))
+    reasons.extend(_linkage_blockers(job_linkage, job_detail_join))
     reasons.extend(location_policy.blocking_reasons)
     return PricingReadinessReport(blocking_reasons=tuple(dict.fromkeys(reasons)), location_policy=location_policy,
                                   completeness=completeness, scheduled_coverage=scheduled_coverage,
-                                  job_detail_join=job_detail_join)
+                                  job_detail_join=job_detail_join, job_linkage=job_linkage)
+
+
+def _linkage_blockers(report: JobLinkageReport | None,
+                      join: JobDetailJoinReadiness | None) -> list[PricingBlocker]:
+    """Job-linkage blockers (central mapping; anything but a valid, consistent report blocks)."""
+    B = PricingBlocker
+    if report is None:
+        return [B.JOB_IDENTIFIER_NORMALIZATION_MISSING]
+    blockers = [B(b.value) for b in report.blocking_reasons]
+    if join is not None and join.job_linkage_report is not report:
+        blockers.append(B.JOB_LINKAGE_REPORT_MISMATCH)
+    if blockers or not report.is_valid:
+        blockers.insert(0, B.JOB_IDENTIFIER_NORMALIZATION_NOT_READY)
+    return blockers
 
 
 def _scheduled_coverage_blockers(report: ScheduledCoverageReport | None,

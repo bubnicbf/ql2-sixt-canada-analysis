@@ -1,5 +1,16 @@
 """Fail-closed readiness for the trusted jobs-to-details analytical join.
 
+The trusted join links jobs and details **only** through the authority-backed
+derived linkage key (:mod:`ql2_sixt_canada_analysis.job_linkage`,
+:data:`~ql2_sixt_canada_analysis.schemas.ANALYSIS_JOB_DETAIL_RELATIONSHIP`).
+A valid :class:`~ql2_sixt_canada_analysis.job_linkage.JobLinkageReport` for the
+same frames is a required prerequisite: a missing report
+(``job_linkage_report_unavailable``), a report that is not valid
+(``job_linkage_not_valid``, plus its own blockers by the same value), or a
+relationship/frames that do not use the derived keys
+(``job_linkage_key_not_applied`` - for example the raw-source relationship)
+withhold the trusted join. Raw ``job_id`` text is never the trusted join key.
+
 A *relationship-valid* join (:func:`~ql2_sixt_canada_analysis.relationships.join_jobs_to_details`)
 is not an analytically trusted one: it can be built while a dataset's
 business key is duplicated or while declared job-level detail counts do not
@@ -47,6 +58,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -59,8 +71,18 @@ from ql2_sixt_canada_analysis.relationships import (
     assess_one_to_many_join,
     join_jobs_to_details,
 )
-from ql2_sixt_canada_analysis.schemas import JOB_DETAIL_RELATIONSHIP, JobDetailRelationshipDefinition
+from ql2_sixt_canada_analysis.schemas import (
+    ANALYSIS_JOB_DETAIL_RELATIONSHIP,
+    JOB_LINKAGE_KEY_COLUMN,
+    OFFER_POSITION_KEY_COLUMN,
+    OFFER_POSITION_KEY_DTYPE,
+    JobDetailRelationshipDefinition,
+)
+from ql2_sixt_canada_analysis.identifiers import is_identifier_dtype
 from ql2_sixt_canada_analysis.unique_keys import UniqueKeyReport, assess_unique_key
+
+if TYPE_CHECKING:  # imported lazily at run time (keeps the record CLI free of import cycles)
+    from ql2_sixt_canada_analysis.job_linkage import JobLinkageBlocker, JobLinkageReport
 
 __all__ = [
     "JobDetailJoinBlocker",
@@ -84,6 +106,9 @@ class JobDetailJoinBlocker(StrEnum):
     JOIN_CONSTRUCTION_FAILED = "join_construction_failed"
     CITY_SCOPE_UNASSIGNABLE = "job_scope_unassignable"
     PARENT_DETAIL_CITY_MISMATCH = "parent_detail_scope_mismatch"
+    JOB_LINKAGE_REPORT_UNAVAILABLE = "job_linkage_report_unavailable"
+    JOB_LINKAGE_NOT_VALID = "job_linkage_not_valid"
+    JOB_LINKAGE_KEY_NOT_APPLIED = "job_linkage_key_not_applied"
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -103,6 +128,10 @@ class JobDetailJoinReadiness:
     _diagnostic: pd.DataFrame | None
     #: City-integrity result (``None`` when the relationship declares no scope invariant).
     city_integrity_report: CityIntegrityReport | None = None
+    #: The job-linkage report the frames were derived under (``None`` = unavailable, which blocks).
+    job_linkage_report: JobLinkageReport | None = None
+    #: Linkage blockers propagated with their own values (categories only).
+    job_linkage_reasons: tuple[JobLinkageBlocker, ...] = ()
 
     def __post_init__(self) -> None:
         # Programmer invariants: a trusted frame exists iff nothing blocks.
@@ -135,6 +164,11 @@ class JobDetailJoinReadiness:
         return self.city_integrity_report is None or self.city_integrity_report.is_valid
 
     @property
+    def job_linkage_valid(self) -> bool:
+        """The derived linkage keys were produced under an approved policy with no blocker."""
+        return self.job_linkage_report is not None and self.job_linkage_report.is_valid
+
+    @property
     def all_reports_available(self) -> bool:
         return JobDetailJoinBlocker.REQUIRED_REPORT_UNAVAILABLE not in self.blocking_reasons
 
@@ -159,7 +193,8 @@ class UntrustedJoinError(Exception):
 
     def __init__(self, readiness: JobDetailJoinReadiness) -> None:
         super().__init__("Trusted jobs-to-details join unavailable: "
-                         + ", ".join(b.value for b in readiness.blocking_reasons) + ".")
+                         + ", ".join(b.value for b in (*readiness.blocking_reasons, *readiness.job_linkage_reasons))
+                         + ".")
         self.readiness = readiness
         self.blocking_reasons = readiness.blocking_reasons
 
@@ -170,10 +205,15 @@ class UntrustedJoinError(Exception):
 def assess_job_detail_join_readiness(
     jobs: pd.DataFrame,
     cars: pd.DataFrame,
-    relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
+    relationship: JobDetailRelationshipDefinition = ANALYSIS_JOB_DETAIL_RELATIONSHIP,
+    *,
+    job_linkage: JobLinkageReport | None,
 ) -> JobDetailJoinReadiness:
     """Assess every join prerequisite on ``jobs``/``cars`` and build the joins.
 
+    ``jobs``/``cars`` are the analysis-stage frames from
+    :func:`~ql2_sixt_canada_analysis.job_linkage.assess_job_linkage` and
+    ``job_linkage`` its report (keyword-only, no default: ``None`` blocks).
     All reports and the join are computed from the same frames in this call
     (no reuse of reports computed elsewhere). Inputs are not modified.
 
@@ -186,7 +226,26 @@ def assess_job_detail_join_readiness(
         raise TypeError("jobs and cars must be pandas DataFrames")
     if not isinstance(relationship, JobDetailRelationshipDefinition):
         raise TypeError(f"expected a JobDetailRelationshipDefinition, got {type(relationship).__name__}")
+    from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
+
+    if job_linkage is not None and not isinstance(job_linkage, JobLinkageReport):
+        raise TypeError("job_linkage must be a JobLinkageReport or None")
     B = JobDetailJoinBlocker
+    linkage_reasons: list[JobDetailJoinBlocker] = []
+    if job_linkage is None:
+        linkage_reasons.append(B.JOB_LINKAGE_REPORT_UNAVAILABLE)
+    elif not job_linkage.is_valid:
+        linkage_reasons.append(B.JOB_LINKAGE_NOT_VALID)
+    if not _linkage_applied(jobs, cars, relationship, job_linkage):
+        linkage_reasons.append(B.JOB_LINKAGE_KEY_NOT_APPLIED)
+    propagated = tuple(job_linkage.blocking_reasons) if job_linkage is not None else ()
+    if not all(c in jobs.columns for c in relationship.parent_definition.unique_key_columns) or not all(
+            c in cars.columns for c in relationship.detail_definition.unique_key_columns):
+        # The derived keys are absent: nothing can be assessed on them (fail closed, never on raw text).
+        return JobDetailJoinReadiness(
+            jobs_key_report=None, details_key_report=None, reconciliation_report=None, relationship_report=None,
+            blocking_reasons=(B.REQUIRED_REPORT_UNAVAILABLE, *dict.fromkeys(linkage_reasons)),
+            _trusted=None, _diagnostic=None, job_linkage_report=job_linkage, job_linkage_reasons=propagated)
     jobs_keys = assess_unique_key(jobs, relationship.parent_definition)
     detail_keys = assess_unique_key(cars, relationship.detail_definition)
     reconciliation = _available(lambda: assess_job_detail_reconciliation(jobs, cars, relationship))
@@ -225,26 +284,44 @@ def assess_job_detail_join_readiness(
         except (ValidatedJoinError, RelationshipPreconditionError):
             reasons.append(B.JOIN_CONSTRUCTION_FAILED)
 
+    reasons.extend(linkage_reasons)
     trusted = joined if not reasons else None
     diagnostic = joined if reasons else None
     return JobDetailJoinReadiness(
         jobs_key_report=jobs_keys, details_key_report=detail_keys, reconciliation_report=reconciliation,
         relationship_report=relation, blocking_reasons=tuple(reasons), _trusted=trusted, _diagnostic=diagnostic,
-        city_integrity_report=city,
+        city_integrity_report=city, job_linkage_report=job_linkage, job_linkage_reasons=propagated,
     )
 
 
 def require_trusted_job_detail_join(
     jobs: pd.DataFrame,
     cars: pd.DataFrame,
-    relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
+    relationship: JobDetailRelationshipDefinition = ANALYSIS_JOB_DETAIL_RELATIONSHIP,
+    *,
+    job_linkage: JobLinkageReport | None,
 ) -> pd.DataFrame:
     """Return the trusted join, or raise :class:`UntrustedJoinError` (never a diagnostic frame)."""
-    readiness = assess_job_detail_join_readiness(jobs, cars, relationship)
+    readiness = assess_job_detail_join_readiness(jobs, cars, relationship, job_linkage=job_linkage)
     trusted = readiness.trusted_jobs_with_details
     if trusted is None:
         raise UntrustedJoinError(readiness)
     return trusted
+
+
+def _linkage_applied(jobs: pd.DataFrame, cars: pd.DataFrame, relationship: JobDetailRelationshipDefinition,
+                     report: JobLinkageReport | None) -> bool:
+    """The relationship links on the derived key and the frames carry the derived columns of ``report``."""
+    if (relationship.parent_key_columns != (JOB_LINKAGE_KEY_COLUMN,)
+            or relationship.detail_key_columns != (JOB_LINKAGE_KEY_COLUMN,)
+            or relationship.detail_definition.unique_key_columns != (JOB_LINKAGE_KEY_COLUMN, OFFER_POSITION_KEY_COLUMN)):
+        return False
+    if JOB_LINKAGE_KEY_COLUMN not in jobs.columns or not {JOB_LINKAGE_KEY_COLUMN, OFFER_POSITION_KEY_COLUMN} <= set(cars.columns):
+        return False
+    if not (is_identifier_dtype(jobs[JOB_LINKAGE_KEY_COLUMN].dtype) and is_identifier_dtype(cars[JOB_LINKAGE_KEY_COLUMN].dtype)
+            and cars[OFFER_POSITION_KEY_COLUMN].dtype == OFFER_POSITION_KEY_DTYPE):
+        return False
+    return report is not None and report.parent_row_count == len(jobs) and report.detail_row_count == len(cars)
 
 
 def _available(assess):  # type: ignore[no-untyped-def]

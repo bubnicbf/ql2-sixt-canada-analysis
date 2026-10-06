@@ -333,6 +333,13 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
     else:
         statuses.append(("collection_schedule", scheduled.schedule_assessment.status.value))
         blockers.append(("scheduled_coverage", _codes(scheduled.blocking_reasons)))
+    linkage = pricing.job_linkage
+    if linkage is None:
+        blockers.append(("job_linkage", ("job_key_normalization_missing",)))
+    else:
+        statuses.append(("job_linkage_policy", linkage.policy_status.value))
+        statuses.append(("job_linkage_valid", "true" if linkage.is_valid else "false"))
+        blockers.append(("job_linkage", _codes(linkage.blocking_reasons)))
     join = pricing.job_detail_join
     if join is None:
         blockers.append(("trusted_join", ("trusted_join_assessment_missing",)))
@@ -536,7 +543,9 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
 def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessBaseline:
     """Run the existing pipeline (the ingestion notebook's calls, in order) and build the baseline."""
     from ql2_sixt_canada_analysis import (  # local import: the package re-exports this module
-        COLLECTION_SCHEDULE, LOCATION_STREAM_COMPARISON, VANCOUVER_LOCATION_POLICY, VEHICLE_ATTRIBUTE_STABILITY,
+        ANALYSIS_DATASET_DEFINITIONS, ANALYSIS_JOB_DETAIL_RELATIONSHIP, ANALYSIS_LOCATION_STREAM_COMPARISON,
+        ANALYSIS_TEMPORAL_RECONCILIATION, COLLECTION_SCHEDULE, VANCOUVER_LOCATION_POLICY, VEHICLE_ATTRIBUTE_STABILITY,
+        assess_job_linkage, load_job_linkage_policy,
         apply_location_policy, assess_city_integrity, assess_collection_schedule, assess_completeness,
         assess_dataset_location_coverage, assess_expected_location_streams, assess_job_detail_join_readiness,
         assess_job_detail_reconciliation, assess_location_policy, assess_one_to_many_join,
@@ -554,27 +563,30 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         except errors:
             return None
 
-    rel, cov = JOB_DETAIL_RELATIONSHIP, EXPECTED_LOCATION_COVERAGE
+    rel, cov = ANALYSIS_JOB_DETAIL_RELATIONSHIP, EXPECTED_LOCATION_COVERAGE
     raw = load_raw_datasets(resolve_raw_data_dir(raw_dir))
     cleaned = remove_blank_rows_from_raw_datasets(raw).cleaned
-    jobs, cars = cleaned.jobs, cleaned.cars
     validate_raw_dataset_identifier_dtypes(cleaned)
-    keys = assess_raw_dataset_unique_keys(cleaned)
-    coverage = assess_dataset_location_coverage(cleaned, cov)
+    # Authority-backed linkage: every analytical step below uses the derived keys.
+    linkage = assess_job_linkage(cleaned.jobs, cleaned.cars, load_job_linkage_policy())
+    analysis = linkage.datasets(cleaned)
+    jobs, cars = analysis.jobs, analysis.cars
+    keys = assess_raw_dataset_unique_keys(analysis, ANALYSIS_DATASET_DEFINITIONS)
+    coverage = assess_dataset_location_coverage(analysis, cov)
     reconciliation = attempt(lambda: assess_job_detail_reconciliation(jobs, cars, rel), RelationshipPreconditionError)
     relationship = attempt(lambda: assess_one_to_many_join(jobs, cars, rel), RelationshipPreconditionError)
     city = assess_city_integrity(jobs, cars, relationship=rel, coverage=cov)
-    join = assess_job_detail_join_readiness(jobs, cars, rel)
+    join = assess_job_detail_join_readiness(jobs, cars, rel, job_linkage=linkage.report)
     streams = assess_expected_location_streams(jobs, cars, coverage=cov, relationship=rel, loaded=raw,
                                                schedule=COLLECTION_SCHEDULE)
     scheduled = assess_scheduled_time_coverage(assess_collection_schedule(COLLECTION_SCHEDULE), streams)
-    temporal = attempt(lambda: assess_temporal_reconciliation(jobs, cars, TEMPORAL_RECONCILIATION),
+    temporal = attempt(lambda: assess_temporal_reconciliation(jobs, cars, ANALYSIS_TEMPORAL_RECONCILIATION),
                        RelationshipPreconditionError)
-    comparison = attempt(lambda: compare_location_streams(jobs, cars, LOCATION_STREAM_COMPARISON),
+    comparison = attempt(lambda: compare_location_streams(jobs, cars, ANALYSIS_LOCATION_STREAM_COMPARISON),
                          RelationshipPreconditionError)
     stability = attempt(lambda: assess_vehicle_attribute_stability(cars, VEHICLE_ATTRIBUTE_STABILITY),
                         VehicleStabilityPreconditionError)
-    completeness = assess_completeness(datasets=cleaned, coverage=coverage, streams=streams,
+    completeness = assess_completeness(datasets=analysis, coverage=coverage, streams=streams,
                                        reconciliation=reconciliation, city_integrity=city)
     policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, comparison,
                                     apply_location_policy(cars, VANCOUVER_LOCATION_POLICY))
@@ -582,8 +594,10 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         location_policy=policy, completeness=completeness, key_contracts_valid=bool(keys.all_valid),
         one_to_many_contract_valid=bool(relationship is not None and relationship.is_valid),
         temporal_fields_trusted=bool(temporal is not None and temporal.is_valid),
-        vehicle_stability=stability, scheduled_coverage=scheduled, job_detail_join=join)
-    return build_pricing_baseline(pricing=pricing, cars=cars, temporal=temporal, vehicle_stability=stability)
+        vehicle_stability=stability, scheduled_coverage=scheduled, job_detail_join=join,
+        job_linkage=linkage.report)
+    return build_pricing_baseline(pricing=pricing, cars=cars, temporal=temporal, vehicle_stability=stability,
+                                  relationship=rel, temporal_contract=ANALYSIS_TEMPORAL_RECONCILIATION)
 
 
 def main(argv: list[str] | None = None) -> int:

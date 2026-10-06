@@ -27,8 +27,19 @@ versions, malformed values and content that looks like source-level data
 whose messages name categories, decision ids and field names only - never
 record values.
 
+Schema versions
+---------------
+Schema 1 (``v1``) expresses the four job-identifier decisions as booleans.
+Schema 2 (``v2`` onwards) replaces those four shapes with an explicit
+opaque-text identifier policy (:data:`OPAQUE_TEXT_IDENTIFIER_POLICY`), a
+narrowly defined legacy decimal-zero repair (:data:`LEGACY_DECIMAL_ZERO_REPAIR`)
+and cross-decision consistency checks; any contradiction fails validation.
+Every other decision has the same shape in both schemas, and each record is
+validated only under its own ``schema_version``.
+
 This module records decisions; it implements none of them. Production
-contracts consume approved decisions only in separate implementation work.
+contracts consume approved decisions only in separate implementation work
+(for example :func:`ql2_sixt_canada_analysis.job_linkage.job_linkage_policy_from_record`).
 
 Validate a revision (prints a sanitized status summary; non-zero exit if invalid)::
 
@@ -57,6 +68,9 @@ from ql2_sixt_canada_analysis.schemas import (
 
 __all__ = [
     "CURRENT_RECORD_PATH",
+    "JOB_IDENTIFIER_DECISIONS",
+    "LEGACY_DECIMAL_ZERO_REPAIR",
+    "OPAQUE_TEXT_IDENTIFIER_POLICY",
     "SUPPORTED_SCHEMA_VERSIONS",
     "AuthorityDecisionRecord",
     "AuthorityKind",
@@ -76,9 +90,9 @@ __all__ = [
 ]
 
 #: Record schema versions this module understands.
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 #: The current committed revision (repository-relative).
-CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v1.toml")
+CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v2.toml")
 
 
 class DecisionRecordError(ValueError):
@@ -346,7 +360,9 @@ def parse_decision_record(data: Mapping[str, object]) -> AuthorityDecisionRecord
     by_id = {d.id: d for d in decisions}
     for entry in decisions:
         if entry.status is DecisionStatus.APPROVED:
-            _RESOLVERS[entry.id](entry.resolution, by_id, entry.id)   # type: ignore[arg-type]
+            _resolver(schema_version, entry.id)(entry.resolution, by_id, entry.id)   # type: ignore[arg-type]
+    if schema_version >= 2:
+        _job_identifier_consistency(by_id)
 
     blocking = tuple(d.id for d in decisions if d.blocking_external_input)
     inputs = data.get("external_inputs")
@@ -768,6 +784,107 @@ _RESOLVERS = {
     _D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS: _rental_agreements,
 }
 assert set(_RESOLVERS) == set(DecisionId) == set(REQUIRED_DECISIONS)
+
+
+# ------------------------------------------- schema 2: job-identifier policy
+
+#: The four job-identifier decisions (their resolution shape depends on the schema).
+JOB_IDENTIFIER_DECISIONS: tuple[DecisionId, ...] = (
+    _D.JOB_ID_DECIMAL_ZERO_EQUIVALENCE, _D.JOB_ID_LEADING_ZERO_SIGNIFICANCE,
+    _D.JOB_ID_INVALID_NUMERIC_REPRESENTATIONS, _D.JOB_ID_RAW_AND_LINKAGE_PRESERVATION,
+)
+
+#: The only schema-2 resolution of ``JOB_ID_INVALID_NUMERIC_REPRESENTATIONS``:
+#: identifiers are opaque text. Any other value contradicts that semantics.
+OPAQUE_TEXT_IDENTIFIER_POLICY: Mapping[str, object] = MappingProxyType({
+    "semantics": "OPAQUE_TEXT",
+    "trim_whitespace": False,
+    "case_fold": False,
+    "numeric_parsing": False,
+    "missing_invalid": True,
+    "whitespace_only_invalid": True,
+    "exact_nonblank_match_preserved": True,
+    "unresolved_representations": "BLOCK_LINKAGE",
+})
+
+#: The only schema-2 resolution of ``JOB_ID_DECIMAL_ZERO_EQUIVALENCE`` that
+#: approves equivalence: a narrowly scoped repair of the historical detail export.
+LEGACY_DECIMAL_ZERO_REPAIR: Mapping[str, object] = MappingProxyType({
+    "equivalence": "LEGACY_DETAIL_EXPORT_REPAIR_ONLY",
+    "cause": "SPREADSHEET_SERIALIZATION_DEFECT",
+    "detail_field": f"{_DETAIL}.job_id",
+    "parent_field": f"{_PARENT}.job_id",
+    "pattern": "ASCII_DIGITS_THEN_SINGLE_DECIMAL_ZERO",
+    "match_order": "EXACT_FIRST",
+    "parent_match": "UNIQUE_REQUIRED",
+    "offer_position": "NONNEGATIVE_INTEGER_WITH_LEGACY_DECIMAL_ZERO",
+})
+_NOT_EQUIVALENT: Mapping[str, object] = MappingProxyType({"equivalence": "NOT_EQUIVALENT"})
+
+
+def _exact(res: Mapping, expected: Mapping[str, object], name: str) -> None:
+    _keys(res, set(expected), name)
+    for key, value in expected.items():
+        actual = res.get(key)
+        if type(actual) is not type(value) or actual != value:
+            raise DecisionRecordError(f"{name}: resolution field {key} contradicts the supported policy")
+
+
+def _v2_decimal_zero(res, by_id, d):  # type: ignore[no-untyped-def]
+    equivalence = _choice(res, "equivalence", {"LEGACY_DETAIL_EXPORT_REPAIR_ONLY", "NOT_EQUIVALENT"}, d.value)
+    _exact(res, LEGACY_DECIMAL_ZERO_REPAIR if equivalence != "NOT_EQUIVALENT" else _NOT_EQUIVALENT, d.value)
+
+
+def _v2_leading_zeros(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"leading_zeros_significant"}, d.value)
+    _flag(res, "leading_zeros_significant", d.value)
+
+
+def _v2_semantics(res, by_id, d):  # type: ignore[no-untyped-def]
+    _exact(res, OPAQUE_TEXT_IDENTIFIER_POLICY, d.value)
+
+
+def _v2_preservation(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"preserve_raw_identifier", "separate_linkage_key"}, d.value)
+    _flag(res, "preserve_raw_identifier", d.value)
+    _flag(res, "separate_linkage_key", d.value)
+
+
+_RESOLVERS_V2 = {
+    _D.JOB_ID_DECIMAL_ZERO_EQUIVALENCE: _v2_decimal_zero,
+    _D.JOB_ID_LEADING_ZERO_SIGNIFICANCE: _v2_leading_zeros,
+    _D.JOB_ID_INVALID_NUMERIC_REPRESENTATIONS: _v2_semantics,
+    _D.JOB_ID_RAW_AND_LINKAGE_PRESERVATION: _v2_preservation,
+}
+assert set(_RESOLVERS_V2) == set(JOB_IDENTIFIER_DECISIONS)
+
+
+def _resolver(schema_version: int, decision: DecisionId):  # type: ignore[no-untyped-def]
+    """Schema-specific resolution validator (schema 1 and 2 shapes never mix)."""
+    if schema_version >= 2 and decision in _RESOLVERS_V2:
+        return _RESOLVERS_V2[decision]
+    return _RESOLVERS[decision]
+
+
+def _job_identifier_consistency(by_id: Mapping) -> None:
+    """Schema 2: approved job-identifier decisions must not contradict each other."""
+    def approved(decision: DecisionId):  # type: ignore[no-untyped-def]
+        entry = by_id[decision]
+        return entry.resolution if entry.status is DecisionStatus.APPROVED else None
+
+    opaque = approved(_D.JOB_ID_INVALID_NUMERIC_REPRESENTATIONS) is not None
+    leading = approved(_D.JOB_ID_LEADING_ZERO_SIGNIFICANCE)
+    preservation = approved(_D.JOB_ID_RAW_AND_LINKAGE_PRESERVATION)
+    repair = approved(_D.JOB_ID_DECIMAL_ZERO_EQUIVALENCE)
+    name = "job identifier decisions"
+    if opaque and leading is not None and leading["leading_zeros_significant"] is not True:
+        raise DecisionRecordError(f"{name}: opaque-text identifiers require significant leading zeros")
+    if opaque and preservation is not None and not (
+            preservation["preserve_raw_identifier"] is True and preservation["separate_linkage_key"] is True):
+        raise DecisionRecordError(f"{name}: opaque-text identifiers require a preserved raw value and a separate key")
+    if (repair is not None and repair["equivalence"] != "NOT_EQUIVALENT" and preservation is not None
+            and preservation["separate_linkage_key"] is not True):
+        raise DecisionRecordError(f"{name}: the legacy repair requires a separate linkage key")
 
 
 # ---------------------------------------------------------------- helpers

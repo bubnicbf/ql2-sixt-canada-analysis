@@ -43,6 +43,21 @@ against the detail rows actually present, and
 :mod:`ql2_sixt_canada_analysis.relationships` validates the one-to-many
 cardinality (jobs = one side, cars = many side) before any join is trusted.
 
+Analysis-stage definitions and authority-backed job linkage
+------------------------------------------------------------
+:data:`DATASET_DEFINITIONS` and :data:`JOB_DETAIL_RELATIONSHIP` describe the
+**raw source files** and compare raw identifier text exactly as read; they are
+never rewritten. Analytical linkage uses the separate analysis-stage
+definitions (:data:`ANALYSIS_DATASET_DEFINITIONS`,
+:data:`ANALYSIS_JOB_DETAIL_RELATIONSHIP`), whose keys are the derived columns
+produced by :mod:`ql2_sixt_canada_analysis.job_linkage` under the approved
+pricing-authority decisions: :data:`JOB_LINKAGE_KEY_COLUMN` (nullable string)
+is the jobs unique key, the details' parent foreign key and the first
+component of the details' unique key, and :data:`OFFER_POSITION_KEY_COLUMN`
+(nullable integer) is the second. The raw ``job_id`` and ``row_index``
+columns stay unchanged next to them. All four are confidential technical
+fields (:data:`CONFIDENTIAL_TECHNICAL_COLUMNS`).
+
 Expected location coverage
 --------------------------
 :data:`EXPECTED_LOCATION_COVERAGE` is the single contract of which locations
@@ -65,7 +80,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import datetime as dt
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from dataclasses import field as dataclass_field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from enum import StrEnum
@@ -75,6 +90,18 @@ from typing import Final
 import pandas as pd
 
 __all__ = [
+    "ANALYSIS_CARS_DEFINITION",
+    "ANALYSIS_DATASET_DEFINITIONS",
+    "ANALYSIS_JOBS_DEFINITION",
+    "ANALYSIS_JOB_DETAIL_RELATIONSHIP",
+    "ANALYSIS_LOCATION_STREAM_COMPARISON",
+    "ANALYSIS_TEMPORAL_RECONCILIATION",
+    "CONFIDENTIAL_TECHNICAL_COLUMNS",
+    "JOB_LINKAGE_KEY_COLUMN",
+    "OFFER_POSITION_KEY_COLUMN",
+    "OFFER_POSITION_KEY_DTYPE",
+    "SOURCE_JOB_IDENTIFIER_COLUMN",
+    "SOURCE_OFFER_POSITION_COLUMN",
     "MINIMUM_DUPLICATE_PAIRED_CAPTURES",
     "VANCOUVER_LOCATION_POLICY",
     "LocationIdentityPolicy",
@@ -127,6 +154,22 @@ __all__ = [
 #: nullable string dtype (``"string"``), whose missing value is ``pd.NA``.
 #: Shared logical identifiers therefore have identical types in both datasets.
 IDENTIFIER_DTYPE: Final[pd.StringDtype] = pd.StringDtype()
+
+#: Raw source column holding the scrape-job identifier (opaque text; both datasets).
+SOURCE_JOB_IDENTIFIER_COLUMN: Final = "job_id"
+#: Raw source column holding an offer's position within its job's result list.
+SOURCE_OFFER_POSITION_COLUMN: Final = "row_index"
+#: Derived analysis-stage job linkage key (never a rewrite of the raw identifier).
+JOB_LINKAGE_KEY_COLUMN: Final = "job_id_linkage_key"
+#: Derived analysis-stage integer offer position.
+OFFER_POSITION_KEY_COLUMN: Final = "row_index_key"
+#: Dtype of :data:`OFFER_POSITION_KEY_COLUMN` (pandas nullable integer, missing = ``pd.NA``).
+OFFER_POSITION_KEY_DTYPE: Final[pd.Int64Dtype] = pd.Int64Dtype()
+#: Confidential technical fields: excluded from product identity, duplicate-offer
+#: inference, vehicle stability and every user-visible output.
+CONFIDENTIAL_TECHNICAL_COLUMNS: Final[tuple[str, ...]] = (
+    SOURCE_JOB_IDENTIFIER_COLUMN, JOB_LINKAGE_KEY_COLUMN, SOURCE_OFFER_POSITION_COLUMN, OFFER_POSITION_KEY_COLUMN,
+)
 
 
 class KeyConfigurationError(ValueError):
@@ -319,10 +362,10 @@ CARS_DEFINITION: Final = DatasetDefinition(
     ),
     # Classification notes (structure only, no source values):
     # * job_id: the parent scrape job's identity, the logical link to jobs.
-    #   In this export it can be serialised upstream in a different textual
-    #   form than on the jobs side (e.g. a float-style suffix). Reading it as a
-    #   string preserves that text verbatim; reconciling the two forms is a
-    #   separate, explicit normalisation step, not part of typing.
+    #   Opaque text. The historical export serialises it with a legacy
+    #   decimal-zero suffix (a spreadsheet serialisation defect). Reading it as a
+    #   string preserves that text verbatim; the authority-backed linkage key is
+    #   derived separately by job_linkage, never by rewriting this column.
     # * row_index: deliberately NOT an identifier. It is the ordinal position
     #   of an offer within its job's result list, so it carries order/rank
     #   meaning for assortment analysis and keeps numeric inference.
@@ -353,6 +396,34 @@ DATASET_DEFINITIONS: Final[Mapping[DatasetKey, DatasetDefinition]] = MappingProx
 SHARED_IDENTIFIER_COLUMNS: Final[tuple[str, ...]] = tuple(
     column for column in JOBS_DEFINITION.identifier_columns
     if column in CARS_DEFINITION.identifier_columns
+)
+
+
+#: Analysis-stage jobs frame: the raw contract plus the derived linkage key.
+#: Grain unchanged (one row per scrape job); the analytical key is the derived
+#: linkage key, while the raw identifier is kept, unchanged, for lineage.
+ANALYSIS_JOBS_DEFINITION: Final = DatasetDefinition(
+    key=DatasetKey.JOBS,
+    filename_tokens=JOBS_DEFINITION.filename_tokens,
+    columns=(*JOBS_DEFINITION.columns, JOB_LINKAGE_KEY_COLUMN),
+    identifier_columns=(*JOBS_DEFINITION.identifier_columns, JOB_LINKAGE_KEY_COLUMN),
+    unique_key_columns=(JOB_LINKAGE_KEY_COLUMN,),
+)
+
+#: Analysis-stage cars frame: the raw contract plus the derived linkage key and
+#: integer offer position. Analytical key = (linkage key, offer position key);
+#: the offer position key is the documented non-identifier (integer) component.
+ANALYSIS_CARS_DEFINITION: Final = DatasetDefinition(
+    key=DatasetKey.CARS,
+    filename_tokens=CARS_DEFINITION.filename_tokens,
+    columns=(*CARS_DEFINITION.columns, JOB_LINKAGE_KEY_COLUMN, OFFER_POSITION_KEY_COLUMN),
+    identifier_columns=(*CARS_DEFINITION.identifier_columns, JOB_LINKAGE_KEY_COLUMN),
+    unique_key_columns=(JOB_LINKAGE_KEY_COLUMN, OFFER_POSITION_KEY_COLUMN),
+)
+
+#: Registry of the analysis-stage frames (never used to read or validate raw files).
+ANALYSIS_DATASET_DEFINITIONS: Final[Mapping[DatasetKey, DatasetDefinition]] = MappingProxyType(
+    {definition.key: definition for definition in (ANALYSIS_JOBS_DEFINITION, ANALYSIS_CARS_DEFINITION)}
 )
 
 
@@ -507,9 +578,10 @@ class JobDetailRelationshipDefinition:
 #: tally of detail rows written. Both declare the detail count, so each is
 #: reconciled independently against the observed rows and they must agree;
 #: neither can stand in for the other.
-#: Identifiers are compared verbatim, so the textual-form difference noted on
-#: the cars identifier above is reported as orphans/under-counts until an
-#: explicit normalisation step reconciles the two forms.
+#: This is the **raw-source** relationship: raw identifier text is compared
+#: exactly as read, so the legacy textual-form difference on the cars identifier
+#: appears as orphans/under-counts. Analytical linkage uses
+#: :data:`ANALYSIS_JOB_DETAIL_RELATIONSHIP` (the authority-backed derived keys).
 #: Scope: a cars row repeats its job's ``city``; a linked row whose city differs
 #: from its parent job's (or either is missing/blank) breaks city integrity.
 JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
@@ -520,6 +592,22 @@ JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
     expected_detail_count_column='record_count',
     additional_expected_count_columns=('actual_car_rows',),
     scope_agreement_columns=(('city', 'city'),),
+)
+
+#: The analytical jobs -> cars relationship: identical semantics, counts and
+#: scope invariant, but linked through the derived, authority-backed
+#: :data:`JOB_LINKAGE_KEY_COLUMN` on both sides (see
+#: :mod:`ql2_sixt_canada_analysis.job_linkage`). Joins, reconciliation,
+#: uniqueness and every downstream trust decision use this relationship.
+ANALYSIS_JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
+    parent=DatasetKey.JOBS,
+    detail=DatasetKey.CARS,
+    parent_key_columns=(JOB_LINKAGE_KEY_COLUMN,),
+    detail_key_columns=(JOB_LINKAGE_KEY_COLUMN,),
+    expected_detail_count_column=JOB_DETAIL_RELATIONSHIP.expected_detail_count_column,
+    additional_expected_count_columns=JOB_DETAIL_RELATIONSHIP.additional_expected_count_columns,
+    scope_agreement_columns=JOB_DETAIL_RELATIONSHIP.scope_agreement_columns,
+    definitions=ANALYSIS_DATASET_DEFINITIONS,
 )
 
 
@@ -1065,6 +1153,11 @@ TEMPORAL_RECONCILIATION: Final = TemporalReconciliationDefinition(
     relationship=JOB_DETAIL_RELATIONSHIP,
 )
 
+#: The same temporal contract applied to the analysis-stage frames (linked
+#: through :data:`ANALYSIS_JOB_DETAIL_RELATIONSHIP`).
+ANALYSIS_TEMPORAL_RECONCILIATION: Final = dataclass_replace(
+    TEMPORAL_RECONCILIATION, relationship=ANALYSIS_JOB_DETAIL_RELATIONSHIP)
+
 
 # ---------------------------------------------------- location-stream comparison
 
@@ -1218,6 +1311,12 @@ LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
     minimum_paired_captures=MINIMUM_DUPLICATE_PAIRED_CAPTURES,
     numeric_columns=('price_num',),
 )
+
+#: The same comparison applied to the analysis-stage frames (capture events are
+#: derived linkage keys, never raw identifier text).
+ANALYSIS_LOCATION_STREAM_COMPARISON: Final = dataclass_replace(
+    LOCATION_STREAM_COMPARISON, relationship=ANALYSIS_JOB_DETAIL_RELATIONSHIP,
+    temporal=ANALYSIS_TEMPORAL_RECONCILIATION)
 
 
 # --------------------------------------------------- location identity policy

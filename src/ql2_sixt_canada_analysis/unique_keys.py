@@ -218,13 +218,21 @@ def assess_unique_key(frame: pd.DataFrame, definition: DatasetDefinition) -> Uni
     )
 
 
-def assess_raw_dataset_unique_keys(datasets: RawDatasets) -> RawDatasetUniqueKeyReports:
-    """Assess ``jobs`` and ``cars`` against their own centralized key contracts."""
+def assess_raw_dataset_unique_keys(
+    datasets: RawDatasets,
+    definitions: Mapping[DatasetKey, DatasetDefinition] = DATASET_DEFINITIONS,
+) -> RawDatasetUniqueKeyReports:
+    """Assess ``jobs`` and ``cars`` against centralized key contracts.
+
+    ``definitions`` defaults to the raw-source contracts; pass
+    :data:`~ql2_sixt_canada_analysis.schemas.ANALYSIS_DATASET_DEFINITIONS` for
+    the analysis-stage frames (keys on the authority-backed derived columns).
+    """
     if not isinstance(datasets, RawDatasets):
         raise TypeError(f"expected RawDatasets, got {type(datasets).__name__}")
     return RawDatasetUniqueKeyReports(
-        jobs=assess_unique_key(datasets.jobs, DATASET_DEFINITIONS[DatasetKey.JOBS]),
-        cars=assess_unique_key(datasets.cars, DATASET_DEFINITIONS[DatasetKey.CARS]),
+        jobs=assess_unique_key(datasets.jobs, definitions[DatasetKey.JOBS]),
+        cars=assess_unique_key(datasets.cars, definitions[DatasetKey.CARS]),
     )
 
 
@@ -236,9 +244,12 @@ def validate_unique_key(frame: pd.DataFrame, definition: DatasetDefinition) -> U
     return report
 
 
-def validate_raw_dataset_unique_keys(datasets: RawDatasets) -> RawDatasetUniqueKeyReports:
+def validate_raw_dataset_unique_keys(
+    datasets: RawDatasets,
+    definitions: Mapping[DatasetKey, DatasetDefinition] = DATASET_DEFINITIONS,
+) -> RawDatasetUniqueKeyReports:
     """Assess both datasets; raise one :class:`UniqueKeyViolationError` listing every failure."""
-    reports = assess_raw_dataset_unique_keys(datasets)
+    reports = assess_raw_dataset_unique_keys(datasets, definitions)
     failed = tuple(r for r in (reports.jobs, reports.cars) if not r.is_valid)
     if failed:
         raise UniqueKeyViolationError(failed)

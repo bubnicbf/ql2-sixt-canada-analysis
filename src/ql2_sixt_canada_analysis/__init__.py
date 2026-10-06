@@ -72,6 +72,18 @@ from ql2_sixt_canada_analysis.relationships import (
     validate_one_to_many_join,
 )
 from ql2_sixt_canada_analysis.schemas import (
+    ANALYSIS_CARS_DEFINITION,
+    ANALYSIS_DATASET_DEFINITIONS,
+    ANALYSIS_JOBS_DEFINITION,
+    ANALYSIS_JOB_DETAIL_RELATIONSHIP,
+    ANALYSIS_LOCATION_STREAM_COMPARISON,
+    ANALYSIS_TEMPORAL_RECONCILIATION,
+    CONFIDENTIAL_TECHNICAL_COLUMNS,
+    JOB_LINKAGE_KEY_COLUMN,
+    OFFER_POSITION_KEY_COLUMN,
+    OFFER_POSITION_KEY_DTYPE,
+    SOURCE_JOB_IDENTIFIER_COLUMN,
+    SOURCE_OFFER_POSITION_COLUMN,
     COLLECTION_SCHEDULE,
     DATASET_DEFINITIONS,
     EXPECTED_LOCATION_COVERAGE,
@@ -208,6 +220,30 @@ from ql2_sixt_canada_analysis.unique_keys import (
 )
 
 __all__ = [
+    "ANALYSIS_CARS_DEFINITION",
+    "ANALYSIS_DATASET_DEFINITIONS",
+    "ANALYSIS_JOBS_DEFINITION",
+    "ANALYSIS_JOB_DETAIL_RELATIONSHIP",
+    "ANALYSIS_LOCATION_STREAM_COMPARISON",
+    "ANALYSIS_TEMPORAL_RECONCILIATION",
+    "CONFIDENTIAL_TECHNICAL_COLUMNS",
+    "JOB_LINKAGE_KEY_COLUMN",
+    "OFFER_POSITION_KEY_COLUMN",
+    "OFFER_POSITION_KEY_DTYPE",
+    "SOURCE_JOB_IDENTIFIER_COLUMN",
+    "SOURCE_OFFER_POSITION_COLUMN",
+    "JobLinkageBlocker",
+    "JobLinkageNotReadyError",
+    "JobLinkagePolicy",
+    "JobLinkagePolicyError",
+    "JobLinkagePolicyStatus",
+    "JobLinkagePreconditionError",
+    "JobLinkageReport",
+    "JobLinkageResult",
+    "assess_job_linkage",
+    "job_linkage_policy_from_record",
+    "load_job_linkage_policy",
+    "require_job_linkage",
     "CollectionScheduleAssessment",
     "CollectionScheduleStatus",
     "ScheduledCoverageBlocker",
@@ -385,3 +421,30 @@ __all__ = [
     "validate_raw_dataset_unique_keys",
     "validate_unique_key",
 ]
+
+
+#: Names served lazily from :mod:`ql2_sixt_canada_analysis.job_linkage`, which
+#: depends on the authority-record module; loading it on first use keeps
+#: ``python -m ql2_sixt_canada_analysis.authority_decisions`` free of a re-import.
+_LAZY_JOB_LINKAGE = frozenset({
+    "JobLinkageBlocker",
+    "JobLinkageNotReadyError",
+    "JobLinkagePolicy",
+    "JobLinkagePolicyError",
+    "JobLinkagePolicyStatus",
+    "JobLinkagePreconditionError",
+    "JobLinkageReport",
+    "JobLinkageResult",
+    "assess_job_linkage",
+    "job_linkage_policy_from_record",
+    "load_job_linkage_policy",
+    "require_job_linkage",
+})
+
+
+def __getattr__(name: str):  # type: ignore[no-untyped-def]  # PEP 562
+    if name in _LAZY_JOB_LINKAGE:
+        from ql2_sixt_canada_analysis import job_linkage
+
+        return getattr(job_linkage, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

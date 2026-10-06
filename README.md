@@ -150,9 +150,10 @@ not repeated here.
 - **Missing stays missing.** Empty identifier fields are `pd.NA`, never the
   text `"nan"`, `"None"` or `"<NA>"`, so completely blank rows are still
   detected and removed by the blank-row step.
-- **No normalisation.** Only the type changes. Identifier text is not
-  stripped, re-cased, padded, parsed or validated against any business
-  format; reconciling different textual forms is a separate, later step.
+- **No rewriting of raw values.** Only the type changes. Raw identifier text
+  is never stripped, re-cased, padded, parsed or rewritten. Linking the
+  historical export's different textual forms is done by the separate,
+  authority-backed linkage step below, which derives *new* key columns.
 - **Other columns** keep normal pandas inference unless a caller configures
   them.
 - **Caller options.** `read_csv_options` may add `dtype` rules for other
@@ -228,6 +229,90 @@ classification alone.
   locations). Automated tests (`tests/test_quality.py`) use only synthetic
   DataFrames and synthetic temporary CSVs.
 
+## Authority-backed job linkage
+
+`ql2_sixt_canada_analysis.job_linkage` makes parent/detail linkage
+trustworthy without modifying raw source values. It implements the
+collection-owner decisions recorded in
+[`docs/decisions/governance/job-identifier-governance-2026-10-06.md`](docs/decisions/governance/job-identifier-governance-2026-10-06.md)
+and approved in pricing-authority record `v2` (four job-identifier decisions,
+schema 2).
+
+```python
+from ql2_sixt_canada_analysis import assess_job_linkage, load_job_linkage_policy
+
+policy = load_job_linkage_policy()          # None unless all four decisions are APPROVED and consistent
+linkage = assess_job_linkage(jobs_df, cars_df, policy)   # after blank-row removal + dtype validation
+linkage.report                              # counts and statuses only; linkage.report.is_valid
+analysis = linkage.datasets(cleaned)        # analysis-stage frames (raw columns + derived keys)
+```
+
+- **Raw `job_id` is opaque text and immutable.** It is never trimmed,
+  case-folded, padded or parsed through an integer or float, and the raw CSV
+  files are never edited. Numeric parsing is forbidden because it drops
+  leading zeros, rounds long values, accepts signs, exponents and
+  whitespace, and silently merges distinct identifiers; matching is string
+  comparison only, so `"007"` and `"7"` stay different jobs.
+- **Separate derived keys.** New columns `job_id_linkage_key` (nullable
+  string; `JOB_LINKAGE_KEY_COLUMN`) and, for details, `row_index_key`
+  (nullable `Int64`; `OFFER_POSITION_KEY_COLUMN`) are appended; `job_id` and
+  `row_index` stay unchanged next to them. The jobs linkage key is the raw
+  value; missing and whitespace-only values are invalid.
+- **Exact match first, one narrow legacy fallback.** A detail value that
+  exactly equals a job's identifier links to it. Only when the approved
+  policy enables the legacy repair, a detail value consisting entirely of
+  ASCII digits followed by exactly `.0` also yields the candidate without that
+  final `.0` - every preceding character, including leading zeros, is kept
+  (`"00042.0"` -> `"00042"`). Alphanumeric or arbitrary text ending in `.0`
+  is never rewritten.
+- **Ambiguity and collisions block.** Exact and repaired candidates naming
+  different jobs, a match to a duplicated job key, no match, or two raw
+  representations resolving to one job leave the derived key `<NA>` and add
+  a typed blocker (`detail_job_reference_ambiguous`,
+  `parent_linkage_key_not_unique`, `detail_job_reference_unmatched`,
+  `job_linkage_collision`, `detail_job_reference_missing`,
+  `parent_linkage_key_invalid`). The code never guesses.
+- **Offer positions.** `row_index` is a non-negative integer: integer values,
+  ASCII-digit text, legacy `N.0` text (without float coercion) and numbers
+  pandas already inferred (finite, non-negative, exactly integral, not
+  boolean) are accepted; missing values, fractions, negatives, signs,
+  exponents, whitespace, non-finite values and arbitrary text block
+  (`offer_position_missing`, `offer_position_invalid`). Duplicate derived
+  positions are a key-contract failure downstream.
+- **No permissive default.** `assess_job_linkage` requires a policy argument;
+  with `None` (no approved policy) the report is `unavailable`
+  (`job_linkage_policy_unavailable`) and every derived key is `<NA>`, so all
+  downstream contracts fail closed. `require_job_linkage` raises
+  `JobLinkageNotReadyError` unless the report is valid. Applying the step
+  again is deterministic and idempotent; inputs are never mutated.
+- **Analysis-stage contracts.** `DATASET_DEFINITIONS` and
+  `JOB_DETAIL_RELATIONSHIP` remain the raw-source contracts (raw text compared
+  exactly as read). `ANALYSIS_DATASET_DEFINITIONS`,
+  `ANALYSIS_JOB_DETAIL_RELATIONSHIP`, `ANALYSIS_TEMPORAL_RECONCILIATION` and
+  `ANALYSIS_LOCATION_STREAM_COMPARISON` use the derived keys: the linkage key
+  is the jobs unique key, the details' parent foreign key and the first
+  component of the details' unique key (with `row_index_key` second).
+- **Pipeline order.** Load -> validate source columns -> remove blank rows ->
+  validate identifier dtypes -> **job linkage** -> analytical unique keys,
+  coverage, reconciliation, one-to-many relationship, city integrity, trusted
+  join, streams, temporal, comparison, stability, completeness, pricing.
+- **Prerequisite of trust.** The trusted join requires a valid linkage report
+  for the same frames (`job_linkage_report_unavailable`,
+  `job_linkage_not_valid`, `job_linkage_key_not_applied` - the latter also
+  when the raw-source relationship is used). Pricing readiness requires it
+  separately (`job_linkage` argument; `job_key_normalization_missing`,
+  `job_key_normalization_not_ready` plus every linkage blocker by value, and
+  `job_linkage_report_mismatch` if the join was assessed with another report).
+  Valid linkage never bypasses any other gate.
+- **Confidentiality.** `job_id`, `job_id_linkage_key`, `row_index` and
+  `row_index_key` are confidential technical fields
+  (`CONFIDENTIAL_TECHNICAL_COLUMNS`), excluded from product identity,
+  duplicate-offer inference, vehicle stability and every user-visible output.
+  Reports and errors carry counts and categories only.
+- **Upstream fix.** Future exports should serialize `job_id` as text and
+  `row_index` as an integer; until then the pipeline keeps this controlled,
+  authority-backed compatibility with the historical export.
+
 ## Unique keys
 
 Each logical dataset's business key is defined once, with its row grain, in
@@ -254,8 +339,11 @@ validate_raw_dataset_unique_keys(cleaned)               # raises on violations
 - **Missing keys:** a row with any missing component (pandas `NA`/`NaN`) is a
   missing-key row. Missing-key rows are counted on their own and never form
   duplicate groups. Non-empty text such as `"0"`, `"False"`, `"N/A"` or
-  `"null"` is a value, and keys are compared verbatim (never stripped or
-  normalised); validating identifier *content* is a separate control.
+  `"null"` is a value, and key values are compared exactly as given (never
+  stripped or normalised here). For the raw-source contracts that is the raw
+  text; analytically the keys are the authority-backed derived columns
+  (`ANALYSIS_DATASET_DEFINITIONS`, pass them as
+  `assess_raw_dataset_unique_keys(analysis, ANALYSIS_DATASET_DEFINITIONS)`).
 - **Duplicate keys:** evaluated only among complete rows, with all
   components compared as a tuple (`DataFrame.duplicated(keep=False)`), never
   as concatenated strings, so delimiter-like characters cannot collide. Every
@@ -445,7 +533,10 @@ The jobs-to-cars relationship is defined once in
 `ql2_sixt_canada_analysis.schemas` (`JOB_DETAIL_RELATIONSHIP`: parent key =
 the jobs unique key, the matching detail foreign key, and the jobs column that
 declares how many detail rows each job should have). Field names live in the
-source code only.
+source code only. `JOB_DETAIL_RELATIONSHIP` compares the raw identifier text;
+the pipeline reconciles, validates and joins through
+`ANALYSIS_JOB_DETAIL_RELATIONSHIP`, the same relationship on the derived
+linkage key (see *Authority-backed job linkage*).
 
 ```python
 from ql2_sixt_canada_analysis import assess_job_detail_reconciliation, validate_job_detail_reconciliation
@@ -626,15 +717,18 @@ non-`None` DataFrame is never proof of analytical validity.
 ```python
 from ql2_sixt_canada_analysis import assess_job_detail_join_readiness, require_trusted_job_detail_join
 
-join = assess_job_detail_join_readiness(jobs_df, cars_df)
+join = assess_job_detail_join_readiness(analysis.jobs, analysis.cars, job_linkage=linkage.report)
 join.join_ready, join.blocking_reasons
 join.trusted_jobs_with_details        # DataFrame only when join_ready, else None
 join.diagnostic_jobs_with_details     # UNTRUSTED investigation frame, or None
-require_trusted_job_detail_join(jobs_df, cars_df)   # trusted frame or UntrustedJoinError
+require_trusted_job_detail_join(analysis.jobs, analysis.cars, job_linkage=linkage.report)  # or UntrustedJoinError
 ```
 
 - **Prerequisites (all must explicitly pass, on the same frames that are
-  joined, in one call):** the jobs business-key contract
+  joined, in one call):** a valid authority-backed linkage report for these
+  frames, with the join keyed on the derived linkage key (the default
+  `ANALYSIS_JOB_DETAIL_RELATIONSHIP`; the raw `job_id` is never the trusted
+  join key), the jobs business-key contract
   (`jobs_key_contract_valid`), the detail business-key contract
   (`details_key_contract_valid`; together `all_key_contracts_valid`),
   declared-count reconciliation (`declared_counts_reconciled`) and the
@@ -647,7 +741,10 @@ require_trusted_job_detail_join(jobs_df, cars_df)   # trusted frame or Untrusted
   (`jobs_key_contract_failed`, `details_key_contract_failed`,
   `declared_counts_not_reconciled`, `relationship_contract_failed`,
   `orphan_details_present`, `missing_link_details_present`,
-  `join_construction_failed`). Every applicable reason is reported.
+  `join_construction_failed`, `job_linkage_report_unavailable`,
+  `job_linkage_not_valid`, `job_linkage_key_not_applied`). Every applicable
+  reason is reported; the linkage report's own blockers are kept on
+  `job_linkage_reasons`.
 - **Trusted vs diagnostic:** `trusted_jobs_with_details` is the only frame
   downstream analysis may use. `diagnostic_jobs_with_details` is the
   relationship-checked join kept for investigation when the relationship
@@ -1020,6 +1117,13 @@ receive `ready=True`; `None` is accepted only to be reported as a blocker:
   `job_scope_unassignable`, `parent_detail_scope_mismatch`); a missing
   assessment is `trusted_join_assessment_missing`. A non-`None` joined frame
   (including the untrusted diagnostic join) is never evidence of readiness.
+- `job_linkage` - the `JobLinkageReport` of `assess_job_linkage`, the same
+  object the trusted join was assessed with. `None` is
+  `job_key_normalization_missing`; any other non-valid report adds
+  `job_key_normalization_not_ready` plus each linkage blocker by value, and a
+  different report object than the join's adds `job_linkage_report_mismatch`.
+  Completeness, keys and reconciliation computed on frames that were not
+  linked under the approved policy are therefore never sufficient.
 
 Blockers accumulate in a fixed order (completeness, foundational gates,
 stability, scheduled coverage, trusted join, location policy) and nothing
@@ -1078,19 +1182,24 @@ contract's rental-date replication rules must be exactly the approved pairs. The
 The external decisions these gaps and blockers wait for are recorded, one
 atomic decision per `DecisionId`, in the versioned record
 [`docs/decisions/pricing_authorities/`](docs/decisions/pricing_authorities/README.md)
-(`authority_decisions.py`). Revision 1 (`v1.toml`) marks all 22 decisions
-`PROPOSED` and blocking on external input: no attributable supplier,
-collection-owner or business-owner decision exists yet, and raw-data
-observations, behavioural analyses, repository notes and review notes are
-recorded as non-authoritative evidence only. The questions to send are in
+(`authority_decisions.py`). Revision 1 (`v1.toml`, schema 1, kept unchanged
+as history) marked all 22 decisions `PROPOSED`. The current revision 2
+(`v2.toml`, schema 2, `CURRENT_RECORD_PATH`) approves the four
+job-identifier decisions on collection-owner authority (the governance
+reference above) and leaves the other 18 `PROPOSED` and blocking on external
+input; raw-data observations, behavioural analyses, repository notes and
+review notes remain non-authoritative evidence only. The questions still to
+send are in
 [`authority_request_checklist.md`](docs/decisions/pricing_authorities/authority_request_checklist.md).
 Validate a revision with
-`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v1.toml`
+`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v2.toml`
 (sanitized summary; non-zero exit when invalid). The baseline's
 `location_role_authority` and `rental_period_rule_authority` take the
 domain-neutral `AuthorityReference`, and `baseline_authority_inputs(record)`
 passes on APPROVED decisions only, so a PROPOSED record clears nothing.
-Approved decisions are implemented in separate, tested changes.
+Approved decisions are implemented in separate, tested changes: the
+job-identifier approvals by `job_linkage` (`job_linkage_policy_from_record`
+builds its policy only when all four are approved and consistent).
 
 ## Vehicle-attribute stability
 
@@ -1200,6 +1309,7 @@ python -m pytest tests/test_notebooks.py
 
 - All scheduled cities represented
 - Authoritative collection schedule available, with `COMPLETE` time coverage for every expected stream
+- Authority-backed job linkage valid (derived keys; raw identifiers unchanged)
 - Trusted job-detail join validated (no `join_construction_failed`)
 - All authoritative expected (city, branch) pairs present in detail (`cars`) rows
 - Job level counts = detail row counts

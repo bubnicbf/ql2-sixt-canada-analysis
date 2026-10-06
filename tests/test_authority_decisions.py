@@ -180,10 +180,10 @@ def test_downstream_codes_are_known_blockers_or_plan_gaps() -> None:
         assert set(decision.downstream) <= known, decision.id
 
 
-def test_checklist_matches_the_record_and_groups_requests() -> None:
+def test_checklist_render_covers_every_v1_request() -> None:
+    # The committed checklist follows the current revision (see test_authority_v2); v1 renders all 22.
     record = load_decision_record(V1)
     checklist = render_authority_request_checklist(record)
-    assert (RECORD_DIR / "authority_request_checklist.md").read_text(encoding="utf-8") == checklist
     for title in ("## Collection owner or supplier", "## Business owner", "## Joint decision"):
         assert title in checklist
     for decision in record.decisions:
@@ -240,7 +240,8 @@ def test_rejected_decision_needs_authority_and_rejection_statement() -> None:
 
 
 def test_versions_ids_and_supersession_fail_closed() -> None:
-    for change, needle in ((dict(schema_version=2), "schema_version"), (dict(schema_version="1"), "schema_version"),
+    for change, needle in ((dict(schema_version=3), "schema_version"), (dict(schema_version="1"), "schema_version"),
+                           (dict(schema_version=0), "schema_version"),
                            (dict(record_version=0), "record_version"),
                            (dict(record_id="pricing-authorities-v9"), "record_id"),
                            (dict(supersedes="pricing-authorities-v0"), "supersedes nothing"),

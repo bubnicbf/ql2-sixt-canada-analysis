@@ -38,7 +38,9 @@ from ql2_sixt_canada_analysis.readiness import (
     assess_pricing_readiness,
     validate_pricing_readiness,
 )
-from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker, assess_job_detail_join_readiness
+from conftest import join_gates, linked_join
+from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
+from ql2_sixt_canada_analysis.job_linkage import JobLinkageBlocker
 from ql2_sixt_canada_analysis.stability import VehicleStabilityStatus, assess_vehicle_attribute_stability
 from ql2_sixt_canada_analysis.streams import (
     ScheduledCoverageBlocker,
@@ -113,7 +115,7 @@ def gates_for(jobs: pd.DataFrame, cars: pd.DataFrame, coverage, completeness):  
     """GATES whose schedule coverage and trusted join are assessed for ``coverage`` on these frames."""
     return GATES | {"completeness": completeness,
                     "scheduled_coverage": scheduled_coverage(frames=(jobs, captured(cars)), coverage=coverage),
-                    "job_detail_join": assess_job_detail_join_readiness(jobs, cars)}
+                    **join_gates(jobs, cars)}
 
 
 def scheduled_coverage(schedule=SCHEDULE, frames=None, coverage=SYNTH_COV):  # type: ignore[no-untyped-def]
@@ -123,12 +125,14 @@ def scheduled_coverage(schedule=SCHEDULE, frames=None, coverage=SYNTH_COV):  # t
 
 
 SCHEDULED_OK = scheduled_coverage()
-JOIN_OK = assess_job_detail_join_readiness(*scheduled_frames())
+JOIN_OK = linked_join(*scheduled_frames())
+LINKAGE_OK = JOIN_OK.job_linkage_report
 GATES = dict(completeness=COMPLETE, key_contracts_valid=True, one_to_many_contract_valid=True,
              temporal_fields_trusted=True, vehicle_stability=STABLE, scheduled_coverage=SCHEDULED_OK,
-             job_detail_join=JOIN_OK)
+             job_detail_join=JOIN_OK, job_linkage=LINKAGE_OK)
 FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE,
-                                             "scheduled_coverage": None, "job_detail_join": None}
+                                             "scheduled_coverage": None, "job_detail_join": None,
+                                             "job_linkage": None}
 
 
 def evidence(status: CS) -> LocationStreamComparisonReport:
@@ -154,7 +158,9 @@ def frame(labels: list[tuple[str, ...]]) -> pd.DataFrame:
 SCOPE_BLOCKERS = {B(d.value) for d in LocationPolicyScopeDefect}
 # Detailed schedule/join blockers (a missing assessment reports only its own "missing" blocker).
 SCHEDULE_AND_JOIN_DETAIL = ({B(b.value) for b in ScheduledCoverageBlocker} | {B(b.value) for b in JobDetailJoinBlocker}
-                            | {B.SCHEDULED_COVERAGE_CONTRACT_MISMATCH, B.TRUSTED_JOIN_NOT_READY})
+                            | {B.SCHEDULED_COVERAGE_CONTRACT_MISMATCH, B.TRUSTED_JOIN_NOT_READY}
+                            | {B(b.value) for b in JobLinkageBlocker}
+                            | {B.JOB_IDENTIFIER_NORMALIZATION_NOT_READY, B.JOB_LINKAGE_REPORT_MISMATCH})
 BEHAVIOURAL = [CS.LIKELY_DUPLICATE_STREAMS, CS.LIKELY_DISTINCT_STREAMS, CS.COMPARISON_INCONCLUSIVE,
                CS.COMPARISON_UNASSESSABLE,
                CS.INSUFFICIENT_COMPARABLE_CAPTURES, CS.ONE_STREAM_ABSENT, CS.BOTH_STREAMS_ABSENT]

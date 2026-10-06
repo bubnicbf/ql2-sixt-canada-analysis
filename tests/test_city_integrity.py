@@ -14,6 +14,7 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
+from conftest import linked_join, require_linked_join
 from test_completeness import COV, J1, J2, J3, cars, jobs, reconcile
 from test_readiness import DISTINCT, GATES, gates_for
 
@@ -33,8 +34,6 @@ from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.join_readiness import (
     JobDetailJoinBlocker as JB,
     UntrustedJoinError,
-    assess_job_detail_join_readiness,
-    require_trusted_job_detail_join,
 )
 from ql2_sixt_canada_analysis.readiness import (
     CompletenessBlocker as CB,
@@ -136,7 +135,7 @@ def test_healthy_frames_pass_every_control():
             report.scope_mismatch_detail_row_count) == (2, 0, 3, 0)
     assert validate_city_integrity(j, c, coverage=COV) == report
     assert reconcile(j, c).is_reconciled
-    assert assess_job_detail_join_readiness(j, c).trusted_jobs_with_details is not None
+    assert linked_join(j, c).trusted_jobs_with_details is not None
     assert completeness(j, c).complete and pricing(completeness(j, c)).ready
 
 
@@ -175,7 +174,7 @@ def test_unassignable_job_city_blocks_integrity_completeness_and_pricing(value):
                                           PB.SCOPE_INTEGRITY_NOT_PROVEN)
     with pytest.raises(PricingNotReadyError):
         validate_pricing_readiness(location_policy=assess_location_policy(DISTINCT), **PROJECT_GATES(complete))
-    join = assess_job_detail_join_readiness(j, c)
+    join = linked_join(j, c)
     assert join.trusted_jobs_with_details is None and JB.CITY_SCOPE_UNASSIGNABLE in join.blocking_reasons
 
 
@@ -261,13 +260,13 @@ def test_cross_city_row_prevents_reconciliation():
 
 def test_cross_city_row_withholds_the_trusted_join():
     j, c = cross_city()
-    join = assess_job_detail_join_readiness(j, c)
+    join = linked_join(j, c)
     assert join.trusted_jobs_with_details is None and not join.join_ready
     assert JB.PARENT_DETAIL_CITY_MISMATCH in join.blocking_reasons
     assert JB.DECLARED_COUNTS_NOT_RECONCILED not in join.blocking_reasons   # the counts did match
     assert not join.city_integrity_valid and join.relationship_contract_valid
     with pytest.raises(UntrustedJoinError) as info:
-        require_trusted_job_detail_join(j, c)
+        require_linked_join(j, c)
     assert "SYNTH" not in str(info.value)
 
 
@@ -289,7 +288,7 @@ def test_reported_false_pass_now_fails_closed():
     report = completeness(j, c)
     assert not report.complete
     assert {CB.PARENT_DETAIL_CITY_MISMATCH, CB.STREAM_SCOPE_MISMATCH} <= set(report.blocking_reasons)
-    assert assess_job_detail_join_readiness(j, c).trusted_jobs_with_details is None
+    assert linked_join(j, c).trusted_jobs_with_details is None
     readiness = pricing(report)
     assert not readiness.ready and PB.SCOPE_INTEGRITY_NOT_PROVEN in readiness.blocking_reasons
 
@@ -348,7 +347,7 @@ def test_simultaneous_blockers_are_all_preserved():
     assert {CB.SOURCE_NOT_COMPLETE, CB.DECLARED_COUNT_UNRECONCILED, CB.CITY_SCOPE_UNASSIGNABLE,
             CB.PARENT_DETAIL_CITY_MISMATCH, CB.STREAM_SCOPE_UNASSIGNABLE} <= set(report.blocking_reasons)
     assert report.blocking_reasons == tuple(dict.fromkeys(report.blocking_reasons))
-    join = assess_job_detail_join_readiness(j, c)
+    join = linked_join(j, c)
     assert {JB.DECLARED_COUNTS_NOT_RECONCILED, JB.CITY_SCOPE_UNASSIGNABLE,
             JB.PARENT_DETAIL_CITY_MISMATCH} <= set(join.blocking_reasons)
 

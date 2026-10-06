@@ -64,7 +64,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # Cells that are required to report categorical gate results and aggregate
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
-REPORTING_STEPS = ("assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+REPORTING_STEPS = ("assess_job_linkage(", "assess_scheduled_time_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
                    "investigate_location_stream(", "assess_completeness(")
@@ -314,7 +314,8 @@ def test_ingestion_notebook_assesses_unique_keys_with_reusable_api() -> None:
     dtypes = next(i for i, s in enumerate(sources) if "validate_raw_dataset_identifier_dtypes(" in s)
     assess = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
     assert clean < dtypes < assess
-    assert re.search(r"\bkey_reports\s*=\s*assess_raw_dataset_unique_keys\(\s*cleaned\s*\)", sources[assess])
+    assert re.search(r"\bkey_reports\s*=\s*assess_raw_dataset_unique_keys\(\s*analysis_datasets\s*,"
+                     r"\s*ANALYSIS_DATASET_DEFINITIONS\s*\)", sources[assess])
     # Assessment, not strict validation, so real violations cannot stop the workflow.
     assert "validate_raw_dataset_unique_keys" not in code and "validate_unique_key" not in code
 
@@ -368,14 +369,14 @@ def test_ingestion_notebook_key_step_runs_on_synthetic_violations(tmp_path: Path
 def test_ingestion_notebook_reconciles_with_reusable_api_after_key_assessment() -> None:
     sources = [c.source for c in _code_cells(read_notebook(INGESTION_NOTEBOOK))]
     code = "\n".join(sources)
-    for name in ("assess_job_detail_reconciliation", "JOB_DETAIL_RELATIONSHIP"):
+    for name in ("assess_job_detail_reconciliation", "ANALYSIS_JOB_DETAIL_RELATIONSHIP"):
         assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
     keys = next(i for i, s in enumerate(sources) if "assess_raw_dataset_unique_keys(" in s)
     reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
     assert keys < reconcile
     assert re.search(
-        r"reconciliation_report\s*=\s*assess_job_detail_reconciliation\(\s*jobs_df\s*,\s*cars_df\s*,"
-        r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", sources[reconcile])
+        r"reconciliation_report\s*=\s*assess_job_detail_reconciliation\(\s*analysis_jobs_df\s*,\s*analysis_cars_df\s*,"
+        r"\s*ANALYSIS_JOB_DETAIL_RELATIONSHIP\s*\)", sources[reconcile])
     assert "validate_job_detail_reconciliation" not in code  # assessment keeps the workflow running
 
 
@@ -430,14 +431,14 @@ def test_ingestion_notebook_reconciliation_runs_on_synthetic_mismatches(tmp_path
 def test_ingestion_notebook_validates_relationship_before_trusted_join() -> None:
     sources = [c.source for c in _code_cells(read_notebook(INGESTION_NOTEBOOK))]
     code = "\n".join(sources)
-    for name in ("assess_one_to_many_join", "assess_job_detail_join_readiness", "JOB_DETAIL_RELATIONSHIP"):
+    for name in ("assess_one_to_many_join", "assess_job_detail_join_readiness", "ANALYSIS_JOB_DETAIL_RELATIONSHIP"):
         assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
     reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
     relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
     assert reconcile < relate
     cell = sources[relate]
-    assert re.search(r"relationship_report\s*=\s*assess_one_to_many_join\(\s*jobs_df\s*,\s*cars_df\s*,"
-                     r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", cell)
+    assert re.search(r"relationship_report\s*=\s*assess_one_to_many_join\(\s*analysis_jobs_df\s*,\s*analysis_cars_df\s*,"
+                     r"\s*ANALYSIS_JOB_DETAIL_RELATIONSHIP\s*\)", cell)
     # The relationship alone never yields a joined frame: the notebook does not
     # call the relationship-checked join directly (the join gate does).
     assert "join_jobs_to_details" not in code and not re.search(r"^jobs_with_details\s*=", code, re.M)
@@ -484,8 +485,9 @@ def test_ingestion_notebook_gates_the_trusted_join_through_the_api() -> None:
     gate = next(i for i, s in enumerate(sources) if "assess_job_detail_join_readiness(" in s)
     assert relate < gate
     cell = sources[gate]
-    assert re.search(r"job_detail_join\s*=\s*assess_job_detail_join_readiness\(\s*jobs_df\s*,\s*cars_df\s*,"
-                     r"\s*JOB_DETAIL_RELATIONSHIP\s*\)", cell)
+    assert re.search(r"job_detail_join\s*=\s*assess_job_detail_join_readiness\(\s*analysis_jobs_df\s*,"
+                     r"\s*analysis_cars_df\s*,\s*ANALYSIS_JOB_DETAIL_RELATIONSHIP\s*,"
+                     r"\s*job_linkage=job_linkage_report\s*\)", cell)
     assert re.search(r"^trusted_jobs_with_details\s*=\s*job_detail_join\.trusted_jobs_with_details", cell, re.M)
     assert re.search(r"^job_detail_join_ready\s*=\s*job_detail_join\.join_ready", cell, re.M)
     # The trust decision lives in production code, not in notebook boolean logic.
@@ -547,7 +549,7 @@ def test_ingestion_notebook_checks_coverage_on_cleaned_frames_before_join() -> N
     reconcile = next(i for i, s in enumerate(sources) if "assess_job_detail_reconciliation(" in s)
     join = next(i for i, s in enumerate(sources) if "assess_job_detail_join_readiness(" in s)
     assert keys < cover < reconcile < join
-    assert re.search(r"location_coverage_report\s*=\s*assess_dataset_location_coverage\(\s*cleaned\s*,"
+    assert re.search(r"location_coverage_report\s*=\s*assess_dataset_location_coverage\(\s*analysis_datasets\s*,"
                      r"\s*EXPECTED_LOCATION_COVERAGE\s*\)", sources[cover])
     assert "validate_expected_location_coverage" not in code
     # No location column literals or own distinct/set logic. (Column names
@@ -624,13 +626,13 @@ def test_ingestion_notebook_reconciles_temporal_fields_through_the_api() -> None
     notebook = read_notebook(INGESTION_NOTEBOOK)
     sources = [c.source for c in _code_cells(notebook)]
     code = "\n".join(sources)
-    for name in ("assess_temporal_reconciliation", "TEMPORAL_RECONCILIATION"):
+    for name in ("assess_temporal_reconciliation", "ANALYSIS_TEMPORAL_RECONCILIATION"):
         assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
     relate = next(i for i, s in enumerate(sources) if "assess_one_to_many_join(" in s)
     temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
     assert relate < temporal
-    assert re.search(r"temporal_report\s*=\s*assess_temporal_reconciliation\(\s*jobs_df\s*,\s*cars_df\s*,"
-                     r"\s*TEMPORAL_RECONCILIATION\s*\)", sources[temporal])
+    assert re.search(r"temporal_report\s*=\s*assess_temporal_reconciliation\(\s*analysis_jobs_df\s*,\s*analysis_cars_df\s*,"
+                     r"\s*ANALYSIS_TEMPORAL_RECONCILIATION\s*\)", sources[temporal])
     assert re.search(r"temporal_fields_trusted\s*=", sources[temporal])
     # No duplicated field lists, parsing rules or repairs in the notebook.
     fields = {f.column for f in TEMPORAL_RECONCILIATION.fields}
@@ -662,13 +664,13 @@ def test_ingestion_notebook_compares_related_streams_through_the_api() -> None:
     notebook = read_notebook(INGESTION_NOTEBOOK)
     sources = [c.source for c in _code_cells(notebook)]
     code = "\n".join(sources)
-    for name in ("compare_location_streams", "LOCATION_STREAM_COMPARISON"):
+    for name in ("compare_location_streams", "ANALYSIS_LOCATION_STREAM_COMPARISON"):
         assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
     temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
     compare = next(i for i, s in enumerate(sources) if "compare_location_streams(" in s)
     assert temporal < compare
-    assert re.search(r"location_comparison_report\s*=\s*compare_location_streams\(\s*jobs_df\s*,\s*cars_df\s*,"
-                     r"\s*LOCATION_STREAM_COMPARISON\s*\)", sources[compare])
+    assert re.search(r"location_comparison_report\s*=\s*compare_location_streams\(\s*analysis_jobs_df\s*,"
+                     r"\s*analysis_cars_df\s*,\s*ANALYSIS_LOCATION_STREAM_COMPARISON\s*\)", sources[compare])
     # The ambiguous boolean handoff is gone: identity comes from the policy gate.
     assert "location_alias_confirmed" not in code and "alias_authority_sufficient" not in code
     # Pair, columns and aliasing live in the central definition only.
@@ -808,7 +810,7 @@ def test_ingestion_notebook_assesses_vehicle_stability_through_the_api() -> None
     temporal = next(i for i, s in enumerate(sources) if "assess_temporal_reconciliation(" in s)
     stability = next(i for i, s in enumerate(sources) if "assess_vehicle_attribute_stability(" in s)
     assert relate < temporal < stability
-    assert re.search(r"vehicle_stability_report\s*=\s*assess_vehicle_attribute_stability\(\s*cars_df\s*,"
+    assert re.search(r"vehicle_stability_report\s*=\s*assess_vehicle_attribute_stability\(\s*analysis_cars_df\s*,"
                      r"\s*VEHICLE_ATTRIBUTE_STABILITY\s*\)", sources[stability])
     assert re.search(r"vehicle_attributes_stable\s*=", sources[stability])
     # No duplicated field lists or stability logic in the notebook.
@@ -1025,8 +1027,8 @@ package.VANCOUVER_LOCATION_POLICY = dataclasses.replace(
     package.VANCOUVER_LOCATION_POLICY, state=state,
     authority=LocationPolicyAuthority(source="SYNTH-AUTHORITY"),
     canonical_location={canonical!r} if state is LocationPolicyState.CONFIRMED_ALIAS else None)
-package.LOCATION_STREAM_COMPARISON = dataclasses.replace(
-    package.LOCATION_STREAM_COMPARISON, identity_columns=({identity!r},))
+package.ANALYSIS_LOCATION_STREAM_COMPARISON = dataclasses.replace(
+    package.ANALYSIS_LOCATION_STREAM_COMPARISON, identity_columns=({identity!r},))
 """
 
 
@@ -1146,7 +1148,7 @@ def test_ingestion_notebook_gates_completeness_through_the_api() -> None:
     cell = next(s for s in sources if "assess_completeness(" in s)
     # The all-expected-stream aggregate, never a hand-picked subset (a single Calgary
     # report used to be passed, so other expected streams could fail unnoticed).
-    for argument in ("datasets=cleaned", "coverage=location_coverage_report", "streams=expected_streams_report",
+    for argument in ("datasets=analysis_datasets", "coverage=location_coverage_report", "streams=expected_streams_report",
                      "reconciliation=reconciliation_report", "city_integrity=city_integrity_report"):
         assert argument in cell
     assert "streams=(location_stream_report,)" not in code
@@ -1457,3 +1459,81 @@ print(json.dumps(events))
                             capture_output=True, text=True, check=True)
     assert json.loads(result.stdout.strip().splitlines()[-1]) == []
     assert notebook_validation.NOTEBOOK_FORMAT_MAJOR == 4
+
+
+# ------------------------------------------------------ authority-backed job linkage
+
+
+def test_ingestion_notebook_links_jobs_through_the_api_in_pipeline_order() -> None:
+    notebook = read_notebook(INGESTION_NOTEBOOK)
+    sources = [c.source for c in _code_cells(notebook)]
+    code = "\n".join(sources)
+    for name in ("assess_job_linkage", "load_job_linkage_policy", "ANALYSIS_DATASET_DEFINITIONS",
+                 "ANALYSIS_JOB_DETAIL_RELATIONSHIP"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S)
+
+    def index(marker: str) -> int:
+        return next(i for i, s in enumerate(sources) if marker in s)
+
+    link = index("assess_job_linkage(")
+    assert index("remove_blank_rows_from_raw_datasets(") < index("validate_raw_dataset_identifier_dtypes(") < link
+    for later in ("assess_raw_dataset_unique_keys(", "assess_job_detail_reconciliation(", "assess_one_to_many_join(",
+                  "investigate_location_stream(", "assess_expected_location_streams(", "assess_city_integrity(",
+                  "assess_job_detail_join_readiness(", "assess_pricing_readiness("):
+        assert link < index(later), later
+    cell = sources[link]
+    assert re.search(r"job_linkage_policy\s*=\s*load_job_linkage_policy\(\s*\)", cell)
+    assert re.search(r"job_linkage\s*=\s*assess_job_linkage\(\s*jobs_df\s*,\s*cars_df\s*,\s*job_linkage_policy\s*\)", cell)
+    assert re.search(r"analysis_datasets\s*=\s*job_linkage\.datasets\(\s*cleaned\s*\)", cell)
+    pricing = sources[index("assess_pricing_readiness(")]
+    assert "job_linkage=job_linkage_report" in pricing
+    # After linkage, analytical steps never use the raw frames or the raw-source relationship.
+    after = "\n".join(sources[link + 1:])
+    assert not re.search(r"\b(jobs_df|cars_df)\b", after)
+    assert not re.search(r"(?<!ANALYSIS_)\bJOB_DETAIL_RELATIONSHIP\b", code)
+    assert not re.search(r"[\"'](job_id|row_index|job_id_linkage_key|row_index_key)[\"']", code)
+
+
+def _legacy_export(directory: Path, *, ambiguous: bool = False) -> None:
+    """Fabricated CSVs shaped like the historical export (digit ids; decimal-zero detail forms)."""
+    rel = JOB_DETAIL_RELATIONSHIP
+    jobs = [{rel.parent_key_columns[0]: "5101", rel.expected_detail_count_column: "2"},
+            {rel.parent_key_columns[0]: "05102", rel.expected_detail_count_column: "1"}]
+    if ambiguous:
+        jobs.append({rel.parent_key_columns[0]: "5101.0", rel.expected_detail_count_column: "0"})
+    cars = [{rel.detail_key_columns[0]: "5101.0", "row_index": "0.0"},
+            {rel.detail_key_columns[0]: "5101.0", "row_index": "1.0"},
+            {rel.detail_key_columns[0]: "05102.0", "row_index": "0.0"}]
+    for key, key_rows in ((DatasetKey.JOBS, jobs), (DatasetKey.CARS, cars)):
+        columns = DATASET_DEFINITIONS[key].columns
+        lines = [",".join(r.get(c, f"synthetic_{i}_{n}") for i, c in enumerate(columns)) for n, r in enumerate(key_rows)]
+        (directory / f"synthetic_{key}.csv").write_bytes(
+            (",".join(columns) + "\n" + "\n".join(lines) + "\n").encode("utf-8"))
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_ingestion_notebook_linkage_step_reports_aggregates_only(tmp_path: Path, ambiguous: bool) -> None:
+    directory = tmp_path / "raw"
+    directory.mkdir()
+    _legacy_export(directory, ambiguous=ambiguous)
+    workdir = tmp_path / "kernel"
+    workdir.mkdir()
+    repo_before = _snapshot(PROJECT_ROOT)
+    result = execute_notebook_copy(INGESTION_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(directory)})
+    linkage = _step_output(result, "assess_job_linkage(")
+    join = _step_output(result, "assess_job_detail_join_readiness(")
+    pricing = _step_output(result, "assess_pricing_readiness(")
+    assert "Linkage policy: available" in linkage
+    if ambiguous:
+        assert "Job linkage valid: False" in linkage and "detail_job_reference_ambiguous" in linkage
+        assert "Job linkage valid: False" in join and "Trusted join ready: False" in join
+        assert "job_key_normalization_not_ready" in pricing and "Pricing analysis ready: False" in pricing
+    else:
+        assert "Job linkage valid: True" in linkage and "approved legacy repair: 3" in linkage
+        assert "Job linkage blocked by: nothing" in linkage and "Job linkage valid: True" in join
+        assert "Job linkage ready: True" in pricing
+    for value in ("5101", "05102", "SYNTH", "synthetic_"):
+        assert value not in linkage + join + pricing
+    assert not any(column in linkage for key in DatasetKey for column in contract_columns(key))
+    assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before

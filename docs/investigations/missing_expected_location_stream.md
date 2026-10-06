@@ -70,5 +70,6 @@ and notebook logic.
 
 - An authoritative collection schedule (`COLLECTION_SCHEDULE`) to assess
   temporal completeness.
-- An explicit identifier-normalisation step so detail rows link to jobs.
+- ~~An explicit identifier-normalisation step so detail rows link to jobs.~~ Done: authority-backed
+  job linkage (`job_linkage`, pricing-authority record `v2`).
 - Upstream confirmation of why the branch was not returned in some runs.

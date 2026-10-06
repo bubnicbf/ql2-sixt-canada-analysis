@@ -10,8 +10,38 @@ agreements (22 atomic decisions, `DecisionId` in
 
 | File | Purpose |
 | --- | --- |
-| [`v1.toml`](v1.toml) | Revision 1 - every decision `PROPOSED` (no attributable authority found). |
-| [`authority_request_checklist.md`](authority_request_checklist.md) | Neutral questions to send to each authority, generated from the current revision. |
+| [`v1.toml`](v1.toml) | Revision 1 (schema 1, historical, unchanged) - every decision `PROPOSED` (no attributable authority found). |
+| [`v2.toml`](v2.toml) | Revision 2 (schema 2, **current**) - supersedes v1; the four job-identifier decisions are `APPROVED` by the collection owner, the other 18 remain `PROPOSED`. |
+| [`authority_request_checklist.md`](authority_request_checklist.md) | Neutral questions for the 18 decisions still blocked on external input, generated from the current revision. |
+| [`../governance/job-identifier-governance-2026-10-06.md`](../governance/job-identifier-governance-2026-10-06.md) | Durable authority reference for the revision-2 approvals (collection-governance outcome supplied by the repository owner, recorded 2026-10-06). |
+
+## Revision 2: approved job-identifier decisions
+
+`v2.toml` approves, under schema 2, the four job-identifier decisions:
+
+* `JOB_ID_INVALID_NUMERIC_REPRESENTATIONS` - job identifiers are **opaque
+  text**: no trimming, no case folding, no numeric parsing; missing and
+  whitespace-only values are invalid linkage keys; exact non-blank matches are
+  preserved; unknown, unmatched, colliding or ambiguous representations block
+  linkage.
+* `JOB_ID_LEADING_ZERO_SIGNIFICANCE` - leading zeros are significant.
+* `JOB_ID_RAW_AND_LINKAGE_PRESERVATION` - the raw identifier is preserved and
+  a separate derived linkage key is required.
+* `JOB_ID_DECIMAL_ZERO_EQUIVALENCE` - approved **only** as the legacy repair of
+  the historical detail export: exact match first; the single fallback removes
+  a final `.0` from a detail value made entirely of ASCII digits and requires a
+  unique parent match. The same defect on the offer position is recorded as
+  `offer_position = NONNEGATIVE_INTEGER_WITH_LEGACY_DECIMAL_ZERO`.
+
+Schema 1 expressed these four decisions as booleans, which cannot state
+opaque-text semantics. Schema 2 replaces only those four shapes with fixed,
+explicit policies (`OPAQUE_TEXT_IDENTIFIER_POLICY`,
+`LEGACY_DECIMAL_ZERO_REPAIR` in `authority_decisions.py`) and rejects any
+contradiction, within one decision or across them. `v1.toml` keeps validating
+under schema 1; the shapes never mix. The approvals are implemented
+separately and with their own tests in `ql2_sixt_canada_analysis.job_linkage`
+(`job_linkage_policy_from_record` builds the policy only when all four are
+approved and consistent).
 
 ## Status semantics
 
@@ -49,13 +79,15 @@ Revisions are immutable once committed. To record an answer, copy the
 current revision to `v<N+1>.toml`, set `record_version = N+1`,
 `record_id = "pricing-authorities-v<N+1>"` and
 `supersedes = "pricing-authorities-v<N>"`, update `source_commit`, `created`,
-the affected decisions, `summary` and `external_inputs`, then regenerate the
-checklist. Old revisions stay in place as history.
+the affected decisions, `summary` and `external_inputs`, point
+`CURRENT_RECORD_PATH` at the new file, then regenerate the checklist.
+Old revisions stay in place as history.
 
 ## Validation
 
 ```bash
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v1.toml
+python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v2.toml
 ```
 
 prints a sanitized status summary (decision ids, statuses, roles and counts
@@ -66,8 +98,11 @@ suite validates the committed revision and checks that the checklist matches
 
 ## Approved decisions are implemented separately
 
-Recording an approval changes no production behaviour. Contracts in
-`schemas.py`, the coverage, schedule and temporal rules and the pricing gate
-consume an approved decision only through separate implementation work with
-its own tests. `pricing_baseline.baseline_authority_inputs` reads APPROVED
-decisions only, so revision 1 cannot clear any pricing blocker or plan gap.
+Recording an approval changes no production behaviour by itself: every
+approved decision still requires a separately tested production
+implementation. Contracts in `schemas.py`, the coverage, schedule and temporal
+rules and the pricing gate consume an approved decision only through separate
+implementation work with its own tests - for the four job-identifier
+decisions, `ql2_sixt_canada_analysis.job_linkage`.
+`pricing_baseline.baseline_authority_inputs` reads APPROVED decisions only, so
+neither revision clears a location-role or rental-date plan gap.

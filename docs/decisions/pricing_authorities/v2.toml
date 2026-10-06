@@ -1,0 +1,385 @@
+# Pricing-authority decision record, revision 2 (schema 2).
+# Validate: python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v2.toml
+# Supersedes revision 1 (kept unchanged). The four job-identifier decisions are APPROVED
+# by the collection owner (docs/decisions/governance/job-identifier-governance-2026-10-06.md);
+# the other 18 decisions remain PROPOSED. Evidence entries are non-authoritative.
+
+schema_version = 2
+record_version = 2
+record_id = "pricing-authorities-v2"
+created = 2026-10-06
+scope = "Pricing-readiness prerequisites for the hourly Sixt Canada rate feed (job and detail extracts)."
+source_commit = "8d62bada0e0bdef279b0645848b3af9088a28d71"
+supersedes = "pricing-authorities-v1"
+
+external_inputs = [
+  "EXPECTED_STREAM_UNIVERSE",
+  "EXPECTED_STREAM_SOURCE_SPELLING",
+  "LOCATION_ROLE_ASSIGNMENTS",
+  "VALID_LOCATION_COMPARISON_PAIRS",
+  "VANCOUVER_LOCATION_IDENTITY",
+  "SCHEDULE_CAPTURE_TIMESTAMP",
+  "SCHEDULE_EXPECTED_PERIODS",
+  "SCHEDULE_SHARING_MODEL",
+  "SCHEDULE_EXCEPTIONS",
+  "FINISHED_AT_TIMEZONE",
+  "SCRAPED_FINISHED_ORDERING",
+  "SCRAPED_FINISHED_TOLERANCE",
+  "REPORTING_DAY_SOURCE",
+  "REPORTING_DAY_TIMEZONE",
+  "SCRAPE_DATE_SEMANTICS",
+  "DATE_CLEAN_SEMANTICS",
+  "RENTAL_DATE_VALIDITY",
+  "RENTAL_DATE_PARENT_DETAIL_AGREEMENTS",
+]
+
+[summary]
+proposed = 18
+approved = 4
+rejected = 0
+
+[[decisions]]
+id = "JOB_ID_DECIMAL_ZERO_EQUIVALENCE"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Is a job identifier written with a trailing decimal-zero suffix the same identifier as the same digits written without it?"
+blocking_external_input = false
+downstream = ["key_contracts_invalid", "one_to_many_invalid", "declared_counts_not_reconciled", "orphan_details_present", "trusted_join_not_ready"]
+
+[[decisions.evidence]]
+kind = "RAW_DATA_OBSERVATION"
+summary = "In the local raw extract the detail-side job identifier is serialized with a decimal-zero suffix that the parent-side identifier lacks; removing that suffix in memory made counts reconcile. This is an observation of the extract, not a supplier or collection-owner rule."
+reference = "docs/investigations/pricing_readiness_baseline.md"
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: collection-governance meeting outcome supplied by the repository owner"
+reference = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
+note = "Recorded in the repository on 2026-10-06. Meeting date, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+equivalence = "LEGACY_DETAIL_EXPORT_REPAIR_ONLY"
+cause = "SPREADSHEET_SERIALIZATION_DEFECT"
+detail_field = "cars.job_id"
+parent_field = "jobs.job_id"
+pattern = "ASCII_DIGITS_THEN_SINGLE_DECIMAL_ZERO"
+match_order = "EXACT_FIRST"
+parent_match = "UNIQUE_REQUIRED"
+offer_position = "NONNEGATIVE_INTEGER_WITH_LEGACY_DECIMAL_ZERO"
+
+[[decisions]]
+id = "JOB_ID_LEADING_ZERO_SIGNIFICANCE"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Are leading zeros in a job identifier significant, so that identifiers differing only in leading zeros are different jobs?"
+blocking_external_input = false
+downstream = ["key_contracts_invalid", "one_to_many_invalid", "declared_counts_not_reconciled", "orphan_details_present", "trusted_join_not_ready"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: collection-governance meeting outcome supplied by the repository owner"
+reference = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
+note = "Recorded in the repository on 2026-10-06. Meeting date, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+leading_zeros_significant = true
+
+[[decisions]]
+id = "JOB_ID_INVALID_NUMERIC_REPRESENTATIONS"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Which textual representations of a job identifier are invalid: a non-zero fractional suffix, scientific notation, a sign, surrounding whitespace, padding, or other numeric forms?"
+blocking_external_input = false
+downstream = ["key_contracts_invalid", "one_to_many_invalid", "declared_counts_not_reconciled", "orphan_details_present", "trusted_join_not_ready"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: collection-governance meeting outcome supplied by the repository owner"
+reference = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
+note = "Recorded in the repository on 2026-10-06. Meeting date, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+semantics = "OPAQUE_TEXT"
+trim_whitespace = false
+case_fold = false
+numeric_parsing = false
+missing_invalid = true
+whitespace_only_invalid = true
+exact_nonblank_match_preserved = true
+unresolved_representations = "BLOCK_LINKAGE"
+
+[[decisions]]
+id = "JOB_ID_RAW_AND_LINKAGE_PRESERVATION"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Must the raw identifier text be preserved unchanged, with any normalized linkage key kept as a separate field?"
+blocking_external_input = false
+downstream = ["key_contracts_invalid", "one_to_many_invalid", "declared_counts_not_reconciled", "orphan_details_present", "trusted_join_not_ready"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: collection-governance meeting outcome supplied by the repository owner"
+reference = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
+note = "Recorded in the repository on 2026-10-06. Meeting date, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+preserve_raw_identifier = true
+separate_linkage_key = true
+
+[[decisions]]
+id = "EXPECTED_STREAM_UNIVERSE"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "Which [city, location] streams is the collection expected to return, and is that list exhaustive or a minimum?"
+blocking_external_input = true
+downstream = ["expected_streams_not_proven", "data_incomplete", "expected_streams_minimum_required_not_exhaustive"]
+
+[[decisions.evidence]]
+kind = "RAW_DATA_OBSERVATION"
+summary = "Seven [city, location] streams are present in the local raw extract. Presence in one extract does not prove the expected universe, its exhaustiveness or the source spelling."
+reference = "docs/investigations/pricing_readiness_baseline.md"
+observed_candidates = [
+  ["calgary", "Calgary Downtown"],
+  ["calgary", "Calgary Int Airport"],
+  ["toronto", "Toronto Downtown"],
+  ["toronto", "Toronto Int Airport"],
+  ["vancouver", "Vancouver Downtown"],
+  ["vancouver", "Vancouver Int Airport"],
+  ["vancouver", "Vancouver Thurlow"],
+]
+
+[[decisions.evidence]]
+kind = "REPOSITORY_IMPLEMENTATION_NOTE"
+summary = "The current coverage contract lists three expected streams in MINIMUM_REQUIRED mode as an engineering placeholder, not an authority decision."
+reference = "src/ql2_sixt_canada_analysis/schemas.py"
+
+[[decisions]]
+id = "EXPECTED_STREAM_SOURCE_SPELLING"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What is the exact source spelling (case, spacing, punctuation) of each expected city and location value?"
+blocking_external_input = true
+downstream = ["expected_streams_not_proven", "data_incomplete"]
+
+[[decisions.evidence]]
+kind = "RAW_DATA_OBSERVATION"
+summary = "Seven [city, location] streams are present in the local raw extract. Presence in one extract does not prove the expected universe, its exhaustiveness or the source spelling."
+reference = "docs/investigations/pricing_readiness_baseline.md"
+observed_candidates = [
+  ["calgary", "Calgary Downtown"],
+  ["calgary", "Calgary Int Airport"],
+  ["toronto", "Toronto Downtown"],
+  ["toronto", "Toronto Int Airport"],
+  ["vancouver", "Vancouver Downtown"],
+  ["vancouver", "Vancouver Int Airport"],
+  ["vancouver", "Vancouver Thurlow"],
+]
+
+[[decisions]]
+id = "LOCATION_ROLE_ASSIGNMENTS"
+status = "PROPOSED"
+responsible_authority = ["BUSINESS_OWNER"]
+joint = false
+question = "Which role (airport, downtown or other) does each expected location have for pricing analysis?"
+blocking_external_input = true
+downstream = ["airport_downtown_role_map_unavailable"]
+
+[[decisions.evidence]]
+kind = "RAW_DATA_OBSERVATION"
+summary = "Seven [city, location] streams are present in the local raw extract. Presence in one extract does not prove the expected universe, its exhaustiveness or the source spelling."
+reference = "docs/investigations/pricing_readiness_baseline.md"
+observed_candidates = [
+  ["calgary", "Calgary Downtown"],
+  ["calgary", "Calgary Int Airport"],
+  ["toronto", "Toronto Downtown"],
+  ["toronto", "Toronto Int Airport"],
+  ["vancouver", "Vancouver Downtown"],
+  ["vancouver", "Vancouver Int Airport"],
+  ["vancouver", "Vancouver Thurlow"],
+]
+
+[[decisions]]
+id = "VALID_LOCATION_COMPARISON_PAIRS"
+status = "PROPOSED"
+responsible_authority = ["BUSINESS_OWNER"]
+joint = false
+question = "Which within-city airport and downtown location pairs are valid for price comparison?"
+blocking_external_input = true
+downstream = ["airport_downtown_role_map_unavailable"]
+
+[[decisions]]
+id = "VANCOUVER_LOCATION_IDENTITY"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Are the Vancouver Downtown and Vancouver Thurlow keys the same physical location under two names, or two distinct locations? If the same, which key is canonical?"
+blocking_external_input = true
+downstream = ["vancouver_policy_unresolved"]
+
+[[decisions.evidence]]
+kind = "BEHAVIORAL_ANALYSIS"
+summary = "Offer-level overlap between the two Vancouver streams was analysed; duplicate-looking behaviour cannot establish whether the keys are one physical location or two."
+reference = "docs/investigations/location_stream_comparison.md"
+
+[[decisions]]
+id = "SCHEDULE_CAPTURE_TIMESTAMP"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Which timestamp field marks the scheduled capture a row belongs to?"
+blocking_external_input = true
+downstream = ["collection_schedule_unavailable", "scheduled_coverage_incomplete"]
+
+[[decisions]]
+id = "SCHEDULE_EXPECTED_PERIODS"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What is the collection period and which period starts were scheduled, each stated with an explicit UTC offset?"
+blocking_external_input = true
+downstream = ["collection_schedule_unavailable", "scheduled_coverage_incomplete"]
+
+[[decisions.evidence]]
+kind = "RAW_DATA_OBSERVATION"
+summary = "The Calgary Downtown stream appears in one capture event of the extract; the schedule against which absence would be judged is not documented."
+reference = "docs/investigations/missing_expected_location_stream.md"
+
+[[decisions]]
+id = "SCHEDULE_SHARING_MODEL"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Is one schedule shared by every stream, or does each stream have its own schedule?"
+blocking_external_input = true
+downstream = ["collection_schedule_unavailable", "scheduled_coverage_incomplete"]
+
+[[decisions]]
+id = "SCHEDULE_EXCEPTIONS"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "Were any scheduled periods cancelled or exempted (for example outages or holidays), and under what documented authority?"
+blocking_external_input = true
+downstream = ["collection_schedule_unavailable", "scheduled_coverage_incomplete"]
+
+[[decisions.evidence]]
+kind = "RAW_DATA_OBSERVATION"
+summary = "The Calgary Downtown stream appears in one capture event of the extract; the schedule against which absence would be judged is not documented."
+reference = "docs/investigations/missing_expected_location_stream.md"
+
+[[decisions]]
+id = "FINISHED_AT_TIMEZONE"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "In which timezone are job finish timestamps recorded?"
+blocking_external_input = true
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.evidence]]
+kind = "REPOSITORY_IMPLEMENTATION_NOTE"
+summary = "The temporal contract leaves ordering, tolerance and date-validity rules unset because no authority defined them; the scraped timestamp carries a zone designator whose meaning is undocumented."
+reference = "src/ql2_sixt_canada_analysis/schemas.py"
+
+[[decisions]]
+id = "SCRAPED_FINISHED_ORDERING"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What ordering must hold between the detail scrape timestamp and the job finish timestamp, and may they be equal?"
+blocking_external_input = true
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.evidence]]
+kind = "REPOSITORY_IMPLEMENTATION_NOTE"
+summary = "The temporal contract leaves ordering, tolerance and date-validity rules unset because no authority defined them; the scraped timestamp carries a zone designator whose meaning is undocumented."
+reference = "src/ql2_sixt_canada_analysis/schemas.py"
+
+[[decisions]]
+id = "SCRAPED_FINISHED_TOLERANCE"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "What tolerance, if any, is acceptable when comparing the detail scrape timestamp with the job finish timestamp?"
+blocking_external_input = true
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.evidence]]
+kind = "REPOSITORY_IMPLEMENTATION_NOTE"
+summary = "The temporal contract leaves ordering, tolerance and date-validity rules unset because no authority defined them; the scraped timestamp carries a zone designator whose meaning is undocumented."
+reference = "src/ql2_sixt_canada_analysis/schemas.py"
+
+[[decisions]]
+id = "REPORTING_DAY_SOURCE"
+status = "PROPOSED"
+responsible_authority = ["BUSINESS_OWNER"]
+joint = false
+question = "Which field defines the reporting day used for pricing analysis?"
+blocking_external_input = true
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions]]
+id = "REPORTING_DAY_TIMEZONE"
+status = "PROPOSED"
+responsible_authority = ["BUSINESS_OWNER"]
+joint = false
+question = "In which timezone is the reporting day evaluated?"
+blocking_external_input = true
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions]]
+id = "SCRAPE_DATE_SEMANTICS"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What does the scrape date field mean, and is it derived from a timestamp or supplied as-is by the source?"
+blocking_external_input = true
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.evidence]]
+kind = "REPOSITORY_IMPLEMENTATION_NOTE"
+summary = "The temporal contract leaves ordering, tolerance and date-validity rules unset because no authority defined them; the scraped timestamp carries a zone designator whose meaning is undocumented."
+reference = "src/ql2_sixt_canada_analysis/schemas.py"
+
+[[decisions]]
+id = "DATE_CLEAN_SEMANTICS"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What does the cleaned date field mean, and is it derived from a timestamp or supplied as-is by the source?"
+blocking_external_input = true
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.evidence]]
+kind = "REPOSITORY_IMPLEMENTATION_NOTE"
+summary = "The temporal contract leaves ordering, tolerance and date-validity rules unset because no authority defined them; the scraped timestamp carries a zone designator whose meaning is undocumented."
+reference = "src/ql2_sixt_canada_analysis/schemas.py"
+
+[[decisions]]
+id = "RENTAL_DATE_VALIDITY"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "What makes a pickup and return date valid: format, ordering, whether they may be equal, and minimum and maximum rental duration?"
+blocking_external_input = true
+downstream = ["rental_period_date_rules_unavailable", "temporal_fields_untrusted"]
+
+[[decisions]]
+id = "RENTAL_DATE_PARENT_DETAIL_AGREEMENTS"
+status = "PROPOSED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "For each of the detail fields job_pickup_date, job_return_date, pickup_date and return_date, which job-level date field (pickup_date or return_date) must it equal?"
+blocking_external_input = true
+downstream = ["rental_period_date_rules_unavailable", "temporal_fields_untrusted"]
+
+[[decisions.evidence]]
+kind = "ISSUE_OR_REVIEW_NOTE"
+summary = "Review of the pricing-readiness baseline asked for exact approved parent-to-detail rental-date agreements instead of name-based inference."
+reference = "docs/investigations/pricing_readiness_baseline.md"

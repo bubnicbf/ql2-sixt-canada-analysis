@@ -1,8 +1,9 @@
 """Tests for the fail-closed trusted jobs-to-details join.
 
-Frames are built from the central contracts with fabricated values
-(``SYNTH-JOB-001``, offer positions 0, 1, ...). Each negative fixture breaks
-exactly the contract named in the test.
+Raw frames are built from the central contracts with fabricated values
+(``SYNTH-JOB-001``, offer positions 0, 1, ...), linked under a synthetic
+approved policy (``conftest.SYNTH_LINKAGE_POLICY``) and joined on the derived
+keys. Each negative fixture breaks exactly the contract named in the test.
 """
 
 from __future__ import annotations
@@ -13,22 +14,33 @@ import pandas as pd
 import pytest
 
 import ql2_sixt_canada_analysis
+from conftest import SYNTH_LINKAGE_POLICY, link, linked_join as assess, require_linked_join
+
+from ql2_sixt_canada_analysis.job_linkage import JobLinkageBlocker as LB
 from ql2_sixt_canada_analysis.join_readiness import (
     JobDetailJoinBlocker as B,
     JobDetailJoinReadiness,
     UntrustedJoinError,
-    assess_job_detail_join_readiness as assess,
+    assess_job_detail_join_readiness,
     require_trusted_job_detail_join,
 )
 from ql2_sixt_canada_analysis.relationships import join_jobs_to_details
-from ql2_sixt_canada_analysis.schemas import DATASET_DEFINITIONS, JOB_DETAIL_RELATIONSHIP, DatasetKey
+from ql2_sixt_canada_analysis.schemas import (
+    ANALYSIS_JOB_DETAIL_RELATIONSHIP,
+    DATASET_DEFINITIONS,
+    JOB_DETAIL_RELATIONSHIP,
+    JOB_LINKAGE_KEY_COLUMN,
+    OFFER_POSITION_KEY_COLUMN,
+    DatasetKey,
+)
 
-REL = JOB_DETAIL_RELATIONSHIP
-JOBS_DEF, CARS_DEF = REL.parent_definition, REL.detail_definition
-PK, = REL.parent_key_columns
-DK, = REL.detail_key_columns
+RAW_REL, REL = JOB_DETAIL_RELATIONSHIP, ANALYSIS_JOB_DETAIL_RELATIONSHIP
+JOBS_DEF, CARS_DEF = RAW_REL.parent_definition, RAW_REL.detail_definition    # raw source contracts
+PK, = RAW_REL.parent_key_columns          # raw identifier (opaque text, never the trusted join key)
+DK, = RAW_REL.detail_key_columns
+LK = JOB_LINKAGE_KEY_COLUMN               # the derived linkage key the trusted join uses
 COUNT = REL.expected_detail_count_column
-POSITION, = CARS_DEF.non_identifier_key_columns          # the detail key's offer-position component
+POSITION, = CARS_DEF.non_identifier_key_columns          # the raw offer-position column
 J1, J2, J3, ORPHAN = "SYNTH-JOB-001", "SYNTH-JOB-002", "SYNTH-JOB-003", "SYNTH-JOB-999"
 
 
@@ -72,17 +84,20 @@ def test_fully_valid_inputs_produce_the_trusted_join():
     assert joined is not None and r.diagnostic_jobs_with_details is None
     # 3 detail rows + 1 job without details; each detail exactly once, nothing dropped or duplicated.
     assert len(joined) == 4 and len(joined) == r.relationship_report.expected_left_join_row_count
-    linked = joined.loc[joined[POSITION].notna()]
-    assert sorted(zip(linked[PK], linked[POSITION].astype(int))) == [(J1, 0), (J1, 1), (J2, 0)]
-    assert joined[PK].tolist().count(J3) == 1
-    assert {PK, COUNT, POSITION} <= set(joined.columns)
-    shared = (set(JOBS_DEF.columns) & set(CARS_DEF.columns)) - {PK}
+    linked = joined.loc[joined[OFFER_POSITION_KEY_COLUMN].notna()]
+    assert sorted(zip(linked[LK], linked[OFFER_POSITION_KEY_COLUMN].astype(int))) == [(J1, 0), (J1, 1), (J2, 0)]
+    assert joined[LK].tolist().count(J3) == 1
+    assert {LK, COUNT, POSITION, OFFER_POSITION_KEY_COLUMN} <= set(joined.columns)
+    # The raw identifier is a non-key column on both sides: kept (suffixed), never the join key.
+    assert PK not in joined and f"{PK}{REL.parent_suffix}" in joined and f"{PK}{REL.detail_suffix}" in joined
+    shared = (set(REL.parent_definition.columns) & set(REL.detail_definition.columns)) - {LK}
     assert all(f"{c}{REL.parent_suffix}" in joined and f"{c}{REL.detail_suffix}" in joined for c in shared)
-    pd.testing.assert_frame_equal(joined, join_jobs_to_details(j, c).joined)   # same validated merge
+    linked_frames = link(j, c)
+    pd.testing.assert_frame_equal(joined, join_jobs_to_details(linked_frames.jobs, linked_frames.cars, REL).joined)
 
 
 def test_require_trusted_join_returns_the_frame_for_valid_inputs():
-    joined = require_trusted_job_detail_join(*valid_inputs())
+    joined = require_linked_join(*valid_inputs())
     assert isinstance(joined, pd.DataFrame) and len(joined) == 4
 
 
@@ -113,7 +128,11 @@ def test_duplicate_jobs_key_blocks_trust_even_though_a_raw_merge_runs():
     assert r.jobs_key_contract_valid is False and r.all_key_contracts_valid is False
     assert r.relationship_report is None and r.reconciliation_report is None   # unassessable -> unavailable
     assert r.relationship_contract_valid is False and r.declared_counts_reconciled is False
-    assert_blocked(r, B.JOBS_KEY_CONTRACT_FAILED, B.REQUIRED_REPORT_UNAVAILABLE)
+    # The duplicated parent also makes linkage ambiguous, so linkage blocks as well.
+    # The ambiguous detail reference has no key, so the detail key is incomplete too.
+    assert_blocked(r, B.JOBS_KEY_CONTRACT_FAILED, B.DETAILS_KEY_CONTRACT_FAILED, B.REQUIRED_REPORT_UNAVAILABLE,
+                   B.JOB_LINKAGE_NOT_VALID)
+    assert {LB.PARENT_KEY_NOT_UNIQUE, LB.DETAIL_REFERENCE_AMBIGUOUS} <= set(r.job_linkage_reasons)
     assert r.diagnostic_jobs_with_details is None
 
 
@@ -126,19 +145,33 @@ def test_declared_count_mismatch_blocks_trust():
     assert r.diagnostic_jobs_with_details is not None
 
 
-def test_orphan_detail_blocks_trust_and_is_never_dropped_into_a_frame():
+def test_unmatched_detail_blocks_trust_and_is_never_dropped_into_a_frame():
+    # An unmatched reference gets no linkage key (never a guessed one): a missing link.
     j, c = jobs((J1, 1)), cars((J1, 0), (ORPHAN, 0))
     r = assess(j, c)
-    assert r.relationship_contract_valid is False and r.relationship_report.orphan_detail_row_count == 1
-    assert_blocked(r, B.RELATIONSHIP_CONTRACT_FAILED, B.ORPHAN_DETAILS_PRESENT, B.DECLARED_COUNTS_NOT_RECONCILED)
+    assert r.relationship_contract_valid is False and r.relationship_report.missing_link_detail_row_count == 1
+    assert r.relationship_report.orphan_detail_row_count == 0
+    assert_blocked(r, B.RELATIONSHIP_CONTRACT_FAILED, B.MISSING_LINK_DETAILS_PRESENT, B.DECLARED_COUNTS_NOT_RECONCILED,
+                   B.DETAILS_KEY_CONTRACT_FAILED, B.JOB_LINKAGE_NOT_VALID)
+    assert r.job_linkage_reasons == (LB.DETAIL_REFERENCE_UNMATCHED,)
     assert r.diagnostic_jobs_with_details is None
+
+
+def test_orphan_linkage_keys_still_block_on_the_derived_relationship():
+    # Frames whose derived key names no job (e.g. altered after linkage) are orphans.
+    result = link(*valid_inputs())
+    c = result.cars
+    c.loc[0, LK] = ORPHAN
+    r = assess_job_detail_join_readiness(result.jobs, c, job_linkage=result.report)
+    assert B.ORPHAN_DETAILS_PRESENT in r.blocking_reasons and not r.join_ready
 
 
 def test_missing_link_detail_blocks_trust():
     j, c = jobs((J1, 1)), cars((J1, 0), (pd.NA, 1))
     r = assess(j, c)
-    assert B.MISSING_LINK_DETAILS_PRESENT in r.blocking_reasons
+    assert B.MISSING_LINK_DETAILS_PRESENT in r.blocking_reasons and B.JOB_LINKAGE_NOT_VALID in r.blocking_reasons
     assert B.RELATIONSHIP_CONTRACT_FAILED in r.blocking_reasons and not r.join_ready
+    assert LB.DETAIL_REFERENCE_MISSING in r.job_linkage_reasons
 
 
 # ---------------------------------------------------------- multiple failures
@@ -147,34 +180,38 @@ def test_missing_link_detail_blocks_trust():
 def test_all_simultaneous_failures_are_reported():
     j, c = jobs((J1, 1)), cars((J1, 0), (J1, 0))                 # duplicate detail key + count mismatch
     assert_blocked(assess(j, c), B.DETAILS_KEY_CONTRACT_FAILED, B.DECLARED_COUNTS_NOT_RECONCILED)
-    j, c = jobs((J1, 2)), cars((J1, 0), (J1, 0), (ORPHAN, 0))    # duplicate detail key + orphan
+    j, c = jobs((J1, 2)), cars((J1, 0), (J1, 0), (ORPHAN, 0))    # duplicate detail key + unmatched
     assert_blocked(assess(j, c), B.DETAILS_KEY_CONTRACT_FAILED, B.RELATIONSHIP_CONTRACT_FAILED,
-                   B.ORPHAN_DETAILS_PRESENT, B.DECLARED_COUNTS_NOT_RECONCILED)
+                   B.MISSING_LINK_DETAILS_PRESENT, B.DECLARED_COUNTS_NOT_RECONCILED, B.JOB_LINKAGE_NOT_VALID)
 
 
 # ------------------------------------------------------ unavailable prerequisites
 
 
 def test_unassessable_identifier_types_fail_closed():
-    j, c = valid_inputs()
-    r = assess(j, c.astype({DK: object}))
+    result = link(*valid_inputs())
+    r = assess_job_detail_join_readiness(result.jobs, result.cars.astype({LK: object}), job_linkage=result.report)
     assert r.relationship_report is None and r.reconciliation_report is None
     assert B.REQUIRED_REPORT_UNAVAILABLE in r.blocking_reasons and not r.all_reports_available
+    assert B.JOB_LINKAGE_KEY_NOT_APPLIED in r.blocking_reasons
     assert r.trusted_jobs_with_details is None and r.diagnostic_jobs_with_details is None
 
 
 def test_blank_rows_make_reports_unavailable():
-    j, c = valid_inputs()
+    result = link(*valid_inputs())
+    c = result.cars
     blank = pd.DataFrame([[None] * c.shape[1]], columns=c.columns, dtype=object).astype(
-        dict(CARS_DEF.identifier_dtypes))
-    r = assess(j, pd.concat([c, blank], ignore_index=True))
+        dict(REL.detail_definition.identifier_dtypes))
+    r = assess_job_detail_join_readiness(result.jobs, pd.concat([c, blank], ignore_index=True),
+                                         job_linkage=result.report)
     assert B.REQUIRED_REPORT_UNAVAILABLE in r.blocking_reasons and not r.join_ready
 
 
 def test_missing_parent_key_is_unavailable_not_passing():
     j, c = jobs((J1, 2), (pd.NA, 0)), cars((J1, 0), (J1, 1))
     r = assess(j, c)
-    assert_blocked(r, B.JOBS_KEY_CONTRACT_FAILED, B.REQUIRED_REPORT_UNAVAILABLE)
+    assert_blocked(r, B.JOBS_KEY_CONTRACT_FAILED, B.REQUIRED_REPORT_UNAVAILABLE, B.JOB_LINKAGE_NOT_VALID)
+    assert r.job_linkage_reasons == (LB.PARENT_KEY_INVALID,)
 
 
 # ------------------------------------------------- non-None is not sufficient
@@ -184,13 +221,13 @@ def test_executable_join_is_not_a_trusted_join():
     # The former notebook exposed the relationship-checked join whenever the
     # relationship passed; it exists here, but the trusted join does not.
     j, c = jobs((J1, 1)), cars((J1, 0), (J1, 0))
-    relationship_join = join_jobs_to_details(j, c).joined
+    relationship_join = join_jobs_to_details(j, c).joined                 # raw-source relationship
     assert relationship_join is not None and len(relationship_join) == 2
     r = assess(j, c)
     assert r.diagnostic_jobs_with_details is not None
     assert r.trusted_jobs_with_details is None and r.join_ready is False
     with pytest.raises(UntrustedJoinError) as info:
-        require_trusted_job_detail_join(j, c)
+        require_linked_join(j, c)
     assert info.value.blocking_reasons == r.blocking_reasons
     assert "SYNTH" not in str(info.value) and not any(ch.isdigit() for ch in str(info.value))
 
@@ -203,7 +240,7 @@ def test_executable_join_is_not_a_trusted_join():
 ])
 def test_public_path_never_returns_a_frame_when_any_contract_fails(inputs):
     with pytest.raises(UntrustedJoinError):
-        require_trusted_job_detail_join(*inputs())
+        require_linked_join(*inputs())
 
 
 # ------------------------------------------------- consistency and isolation
@@ -222,7 +259,7 @@ def test_outputs_are_isolated_from_inputs_and_callers():
     pd.testing.assert_frame_equal(r.trusted_jobs_with_details, expected)
     # Mutating a returned copy cannot change the next one.
     leaked = r.trusted_jobs_with_details
-    leaked.loc[0, PK] = ORPHAN
+    leaked.loc[0, LK] = ORPHAN
     pd.testing.assert_frame_equal(r.trusted_jobs_with_details, expected)
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.blocking_reasons = ()  # type: ignore[misc]
@@ -247,6 +284,58 @@ def test_type_errors():
         assess([], cars())  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         assess(jobs(), cars(), object())  # type: ignore[arg-type]
+    result = link(*valid_inputs())
+    with pytest.raises(TypeError):
+        assess_job_detail_join_readiness(result.jobs, result.cars, job_linkage=object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        assess_job_detail_join_readiness(result.jobs, result.cars)  # type: ignore[call-arg]
+
+
+# ------------------------------------------------ authority-backed linkage gate
+
+
+def test_missing_linkage_report_blocks_the_trusted_join():
+    result = link(*valid_inputs())
+    r = assess_job_detail_join_readiness(result.jobs, result.cars, job_linkage=None)
+    assert not r.join_ready and r.trusted_jobs_with_details is None
+    assert {B.JOB_LINKAGE_REPORT_UNAVAILABLE, B.JOB_LINKAGE_KEY_NOT_APPLIED} <= set(r.blocking_reasons)
+    assert r.diagnostic_jobs_with_details is not None                 # untrusted, investigation only
+    with pytest.raises(UntrustedJoinError):
+        require_trusted_job_detail_join(result.jobs, result.cars, job_linkage=None)
+
+
+def test_unavailable_policy_blocks_the_trusted_join():
+    result = link(*valid_inputs(), policy=None)
+    assert result.report.blocking_reasons == (LB.POLICY_UNAVAILABLE,)
+    r = assess_job_detail_join_readiness(result.jobs, result.cars, job_linkage=result.report)
+    assert not r.join_ready and B.JOB_LINKAGE_NOT_VALID in r.blocking_reasons
+    assert r.job_linkage_reasons == (LB.POLICY_UNAVAILABLE,)
+    assert B.JOBS_KEY_CONTRACT_FAILED in r.blocking_reasons      # no derived key -> nothing links
+
+
+def test_raw_relationship_is_never_the_trusted_join_key():
+    result = link(*valid_inputs())
+    r = assess_job_detail_join_readiness(result.jobs, result.cars, RAW_REL, job_linkage=result.report)
+    assert not r.join_ready and B.JOB_LINKAGE_KEY_NOT_APPLIED in r.blocking_reasons
+    raw = assess_job_detail_join_readiness(*valid_inputs(), job_linkage=result.report)   # no derived columns
+    assert not raw.join_ready and B.REQUIRED_REPORT_UNAVAILABLE in raw.blocking_reasons
+    assert B.JOB_LINKAGE_KEY_NOT_APPLIED in raw.blocking_reasons
+
+
+def test_report_from_other_frames_is_not_applied():
+    result = link(*valid_inputs())
+    other = link(jobs((J1, 1)), cars((J1, 0))).report
+    r = assess_job_detail_join_readiness(result.jobs, result.cars, job_linkage=other)
+    assert not r.join_ready and B.JOB_LINKAGE_KEY_NOT_APPLIED in r.blocking_reasons
+
+
+def test_legacy_decimal_zero_details_join_through_the_derived_key():
+    j, c = jobs(("0042", 2), ("SYNTH-7", 1)), cars(("0042.0", 0), ("0042.0", 1), ("SYNTH-7", 0))
+    r = assess(j, c)
+    assert r.join_ready, r.blocking_reasons
+    joined = r.trusted_jobs_with_details
+    assert sorted(set(joined[LK])) == ["0042", "SYNTH-7"]
+    assert sorted(joined[f"{PK}{REL.detail_suffix}"].dropna().unique()) == ["0042.0", "SYNTH-7"]   # raw kept
 
 
 def test_blocker_values_name_no_source_columns():
@@ -255,6 +344,7 @@ def test_blocker_values_name_no_source_columns():
 
 
 def test_package_exports():
+    assert SYNTH_LINKAGE_POLICY.legacy_decimal_zero_repair
     for name in ("assess_job_detail_join_readiness", "require_trusted_job_detail_join",
                  "JobDetailJoinReadiness", "JobDetailJoinBlocker", "UntrustedJoinError"):
         assert name in ql2_sixt_canada_analysis.__all__
