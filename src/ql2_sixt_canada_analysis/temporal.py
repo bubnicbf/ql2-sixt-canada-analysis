@@ -1,6 +1,8 @@
 """Parse and reconcile the source temporal fields against the central contract.
 
-The contract is :data:`~ql2_sixt_canada_analysis.schemas.TEMPORAL_RECONCILIATION`.
+The template contract is :data:`~ql2_sixt_canada_analysis.schemas.TEMPORAL_RECONCILIATION`;
+the authority-backed contract (city-local finish times, the approved ordering)
+is :func:`~ql2_sixt_canada_analysis.temporal_authority.current_temporal_reconciliation`.
 
 Parsing policy (:func:`parse_temporal_field`)
 --------------------------------------------
@@ -17,6 +19,16 @@ Parsing policy (:func:`parse_temporal_field`)
   designator. Unresolved values are never assigned the machine's zone or UTC.
 * Valid instants are converted to the canonical zone (UTC); dates are parsed
   to semantic calendar dates (zero padding is optional; no time part).
+* **City-local naive fields** (``city_timezones`` + ``timezone_selector``):
+  the zone of each row is selected by the exact value of the parent job's
+  city (detail rows: their linked parent's city, never their own city or
+  location label) through the approved :class:`CityTimezoneMap`. Unresolved
+  values are split into *unknown city* (no approved city), *context
+  unavailable* (no linked parent), *ambiguous* (a repeated fall-back hour)
+  and *nonexistent* (a spring-forward gap); no occurrence is chosen and
+  nothing is shifted. Instants keep the full parsed (sub-second) precision;
+  the ``YYYYMMDDTHHMMSSZ`` text (:func:`canonical_utc_text`) is a
+  presentation form only.
 
 Rules (:func:`assess_temporal_reconciliation`)
 ---------------------------------------------
@@ -27,7 +39,15 @@ Rules (:func:`assess_temporal_reconciliation`)
   date differs from the UTC date but match are counted as legitimate
   boundary crossings.
 * **Replication** - a detail-row copy equals its parent's value (instants, or
-  wall times when both sides are naive on the same basis).
+  wall times when both sides are naive on the same basis). When both sides
+  resolve on the same zone basis, the wall times **and** the full-precision
+  UTC instants must both agree.
+* **City integrity prerequisite** - a linked detail row is *trusted* only when
+  its scope columns (``city``) equal its parent's exactly
+  (``relationship.scope_agreement_columns``); mismatched rows are counted
+  (``city_mismatch_detail_row_count``) and are unassessable for replication
+  and ordering. Ordering is assessed only on trusted rows whose replication
+  holds.
 
 Detail rows are linked to exactly one parent through the central
 relationship (tuple keys, no concatenation, no many-to-many join); missing
@@ -47,6 +67,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, fields
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -60,6 +81,7 @@ from ql2_sixt_canada_analysis.schemas import (
     TemporalFieldDefinition,
     TemporalKind,
     TemporalReconciliationDefinition,
+    classify_local_time,
 )
 
 __all__ = [
@@ -72,13 +94,19 @@ __all__ = [
     "TemporalReconciliationError",
     "TemporalReconciliationReport",
     "TemporalRuleReport",
+    "UTC_CANONICAL_FORMAT",
+    "DerivedTimestamps",
     "assess_temporal_reconciliation",
+    "canonical_utc_text",
+    "derive_utc_timestamps",
     "parse_temporal_field",
     "validate_temporal_reconciliation",
 ]
 
 _OFFSET_SUFFIX = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 _DESIGNATOR = re.compile(r"^(?P<body>.+) (?P<zone>[A-Z]+)$")
+#: Canonical serialized presentation of a UTC instant (whole seconds; never an identity).
+UTC_CANONICAL_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
 # ------------------------------------------------------------------- parsing
@@ -98,16 +126,38 @@ class TemporalParseResult:
     missing: np.ndarray
     invalid: np.ndarray
     unresolved: np.ndarray
+    #: Unresolved breakdown for city-local fields (all-False otherwise).
+    unknown_city: np.ndarray | None = None
+    context_unavailable: np.ndarray | None = None
+    ambiguous: np.ndarray | None = None
+    nonexistent: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("unknown_city", "context_unavailable", "ambiguous", "nonexistent"):
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, np.zeros(len(self.missing), dtype=bool))
 
     @property
     def valid(self) -> np.ndarray:
         return ~(self.missing | self.invalid)
 
+    @property
+    def resolved(self) -> np.ndarray:
+        return self.instants.notna().to_numpy()
+
 
 def parse_temporal_field(
-    series: pd.Series, field: TemporalFieldDefinition, canonical_timezone: str = "UTC"
+    series: pd.Series, field: TemporalFieldDefinition, canonical_timezone: str = "UTC", *,
+    city_values: pd.Series | None = None, context_available: np.ndarray | None = None,
 ) -> TemporalParseResult:
-    """Parse ``series`` according to ``field`` without modifying it (see module docstring)."""
+    """Parse ``series`` according to ``field`` without modifying it (see module docstring).
+
+    For a city-local field, ``city_values`` (aligned with ``series``) are the
+    exact selector values - the parent city of each row - and
+    ``context_available`` marks rows that have that parent context (default:
+    all). Without ``city_values`` every value is unresolved (context
+    unavailable); a default zone is never assumed.
+    """
     if not isinstance(series, pd.Series):
         raise TypeError("series must be a pandas Series")
     if not isinstance(field, TemporalFieldDefinition):
@@ -158,12 +208,76 @@ def parse_temporal_field(
     # NAIVE
     wall = pd.to_datetime(usable, format=field.source_format, errors="coerce")
     parsed = wall.notna().to_numpy() & candidate
+    if field.city_timezones is not None:
+        return _city_local(field, wall, parsed, canonical_timezone, missing, candidate & ~parsed, other,
+                           city_values, context_available)
     if field.source_timezone is None:
         return done(nat, wall, candidate & ~parsed, parsed.copy())
     local = wall.dt.tz_localize(field.source_timezone, ambiguous="NaT", nonexistent="NaT")
     resolved = local.notna().to_numpy()
     instants = local.dt.tz_convert(canonical_timezone)
     return done(instants, wall, candidate & ~parsed, parsed & ~resolved)
+
+
+def _city_local(field, wall, parsed, canonical_timezone, missing, invalid, other,  # type: ignore[no-untyped-def]
+                city_values, context_available) -> TemporalParseResult:
+    """Resolve each parsed wall time in the zone of its exact parent city (fails closed per row)."""
+    n = len(wall)
+    if city_values is None:
+        context = np.zeros(n, dtype=bool)
+        zones = [None] * n
+    else:
+        if len(city_values) != n:
+            raise ValueError("city_values must align with the timestamp series")
+        context = (np.ones(n, dtype=bool) if context_available is None
+                   else np.asarray(context_available, dtype=bool).copy())
+        zones = [field.city_timezones.zone_or_none(c) if ok else None
+                 for c, ok in zip(city_values.astype(object).tolist(), context)]
+    unknown, unavailable = np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+    ambiguous, nonexistent = np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+    out: list = [pd.NaT] * n
+    cache: dict = {}
+    walls = wall.tolist()
+    for i in np.flatnonzero(parsed):
+        if not context[i]:
+            unavailable[i] = True
+            continue
+        zone_name = zones[i]
+        if zone_name is None:
+            unknown[i] = True
+            continue
+        key = (walls[i], zone_name)
+        if key not in cache:
+            local = walls[i].to_pydatetime()
+            zone = ZoneInfo(zone_name)
+            kind = classify_local_time(local, zone)
+            cache[key] = (kind, pd.Timestamp(local.replace(tzinfo=zone)).tz_convert(canonical_timezone)
+                          if kind == "ok" else pd.NaT)
+        kind, instant = cache[key]
+        if kind == "ambiguous":
+            ambiguous[i] = True
+        elif kind == "nonexistent":
+            nonexistent[i] = True
+        else:
+            out[i] = instant
+    instants = pd.to_datetime(pd.Series(out, index=wall.index, dtype=object), utc=True).astype(
+        "datetime64[ns, UTC]").dt.tz_convert(canonical_timezone)
+    unresolved = unknown | unavailable | ambiguous | nonexistent
+    return TemporalParseResult(instants, wall, missing, invalid | other, unresolved, unknown, unavailable,
+                               ambiguous, nonexistent)
+
+
+def canonical_utc_text(instants: pd.Series) -> pd.Series:
+    """``YYYYMMDDTHHMMSSZ`` presentation of aware instants (``None`` where unresolved).
+
+    Whole seconds only: it is a serialization, never the timestamp identity -
+    two distinct sub-second instants may share it, so comparisons always use
+    the full-precision instants.
+    """
+    if not isinstance(instants, pd.Series) or not isinstance(instants.dtype, pd.DatetimeTZDtype):
+        raise TypeError("instants must be a timezone-aware datetime Series")
+    utc = instants.dt.tz_convert("UTC")
+    return utc.dt.strftime(UTC_CANONICAL_FORMAT).where(utc.notna(), None).astype(object)
 
 
 # ------------------------------------------------------------------- reports
@@ -187,10 +301,27 @@ class TemporalFieldReport:
     missing_count: int
     invalid_count: int
     unresolved_count: int
+    unknown_city_count: int = 0
+    context_unavailable_count: int = 0
+    ambiguous_count: int = 0
+    nonexistent_count: int = 0
+    resolvable: bool = False
 
     def __post_init__(self) -> None:
         assert self.row_count == self.valid_count + self.missing_count + self.invalid_count
         assert 0 <= self.unresolved_count <= self.valid_count
+        assert (self.unknown_city_count + self.context_unavailable_count + self.ambiguous_count
+                + self.nonexistent_count) <= self.unresolved_count
+
+    @property
+    def resolved_count(self) -> int:
+        """Values resolved to an instant (timestamps that can resolve); 0 otherwise."""
+        return self.valid_count - self.unresolved_count if self.resolvable else 0
+
+    @property
+    def resolves(self) -> bool:
+        """For a field that can resolve to instants: no valid value is left unresolved."""
+        return not self.resolvable or self.unresolved_count == 0
 
     @property
     def ref(self) -> tuple[DatasetKey, str]:
@@ -245,10 +376,16 @@ class TemporalReconciliationReport:
     parent_row_count: int
     detail_row_count: int
     unlinked_detail_row_count: int
+    city_mismatch_detail_row_count: int = 0
 
     @property
     def all_required_fields_parse(self) -> bool:
         return all(r.parses for r in self.field_reports)
+
+    @property
+    def all_resolvable_fields_resolve(self) -> bool:
+        """No unknown-city, context-less, ambiguous or nonexistent value in a field that can resolve."""
+        return all(r.resolves for r in self.field_reports)
 
     @property
     def timestamp_ordering_valid(self) -> bool:
@@ -263,6 +400,15 @@ class TemporalReconciliationReport:
         return all(r.holds for r in self.replications)
 
     @property
+    def replication_failed_count(self) -> int:
+        """Detail rows whose finish-time copy disagrees with the parent (wall time or full-precision instant)."""
+        return sum(r.failed for r in self.replications)
+
+    @property
+    def unresolved_time_count(self) -> int:
+        """Values of resolvable fields left without an instant (no approved zone, no parent, ambiguous, nonexistent)."""
+        return sum(r.unresolved_count for r in self.field_reports if r.resolvable)
+    @property
     def unavailable_rules(self) -> tuple[str, ...]:
         rules = (self.ordering, *self.date_checks, *self.replications)
         return tuple(r.name for r in rules if r.status is RuleStatus.UNAVAILABLE)
@@ -270,15 +416,17 @@ class TemporalReconciliationReport:
     @property
     def is_valid(self) -> bool:
         """Every field parses and every rule is configured and holds for all rows."""
-        return (self.all_required_fields_parse and self.timestamp_ordering_valid
-                and self.date_derivation_valid and self.replication_valid
-                and self.unlinked_detail_row_count == 0)
+        return (self.all_required_fields_parse and self.all_resolvable_fields_resolve
+                and self.timestamp_ordering_valid and self.date_derivation_valid and self.replication_valid
+                and self.unlinked_detail_row_count == 0 and self.city_mismatch_detail_row_count == 0)
 
     @property
     def violations(self) -> tuple[str, ...]:
         rules = (self.ordering, *self.date_checks, *self.replications)
         checks = (
             ("field_parse", not self.all_required_fields_parse),
+            ("time_unresolved", not self.all_resolvable_fields_resolve),
+            ("city_mismatch", self.city_mismatch_detail_row_count > 0),
             ("rule_unavailable", bool(self.unavailable_rules)),
             ("ordering", self.ordering.failed > 0),
             ("date_derivation", any(r.failed for r in self.date_checks)),
@@ -341,18 +489,35 @@ def assess_temporal_reconciliation(
     if absent:
         raise TemporalConfigurationError(f"{len(absent)} configured temporal column(s) are absent.")
 
-    parsed = {f.ref: parse_temporal_field(frames[f.dataset][f.column], f, definition.canonical_timezone)
-              for f in definition.fields}
+    parsed, positions = _parse_fields(jobs, cars, definition)
+    linked = positions >= 0
+    take = np.where(linked, positions, 0)
+    parent_values = _parent_lookup(jobs, cars, positions)
     field_reports = tuple(
         TemporalFieldReport(
             dataset=f.dataset, column=f.column, kind=f.kind, required=f.required, row_count=len(frames[f.dataset]),
             valid_count=int(parsed[f.ref].valid.sum()), missing_count=int(parsed[f.ref].missing.sum()),
             invalid_count=int(parsed[f.ref].invalid.sum()), unresolved_count=int(parsed[f.ref].unresolved.sum()),
+            unknown_city_count=int(parsed[f.ref].unknown_city.sum()),
+            context_unavailable_count=int(parsed[f.ref].context_unavailable.sum()),
+            ambiguous_count=int(parsed[f.ref].ambiguous.sum()),
+            nonexistent_count=int(parsed[f.ref].nonexistent.sum()),
+            resolvable=f.resolvable_to_instant,
         )
         for f in definition.fields
     )
-    positions = _parent_positions(jobs, cars, rel)
-    linked = positions >= 0
+
+    # City integrity prerequisite: a linked detail row is trusted only when its scope equals its parent's.
+    agree = linked.copy()
+    for parent_column, detail_column in rel.scope_agreement_columns:
+        if parent_column not in jobs.columns or detail_column not in cars.columns:
+            raise TemporalConfigurationError("a scope agreement column is absent.")
+        mine = cars[detail_column].astype(object).reset_index(drop=True)
+        theirs = parent_values(parent_column)
+        same = [isinstance(a, str) and isinstance(b, str) and a == b for a, b in zip(mine.tolist(), theirs.tolist())]
+        agree &= np.asarray(same, dtype=bool)
+    trusted = agree
+    city_mismatch = linked & ~agree
 
     def aligned(ref: tuple[DatasetKey, str], base: DatasetKey) -> tuple[pd.Series, pd.Series, np.ndarray]:
         """(instants, wall, row-linked mask) of ``ref`` aligned to ``base`` rows."""
@@ -361,7 +526,6 @@ def assess_temporal_reconciliation(
             n = len(frames[base])
             return (result.instants.reset_index(drop=True), result.wall.reset_index(drop=True),
                     np.ones(n, dtype=bool))
-        take = np.where(linked, positions, 0)
         inst = result.instants.iloc[take].reset_index(drop=True).where(pd.Series(linked))
         wall = result.wall.iloc[take].reset_index(drop=True).where(pd.Series(linked))
         return inst, wall, linked
@@ -369,7 +533,31 @@ def assess_temporal_reconciliation(
     def base_of(*refs: tuple[DatasetKey, str]) -> DatasetKey:
         return rel.detail if any(r[0] == rel.detail for r in refs) else rel.parent
 
-    # --- ordering
+    # --- replication (first: ordering is assessed only where every replica agrees)
+    replication_reports = []
+    replicas_agree = trusted.copy()
+    for rule in definition.replications:
+        name = f"replication:{rule.replica[0]}.{rule.replica[1]}"
+        source_field, replica_field = definition.field(rule.source), definition.field(rule.replica)
+        src_inst, src_wall, _ = aligned(rule.source, rel.detail)
+        rep_inst, rep_wall, _ = aligned(rule.replica, rel.detail)
+        same_basis = source_field.zone_basis == replica_field.zone_basis
+        if source_field.resolvable_to_instant and replica_field.resolvable_to_instant:
+            assessable = trusted & src_inst.notna().to_numpy() & rep_inst.notna().to_numpy()
+            same = (src_inst == rep_inst).to_numpy() & assessable          # full-precision UTC instants
+            if same_basis:
+                same &= (src_wall == rep_wall).to_numpy()                   # and the same wall clock
+        elif same_basis:
+            assessable = trusted & src_wall.notna().to_numpy() & rep_wall.notna().to_numpy()
+            same = (src_wall == rep_wall).to_numpy() & assessable           # same naive basis: wall times
+        else:
+            replication_reports.append(_counts(name, len(cars), 0, 0))
+            replicas_agree &= False
+            continue
+        replication_reports.append(_counts(name, len(cars), int(same.sum()), int((assessable & ~same).sum())))
+        replicas_agree &= same
+
+    # --- ordering (trusted detail rows whose finish-time replicas agree; full-precision UTC instants)
     if definition.ordering is None:
         ordering = _unavailable("timestamp_ordering", len(cars))
     else:
@@ -377,7 +565,8 @@ def assess_temporal_reconciliation(
         base = base_of(rule.earlier, rule.later)
         early, _, ok_a = aligned(rule.earlier, base)
         late, _, ok_b = aligned(rule.later, base)
-        assessable = ok_a & ok_b & early.notna().to_numpy() & late.notna().to_numpy()
+        scope = (trusted & replicas_agree) if base == rel.detail else np.ones(len(frames[base]), dtype=bool)
+        assessable = scope & ok_a & ok_b & early.notna().to_numpy() & late.notna().to_numpy()
         gap = (late - early)[assessable]
         tol = pd.Timedelta(rule.tolerance)
         good = (gap >= -tol) if rule.inclusive else (gap > -tol)
@@ -402,29 +591,10 @@ def assess_temporal_reconciliation(
         date_reports.append(_counts(name, len(frames[base]), int(match.sum()), int((~match).sum()),
                                     int(crossing.sum())))
 
-    # --- replication
-    replication_reports = []
-    for rule in definition.replications:
-        name = f"replication:{rule.replica[0]}.{rule.replica[1]}"
-        source_field, replica_field = definition.field(rule.source), definition.field(rule.replica)
-        src_inst, src_wall, ok = aligned(rule.source, rel.detail)
-        rep_inst, rep_wall, _ = aligned(rule.replica, rel.detail)
-        if source_field.resolvable_to_instant and replica_field.resolvable_to_instant:
-            left, right = src_inst, rep_inst
-        elif (source_field.awareness is replica_field.awareness
-              and source_field.source_timezone == replica_field.source_timezone):
-            left, right = src_wall, rep_wall          # same naive basis: compare wall times
-        else:
-            replication_reports.append(_counts(name, len(cars), 0, 0))
-            continue
-        assessable = ok & left.notna().to_numpy() & right.notna().to_numpy()
-        same = (left[assessable] == right[assessable]).to_numpy()
-        replication_reports.append(_counts(name, len(cars), int(same.sum()), int((~same).sum())))
-
     return TemporalReconciliationReport(
         field_reports=field_reports, ordering=ordering, date_checks=tuple(date_reports),
         replications=tuple(replication_reports), parent_row_count=len(jobs), detail_row_count=len(cars),
-        unlinked_detail_row_count=int((~linked).sum()),
+        unlinked_detail_row_count=int((~linked).sum()), city_mismatch_detail_row_count=int(city_mismatch.sum()),
     )
 
 
@@ -467,3 +637,84 @@ def _parent_positions(jobs: pd.DataFrame, cars: pd.DataFrame, rel) -> np.ndarray
     positions = parent.get_indexer(detail)   # unique parent keys (precondition)
     positions[~detail_keys.notna().all(axis=1).to_numpy()] = -1
     return positions
+
+
+def _parent_lookup(jobs: pd.DataFrame, cars: pd.DataFrame, positions: np.ndarray):  # type: ignore[no-untyped-def]
+    """A function returning the linked parent's value of a column for every detail row (``None`` if unlinked)."""
+    linked = positions >= 0
+    take = np.where(linked, positions, 0)
+
+    def parent_values(column: str) -> pd.Series:
+        if len(jobs) == 0:
+            return pd.Series([None] * len(cars), dtype=object)
+        values = jobs[column].astype(object).iloc[take].reset_index(drop=True)
+        return values.where(pd.Series(linked), None)
+    return parent_values
+
+
+def _parse_fields(jobs: pd.DataFrame, cars: pd.DataFrame, definition: TemporalReconciliationDefinition
+                  ) -> tuple[dict, np.ndarray]:
+    """Parse every configured field (city-local fields through their parent city); returns (results, positions)."""
+    rel = definition.relationship
+    frames = {rel.parent: jobs, rel.detail: cars}
+    positions = _parent_positions(jobs, cars, rel)
+    linked = positions >= 0
+    parent_values = _parent_lookup(jobs, cars, positions)
+
+    def parse(f: TemporalFieldDefinition) -> TemporalParseResult:
+        frame = frames[f.dataset]
+        if f.timezone_selector is None:
+            return parse_temporal_field(frame[f.column], f, definition.canonical_timezone)
+        selector = f.timezone_selector[1]
+        if selector not in jobs.columns:
+            raise TemporalConfigurationError("the timezone selector column is absent.")
+        if f.dataset == rel.parent:
+            cities, context = jobs[selector].reset_index(drop=True), None
+        else:
+            cities, context = parent_values(selector), linked
+        series = frame[f.column].reset_index(drop=True)
+        result = parse_temporal_field(series, f, definition.canonical_timezone, city_values=cities,
+                                      context_available=context)
+        return TemporalParseResult(result.instants.set_axis(frame.index), result.wall.set_axis(frame.index),
+                                   result.missing, result.invalid, result.unresolved, result.unknown_city,
+                                   result.context_unavailable, result.ambiguous, result.nonexistent)
+
+    return {f.ref: parse(f) for f in definition.fields}, positions
+
+
+@dataclass(frozen=True)
+class DerivedTimestamps:
+    """Derived UTC timestamps, separate from the source frames (which are never modified).
+
+    ``jobs`` / ``cars`` are new frames aligned with the source rows holding,
+    for every timestamp field, ``<column>_utc`` (timezone-aware UTC, full
+    parsed precision, ``NaT`` when unresolved) and ``<column>_canonical``
+    (``YYYYMMDDTHHMMSSZ`` presentation, ``None`` when unresolved). The
+    canonical text is never an identity; compare the ``_utc`` columns.
+    """
+
+    jobs: pd.DataFrame
+    cars: pd.DataFrame
+
+
+def derive_utc_timestamps(jobs: pd.DataFrame, cars: pd.DataFrame,
+                          definition: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION) -> DerivedTimestamps:
+    """``finished_at_utc``, ``job_finished_at_utc``, ``scraped_at_utc`` (and ``*_canonical``) as new frames.
+
+    Values come from the same resolution as :func:`assess_temporal_reconciliation`
+    (city-local fields through the linked parent city); raw columns stay
+    unchanged. Derived values are for analysis only and are never reported.
+    """
+    if not isinstance(definition, TemporalReconciliationDefinition):
+        raise TypeError("definition must be a TemporalReconciliationDefinition")
+    rel = definition.relationship
+    _check_relationship_inputs(jobs, cars, rel, TemporalPreconditionError)
+    parsed, _ = _parse_fields(jobs, cars, definition)
+    out = {rel.parent: pd.DataFrame(index=jobs.index), rel.detail: pd.DataFrame(index=cars.index)}
+    for f in definition.fields:
+        if f.kind is not TemporalKind.TIMESTAMP:
+            continue
+        instants = parsed[f.ref].instants.dt.tz_convert("UTC")
+        out[f.dataset][f"{f.column}_utc"] = instants
+        out[f.dataset][f"{f.column}_canonical"] = canonical_utc_text(instants)
+    return DerivedTimestamps(jobs=out[rel.parent], cars=out[rel.detail])

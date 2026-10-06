@@ -14,11 +14,13 @@ agreements (22 atomic decisions, `DecisionId` in
 | [`v2.toml`](v2.toml) | Revision 2 (schema 2, historical, unchanged) - supersedes v1; the four job-identifier decisions are `APPROVED` by the collection owner, the other 18 remain `PROPOSED`. |
 | [`v3.toml`](v3.toml) | Revision 3 (schema 2, historical, unchanged) - supersedes v2; keeps the four job-identifier approvals and approves `EXPECTED_STREAM_UNIVERSE` (`EXHAUSTIVE`, seven streams; collection owner and business owner) and `EXPECTED_STREAM_SOURCE_SPELLING` (collection owner); the other 16 remain `PROPOSED`. |
 | [`v4.toml`](v4.toml) | Revision 4 (schema 2, historical, unchanged) - supersedes v3; keeps the six earlier approvals and approves `LOCATION_ROLE_ASSIGNMENTS` and `VALID_LOCATION_COMPARISON_PAIRS` (business owner) and `VANCOUVER_LOCATION_IDENTITY` (`CONFIRMED_ALIAS`, canonical `Vancouver / Downtown` in the display-style spelling of that revision; collection owner); the other 13 remain `PROPOSED`. |
-| [`v5.toml`](v5.toml) | Revision 5 (schema 3, **current revision**) - supersedes v4; keeps the four job-identifier approvals, supersedes the display-style source spellings with the exact raw source keys (`calgary / Calgary Downtown`, ...; universe, roles, pairs and alias unchanged in meaning) and approves `SCHEDULE_CAPTURE_TIMESTAMP`, `SCHEDULE_EXPECTED_PERIODS`, `SCHEDULE_SHARING_MODEL` (`PER_STREAM`), `SCHEDULE_EXCEPTIONS` (`NO_EXCEPTIONS`; joint) and the per-city `FINISHED_AT_TIMEZONE`; the other 8 remain `PROPOSED`. |
-| [`authority_request_checklist.md`](authority_request_checklist.md) | Generated from the current revision: the resolved decisions with their references, and neutral questions for the 8 decisions still blocked on external input. |
+| [`v5.toml`](v5.toml) | Revision 5 (schema 3, historical, unchanged) - supersedes v4; keeps the four job-identifier approvals, supersedes the display-style source spellings with the exact raw source keys (`calgary / Calgary Downtown`, ...; universe, roles, pairs and alias unchanged in meaning) and approves `SCHEDULE_CAPTURE_TIMESTAMP`, `SCHEDULE_EXPECTED_PERIODS`, `SCHEDULE_SHARING_MODEL` (`PER_STREAM`), `SCHEDULE_EXCEPTIONS` (`NO_EXCEPTIONS`; joint) and the per-city `FINISHED_AT_TIMEZONE`; the other 8 remain `PROPOSED`. |
+| [`v6.toml`](v6.toml) | Revision 6 (schema 3, **current revision**) - supersedes v5; keeps every earlier approval unchanged (the `FINISHED_AT_TIMEZONE` map gains a confirming reference) and approves `SCRAPED_FINISHED_ORDERING` (`cars.scraped_at` earlier than or equal to `jobs.finished_at`; collection owner) and `SCRAPED_FINISHED_TOLERANCE` (zero seconds; collection owner and business owner); the other 6 remain `PROPOSED`. |
+| [`authority_request_checklist.md`](authority_request_checklist.md) | Generated from the current revision: the resolved decisions with their references, and neutral questions for the 6 decisions still blocked on external input. |
 | [`../governance/job-identifier-governance-2026-10-06.md`](../governance/job-identifier-governance-2026-10-06.md) | Durable authority reference for the job-identifier approvals (collection-governance outcome supplied by the repository owner, recorded 2026-10-06). |
 | [`../governance/expected-stream-governance-2026-10-06.md`](../governance/expected-stream-governance-2026-10-06.md) | Durable authority reference for the expected-stream approvals (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
 | [`../governance/location-roles-and-identity-governance-2026-10-06.md`](../governance/location-roles-and-identity-governance-2026-10-06.md) | Durable authority reference for the location-role, comparison-pair and Vancouver identity approvals (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
+| [`../governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md`](../governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md) | Durable authority reference for the city-local finish-time policy, parent/detail replication and the zero-tolerance scrape/finish ordering (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
 | [`../governance/collection-schedule-governance-v1-2026-10-06.md`](../governance/collection-schedule-governance-v1-2026-10-06.md) | Durable authority reference for the per-stream collection schedule (version `per_stream_hourly_v1`), the per-city finish-time zones and the corrected exact source keys (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
 
 ## Revision 2: approved job-identifier decisions
@@ -121,7 +123,7 @@ and rental-date decisions remain `PROPOSED` in v4.
 
 ## Revision 5: per-stream collection schedule and corrected source keys
 
-`v5.toml` (the current revision, `CURRENT_RECORD_PATH`; **schema 3**) uses the
+`v5.toml` (superseded by v6, unchanged; **schema 3**) uses the
 production loader's schema-3 rules and the reference
 [`collection-schedule-governance-v1-2026-10-06.md`](../governance/collection-schedule-governance-v1-2026-10-06.md).
 It keeps the four job-identifier approvals unchanged and:
@@ -167,6 +169,37 @@ ordering and tolerance, reporting day, scrape-date and cleaned-date semantics,
 rental dates) remain `PROPOSED`. The schedule is implemented separately, with
 its own tests, in `ql2_sixt_canada_analysis.collection_schedule`. Any schedule
 change needs a new versioned record.
+
+## Revision 6: city-local finish times and scrape/finish ordering
+
+`v6.toml` (the current revision, `CURRENT_RECORD_PATH`; schema 3) references
+[`finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md`](../governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md).
+It keeps every earlier approval unchanged and:
+
+* keeps `FINISHED_AT_TIMEZONE` with the same exhaustive map (`calgary`
+  `America/Edmonton`, `toronto` `America/Toronto`, `vancouver`
+  `America/Vancouver`) - no second, contradictory resolution - and adds the
+  confirming collection-owner reference: the naive finish time and its detail
+  copy are wall-clock times in the zone of the exact parent `jobs.city`,
+  resolved to full-precision UTC instants (`YYYYMMDDTHHMMSSZ` is presentation
+  only); ambiguous and nonexistent local times fail closed;
+* approves `SCRAPED_FINISHED_ORDERING` (collection owner): `cars.scraped_at`
+  earlier than or equal to `jobs.finished_at` for every trusted linked detail
+  row, on UTC instants, equality allowed, with `cars.job_finished_at`
+  replicating the parent's instant;
+* approves `SCRAPED_FINISHED_TOLERANCE` (joint: collection owner and business
+  owner): **zero seconds**. Any other tolerance needs a new revision.
+
+Schema 3 now also fixes the ordering shape (earlier `cars.scraped_at`, later
+`jobs.finished_at`, a boolean `equal_allowed`, and it requires the per-city
+`FINISHED_AT_TIMEZONE` map) and validates every zone with the shared region
+rule (`schemas.region_iana_zone`: no fixed offsets, `Etc/`, `UTC`,
+abbreviations or legacy links). Schema 1 and 2 records keep their historical
+scalar `timezone` shape and are not reinterpreted. `REPORTING_DAY_SOURCE`,
+`REPORTING_DAY_TIMEZONE`, `SCRAPE_DATE_SEMANTICS`, `DATE_CLEAN_SEMANTICS` and
+the two rental-date decisions remain `PROPOSED`. The policy is implemented
+separately, with its own tests, in `ql2_sixt_canada_analysis.temporal_authority`
+and `ql2_sixt_canada_analysis.temporal`.
 
 ## Status semantics
 
@@ -227,12 +260,13 @@ python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_au
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v3.toml
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v4.toml
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v5.toml
+python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v6.toml
 ```
 
 prints a sanitized status summary (decision ids, statuses, roles and counts
 only) and exits non-zero if the record is invalid. Error messages name
 categories, decision ids and field names only, never record values. The test
-suite validates every committed revision (v1 to v4 byte-for-byte unchanged)
+suite validates every committed revision (v1 to v5 byte-for-byte unchanged)
 and checks that the checklist matches `render_authority_request_checklist`
 for the current revision.
 
@@ -247,6 +281,8 @@ decisions, `ql2_sixt_canada_analysis.job_linkage`; for the two expected-stream
 decisions, `ql2_sixt_canada_analysis.expected_stream_contract`; for the
 location roles, comparison pairs and Vancouver identity,
 `ql2_sixt_canada_analysis.location_authority`; for the schedule decisions and
-the per-city finish-time zones, `ql2_sixt_canada_analysis.collection_schedule`.
+the per-city finish-time zones, `ql2_sixt_canada_analysis.collection_schedule`; for the
+finish-time zones, replication and scrape/finish ordering in the temporal contract,
+`ql2_sixt_canada_analysis.temporal_authority`.
 `pricing_baseline.baseline_authority_inputs` reads APPROVED decisions only, so
 no revision clears the rental-date plan gap.

@@ -69,6 +69,7 @@ from ql2_sixt_canada_analysis.schemas import (
     JOB_DETAIL_RELATIONSHIP as REL,
     VANCOUVER_LOCATION_POLICY,
     LocationCoverageMode,
+    TemporalConfigurationError,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,12 +123,16 @@ def fails(data: dict) -> str:
 # ================================================================= authority (v5)
 
 
-def test_v5_is_the_current_schema_3_record_superseding_v4() -> None:
+def test_v5_is_a_schema_3_record_superseding_v4_and_carried_into_the_current_record() -> None:
     record = load_decision_record(V5)
     assert (record.schema_version, record.record_version, record.record_id, record.supersedes) == (
         3, 5, "pricing-authorities-v5", "pricing-authorities-v4")
-    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v5.toml"
-    assert load_current_decision_record() == record
+    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v6.toml"
+    current = load_current_decision_record()
+    assert current.record_id == "pricing-authorities-v6" and current.supersedes == "pricing-authorities-v5"
+    for decision in SCHEDULE_DECISIONS:                   # v6 keeps every schedule decision unchanged
+        assert current.decision(decision).resolution == record.decision(decision).resolution
+        assert set(record.decision(decision).authority) <= set(current.decision(decision).authority)
     counts = record.counts()
     assert (counts[DecisionStatus.APPROVED], counts[DecisionStatus.PROPOSED], counts[DecisionStatus.REJECTED]) == (
         14, 8, 0)
@@ -383,12 +388,13 @@ def test_project_schedule_is_per_stream_and_computed_from_the_definitions() -> N
     schedule = current_per_stream_schedule()
     assert schedule is current_per_stream_schedule()                    # resolved once
     assert schedule.status is SS.AVAILABLE and schedule.blocking_reasons == ()
-    assert schedule.record_id == "pricing-authorities-v5" and schedule.schedule_version == "per_stream_hourly_v1"
+    assert schedule.record_id == "pricing-authorities-v6" and schedule.schedule_version == "per_stream_hourly_v1"
     assert schedule.sharing_mode is SharingMode.PER_STREAM and schedule.capture_field == "jobs.finished_at"
     assert (schedule.detail_copy_field, schedule.detail_observation_field) == ("cars.job_finished_at",
                                                                               "cars.scraped_at")
     assert schedule.exceptions == ScheduleExceptions.none() and schedule.exceptions.model is ExceptionsModel.NO_EXCEPTIONS
-    assert schedule.excused_period_count == 0 and schedule.references == (GOVERNANCE,)
+    assert schedule.excused_period_count == 0 and schedule.references == (
+        GOVERNANCE, "docs/decisions/governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md")
     assert schedule.expected_streams == SUPPLIED == tuple(s.stream for s in schedule.schedules)
     assert dict(schedule.timezones.entries) == ZONES
     hours = int((LOCAL_END - LOCAL_START) / dt.timedelta(hours=1)) + 1          # inclusive end, no DST in window
@@ -399,7 +405,7 @@ def test_project_schedule_is_per_stream_and_computed_from_the_definitions() -> N
     for s in schedule.schedules:
         assert (s.timezone, s.local_start, s.local_end, s.end_inclusive, s.cadence) == (
             ZONES[s.city], LOCAL_START, LOCAL_END, True, "PT1H")
-        assert s.record_id == "pricing-authorities-v5" and s.capture_field == "jobs.finished_at"
+        assert s.record_id == "pricing-authorities-v6" and s.capture_field == "jobs.finished_at"
 
 
 @pytest.mark.parametrize("city, first, last", [
@@ -488,12 +494,16 @@ def test_utc_text_needs_an_aware_instant() -> None:
 def test_city_timezone_map_fails_closed() -> None:
     zones = CityTimezoneMap(tuple(ZONES.items()))
     assert zones.zone_name("calgary") == "America/Edmonton"
+    assert CityTimezoneMap(tuple(reversed(tuple(ZONES.items())))) == zones          # deterministic order
+    for zone in ("US/Mountain", "Canada/Eastern", "EST5EDT", "MDT"):              # links and abbreviations
+        with pytest.raises(TemporalConfigurationError):
+            CityTimezoneMap((("calgary", zone),))
     for city in ("Calgary", " calgary", "", None, "synth", 1):
-        with pytest.raises(ScheduleConfigurationError):
+        with pytest.raises(TemporalConfigurationError):
             zones.zone_name(city)
     for entries in ((), (("calgary", "UTC"),), (("calgary", "Etc/GMT+7"),), (("calgary", "America/Synthville"),),
                     (("calgary", "America/Edmonton"), ("calgary", "America/Edmonton")), (("", "America/Edmonton"),)):
-        with pytest.raises(ScheduleConfigurationError):
+        with pytest.raises(TemporalConfigurationError):
             CityTimezoneMap(entries)
 
 

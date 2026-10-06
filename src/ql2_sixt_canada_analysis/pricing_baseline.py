@@ -106,6 +106,8 @@ __all__ = [
     "CollectionScheduleSummary",
     "LocationAuthoritySummary",
     "StreamScheduleSummary",
+    "TemporalBaselineSummary",
+    "TemporalFieldSummary",
     "BaselineInputError",
     "ContinuityFinding",
     "PlanReadinessGap",
@@ -317,6 +319,47 @@ class CollectionScheduleSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class TemporalFieldSummary:
+    """Parse and resolution counts of one temporal field (no values)."""
+
+    field: str                       # e.g. jobs.finished_at
+    rows: int
+    resolved: int
+    missing: int
+    invalid: int
+    unknown_city: int
+    context_unavailable: int
+    ambiguous: int
+    nonexistent: int
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalBaselineSummary:
+    """Authority statuses and aggregate counts of the temporal reconciliation (no timestamps)."""
+
+    timezone_status: str             # approved | not_approved | record_unavailable | invalid | report_missing
+    ordering_status: str
+    tolerance_status: str
+    tolerance_seconds: int | None
+    reporting_day_status: str
+    date_semantics_status: str
+    authority_blockers: tuple[str, ...]
+    pricing_date_fields: tuple[str, ...]
+    fields: tuple[TemporalFieldSummary, ...]
+    replication_passed: int
+    replication_failed: int
+    replication_unassessable: int
+    ordering_rule_status: str        # configured | unavailable | report_missing
+    ordering_passed: int
+    ordering_failed: int
+    ordering_unassessable: int
+    unlinked_detail_rows: int
+    city_mismatch_detail_rows: int
+    unavailable_rules: tuple[str, ...]
+    temporal_fields_trusted: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PricingReadinessBaseline:
     """Sanitized baseline: active typed blockers, plan gaps, populations, continuity."""
 
@@ -333,6 +376,7 @@ class PricingReadinessBaseline:
     authority_record_version: int | None = None
     location_authority: LocationAuthoritySummary | None = None
     collection_schedule: CollectionScheduleSummary | None = None
+    temporal: TemporalBaselineSummary | None = None
 
     def to_dict(self) -> dict:
         """Plain, sanitized structure; raises :class:`UnsafeBaselineValueError` on anything unsafe."""
@@ -355,6 +399,7 @@ def build_pricing_baseline(
     investigated_stream: tuple[str, ...] = INVESTIGATED_LOCATION_STREAM,
     rental_period_rule_authority: AuthorityReference | None = None,
     approved_rental_date_agreements: tuple[ApprovedDateAgreement, ...] | None = None,
+    temporal_authority: object = None,
 ) -> PricingReadinessBaseline:
     """Assemble the sanitized baseline from existing assessment results (inputs are not modified).
 
@@ -429,7 +474,41 @@ def build_pricing_baseline(
         authority_record_version=_record_version(contract),
         location_authority=_location_summary(pricing),
         collection_schedule=_schedule_summary(pricing),
+        temporal=_temporal_summary(temporal, temporal_authority),
     )
+
+
+def _temporal_summary(report: TemporalReconciliationReport | None, authority: object) -> TemporalBaselineSummary:
+    """Statuses from the temporal authority and counts from the temporal report (``report_missing`` otherwise)."""
+    from ql2_sixt_canada_analysis.temporal_authority import TemporalAuthority
+
+    missing = "report_missing"
+    if isinstance(authority, TemporalAuthority):
+        statuses = (authority.timezone_status.value, authority.ordering_status.value,
+                    authority.tolerance_status.value, authority.tolerance_seconds,
+                    authority.reporting_day_status.value, authority.date_semantics_status.value,
+                    _codes(authority.blocking_reasons), tuple(authority.pricing_date_fields))
+    else:
+        statuses = (missing, missing, missing, None, missing, missing, (), ())
+    if report is None:
+        return TemporalBaselineSummary(*statuses, fields=(), replication_passed=0, replication_failed=0,
+                                       replication_unassessable=0, ordering_rule_status=missing, ordering_passed=0,
+                                       ordering_failed=0, ordering_unassessable=0, unlinked_detail_rows=0,
+                                       city_mismatch_detail_rows=0, unavailable_rules=(),
+                                       temporal_fields_trusted=False)
+    fields_ = tuple(TemporalFieldSummary(
+        field=f"{f.dataset.value}.{f.column}", rows=f.row_count, resolved=f.resolved_count, missing=f.missing_count,
+        invalid=f.invalid_count, unknown_city=f.unknown_city_count, context_unavailable=f.context_unavailable_count,
+        ambiguous=f.ambiguous_count, nonexistent=f.nonexistent_count) for f in report.field_reports)
+    rep_ = report.replications
+    return TemporalBaselineSummary(
+        *statuses, fields=fields_, replication_passed=sum(r.passed for r in rep_),
+        replication_failed=sum(r.failed for r in rep_), replication_unassessable=sum(r.unassessable for r in rep_),
+        ordering_rule_status=report.ordering.status.value, ordering_passed=report.ordering.passed,
+        ordering_failed=report.ordering.failed, ordering_unassessable=report.ordering.unassessable,
+        unlinked_detail_rows=report.unlinked_detail_row_count,
+        city_mismatch_detail_rows=report.city_mismatch_detail_row_count,
+        unavailable_rules=tuple(report.unavailable_rules), temporal_fields_trusted=bool(report.is_valid))
 
 
 def _schedule_summary(pricing: PricingReadinessReport) -> CollectionScheduleSummary:
@@ -727,7 +806,8 @@ def _sanitize(value: object, where: str):  # type: ignore[no-untyped-def]
 
 
 _SERIALIZABLE = (PricingReadinessBaseline, StreamPopulation, ObservedPopulation, StreamHealth, ObservedStreamHealth,
-                 ContinuityFinding, LocationAuthoritySummary, CollectionScheduleSummary, StreamScheduleSummary)
+                 ContinuityFinding, LocationAuthoritySummary, CollectionScheduleSummary, StreamScheduleSummary,
+                 TemporalBaselineSummary, TemporalFieldSummary)
 
 
 def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str, date: str) -> str:
@@ -775,6 +855,29 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
         lines += [f"  - {key(a)} versus {key(dn)}" for a, dn in la["keys"]]
         lines += [f"- Vancouver identity policy: `{la['vancouver_policy_state']}`; canonical location: {canonical}. "
                   "Both raw Vancouver source streams stay separately required by the source contract."]
+    tp = d["temporal"]
+    if tp is not None:
+        tol = f"{tp['tolerance_seconds']} seconds" if tp["tolerance_seconds"] is not None else "none"
+        lines += ["", "### Temporal policy (finish-time zones, replication, scrape/finish ordering)", "",
+                  f"- Authority: finish-time zone `{tp['timezone_status']}`; ordering `{tp['ordering_status']}`; "
+                  f"tolerance `{tp['tolerance_status']}` ({tol}); reporting day `{tp['reporting_day_status']}`; "
+                  f"date semantics `{tp['date_semantics_status']}`.",
+                  "- Authority gaps: " + (", ".join(f"`{b}`" for b in tp["authority_blockers"]) or "none") + ".",
+                  "- Trusted pricing date fields: " + (", ".join(f"`{f}`" for f in tp["pricing_date_fields"])
+                                                       or "none (reporting day unresolved)") + ".",
+                  f"- Replication of the finish time: {tp['replication_passed']} passed, "
+                  f"{tp['replication_failed']} failed, {tp['replication_unassessable']} unassessable.",
+                  f"- Scrape/finish ordering (`{tp['ordering_rule_status']}`): {tp['ordering_passed']} passed, "
+                  f"{tp['ordering_failed']} failed, {tp['ordering_unassessable']} unassessable.",
+                  f"- Unlinked detail rows: {tp['unlinked_detail_rows']}; detail rows whose city differs from "
+                  f"their parent: {tp['city_mismatch_detail_rows']}.",
+                  "- Unavailable rules: " + (", ".join(f"`{r}`" for r in tp["unavailable_rules"]) or "none")
+                  + f"; temporal fields trusted: {tp['temporal_fields_trusted']}.", "",
+                  "| Field | Rows | Resolved | Missing | Invalid | Unknown city | No parent | Ambiguous | Nonexistent |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+        lines += [f"| `{f['field']}` | {f['rows']} | {f['resolved']} | {f['missing']} | {f['invalid']} | "
+                  f"{f['unknown_city']} | {f['context_unavailable']} | {f['ambiguous']} | {f['nonexistent']} |"
+                  for f in tp["fields"]] or ["| none | | | | | | | | |"]
     cs = d["collection_schedule"]
     if cs is not None:
         lines += ["", "### Collection schedule (authority-backed, per stream)", "",
@@ -847,6 +950,7 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         ScheduleConfigurationError, assess_per_stream_scheduled_coverage, schedule_from_record,
     )
     from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
+    from ql2_sixt_canada_analysis.temporal_authority import temporal_authority_from_record
     from ql2_sixt_canada_analysis.location_authority import location_authority_from_record
     from ql2_sixt_canada_analysis.authority_decisions import load_current_decision_record
     from ql2_sixt_canada_analysis.paths import resolve_raw_data_dir
@@ -883,7 +987,9 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
     schedule = schedule_from_record(record, contract)
     scheduled = attempt(lambda: assess_per_stream_scheduled_coverage(jobs, cars, schedule=schedule, contract=contract,
                                                                      relationship=rel), ScheduleConfigurationError)
-    temporal = attempt(lambda: assess_temporal_reconciliation(jobs, cars, ANALYSIS_TEMPORAL_RECONCILIATION),
+    # The authority-backed temporal policy (city-local finish times, zero-tolerance scrape/finish ordering).
+    temporal_authority = temporal_authority_from_record(record, ANALYSIS_TEMPORAL_RECONCILIATION, contract)
+    temporal = attempt(lambda: assess_temporal_reconciliation(jobs, cars, temporal_authority.definition),
                        RelationshipPreconditionError)
     comparison = attempt(lambda: compare_location_streams(jobs, cars, ANALYSIS_LOCATION_STREAM_COMPARISON),
                          RelationshipPreconditionError)
@@ -903,7 +1009,8 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         location_authority=location_authority_from_record(record, contract,
                                                           VANCOUVER_LOCATION_POLICY))
     return build_pricing_baseline(pricing=pricing, jobs=jobs, cars=cars, temporal=temporal, vehicle_stability=stability,
-                                  relationship=rel, temporal_contract=ANALYSIS_TEMPORAL_RECONCILIATION)
+                                  relationship=rel, temporal_contract=temporal_authority.definition,
+                                  temporal_authority=temporal_authority)
 
 
 def main(argv: list[str] | None = None) -> int:

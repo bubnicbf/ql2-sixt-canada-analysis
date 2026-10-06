@@ -138,6 +138,11 @@ __all__ = [
     "ReportingDateRule",
     "TemporalAwareness",
     "TemporalConfigurationError",
+    "CityTimezoneMap",
+    "FINISHED_AT_TIMEZONE_SELECTOR",
+    "IANA_REGION_AREAS",
+    "classify_local_time",
+    "region_iana_zone",
     "TemporalDateCheck",
     "TemporalFieldDefinition",
     "TemporalKind",
@@ -888,6 +893,95 @@ class TemporalConfigurationError(ValueError):
     """A temporal definition is invalid, incomplete or cannot be applied."""
 
 
+#: Top-level areas of region-style IANA zone names (``Area/Location``). Links such as
+#: ``US/Eastern`` or ``Canada/Mountain``, ``Etc/`` fixed offsets and abbreviations such
+#: as ``MST`` or ``EDT`` are not region zones and are refused.
+IANA_REGION_AREAS: Final = frozenset({"Africa", "America", "Antarctica", "Arctic", "Asia", "Atlantic",
+                                      "Australia", "Europe", "Indian", "Pacific"})
+
+
+def region_iana_zone(name: object) -> ZoneInfo:
+    """A region IANA zone from the installed database; anything else raises ``TemporalConfigurationError``.
+
+    Refused: non-strings, padded or blank names, abbreviations (``MST``,
+    ``EDT``), fixed offsets (``-07:00``, ``Etc/GMT+7``, ``UTC``), legacy
+    links outside the region areas (``US/Eastern``) and unknown names. The
+    machine's local zone is never a fallback.
+    """
+    if (not isinstance(name, str) or name != name.strip() or "/" not in name
+            or name.split("/", 1)[0] not in IANA_REGION_AREAS):
+        raise TemporalConfigurationError("timezone must be a region IANA zone name")
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise TemporalConfigurationError("timezone must be a region IANA zone name") from exc
+
+
+def classify_local_time(local: dt.datetime, zone: ZoneInfo) -> str:
+    """``"ok"``, ``"nonexistent"`` (spring-forward gap) or ``"ambiguous"`` (fall-back repeat) in ``zone``.
+
+    Decided by the installed IANA database for that date; nothing is shifted
+    and no occurrence of a repeated hour is chosen.
+    """
+    first, second = local.replace(tzinfo=zone, fold=0), local.replace(tzinfo=zone, fold=1)
+    if first.astimezone(dt.timezone.utc).astimezone(zone).replace(tzinfo=None) != local.replace(tzinfo=None):
+        return "nonexistent"
+    return "ambiguous" if first.utcoffset() != second.utcoffset() else "ok"
+
+
+@dataclass(frozen=True, slots=True)
+class CityTimezoneMap:
+    """Exhaustive, exact ``source city -> region IANA zone`` map (``FINISHED_AT_TIMEZONE``).
+
+    Shared by the per-stream schedule and the temporal contract (one
+    mechanism). Entries are kept sorted by city (deterministic). Cities are
+    matched exactly - no case folding or trimming; anything not in the map
+    fails closed.
+    """
+
+    entries: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entries, tuple) or not self.entries:
+            raise TemporalConfigurationError("the city timezone map must be a non-empty tuple")
+        cities = []
+        for item in self.entries:
+            if not (isinstance(item, tuple) and len(item) == 2):
+                raise TemporalConfigurationError("each entry must be (city, zone)")
+            city, zone = item
+            if not isinstance(city, str) or not city or city != city.strip():
+                raise TemporalConfigurationError("a city must be an exact non-blank value")
+            region_iana_zone(zone)
+            cities.append(city)
+        if len(set(cities)) != len(cities):
+            raise TemporalConfigurationError("duplicate city in the timezone map")
+        object.__setattr__(self, "entries", tuple(sorted(self.entries)))
+
+    @property
+    def cities(self) -> tuple[str, ...]:
+        return tuple(city for city, _ in self.entries)
+
+    def zone_name(self, city: object) -> str:
+        """The zone of an exact, approved city; anything else raises (fails closed)."""
+        for known, zone in self.entries:
+            if isinstance(city, str) and city == known:
+                return zone
+        raise TemporalConfigurationError("city is missing, blank or not in the approved timezone map")
+
+    def zone(self, city: object) -> ZoneInfo:
+        return ZoneInfo(self.zone_name(city))
+
+    def zone_or_none(self, city: object) -> str | None:
+        """The zone of an exact approved city, else ``None`` (never a default zone)."""
+        return dict(self.entries).get(city) if isinstance(city, str) else None
+
+
+#: The column whose exact value selects the zone of ``finished_at`` and of its
+#: detail copy ``job_finished_at``: the **parent** job's city (never the detail
+#: row's own city or location label).
+FINISHED_AT_TIMEZONE_SELECTOR: Final = (DatasetKey.JOBS, 'city')
+
+
 class TemporalKind(StrEnum):
     """Whether a field holds an instant/wall time or a calendar date."""
 
@@ -929,6 +1023,11 @@ class TemporalFieldDefinition:
             instant comparisons, never guessed).
         designator_offsets: For ``DESIGNATOR`` fields, the authoritative
             fixed UTC offset of each accepted abbreviation.
+        city_timezones: For ``NAIVE`` fields whose zone depends on the row,
+            the authoritative exhaustive :class:`CityTimezoneMap`; set together
+            with ``timezone_selector`` and never with ``source_timezone``.
+        timezone_selector: The parent-dataset city column whose exact value
+            selects the zone (detail rows use their linked parent's value).
     """
 
     dataset: DatasetKey
@@ -941,6 +1040,8 @@ class TemporalFieldDefinition:
     designator_offsets: Mapping[str, dt.timedelta] = dataclass_field(
         default_factory=lambda: MappingProxyType({})
     )
+    city_timezones: CityTimezoneMap | None = None
+    timezone_selector: tuple[DatasetKey, str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, TemporalKind) or not isinstance(self.awareness, TemporalAwareness):
@@ -955,6 +1056,19 @@ class TemporalFieldDefinition:
             if self.awareness is not TemporalAwareness.NAIVE:
                 raise TemporalConfigurationError("source_timezone applies to naive timestamps only")
             _zone(self.source_timezone)
+        if (self.city_timezones is None) != (self.timezone_selector is None):
+            raise TemporalConfigurationError("city_timezones and timezone_selector are set together")
+        if self.city_timezones is not None:
+            if self.awareness is not TemporalAwareness.NAIVE or self.kind is not TemporalKind.TIMESTAMP:
+                raise TemporalConfigurationError("city time zones apply to naive timestamps only")
+            if self.source_timezone is not None:
+                raise TemporalConfigurationError("a field has one zone basis: a fixed zone or a city map")
+            if not isinstance(self.city_timezones, CityTimezoneMap):
+                raise TemporalConfigurationError("city_timezones must be a CityTimezoneMap")
+            selector = self.timezone_selector
+            if not (isinstance(selector, tuple) and len(selector) == 2 and isinstance(selector[0], DatasetKey)
+                    and isinstance(selector[1], str) and selector[1]):
+                raise TemporalConfigurationError("timezone_selector must be (dataset, column)")
         offsets = dict(self.designator_offsets)
         if (self.awareness is TemporalAwareness.DESIGNATOR) != bool(offsets):
             raise TemporalConfigurationError("designator offsets are required for (and only for) DESIGNATOR fields")
@@ -974,7 +1088,13 @@ class TemporalFieldDefinition:
         """True when values can become absolute instants without guessing."""
         if self.kind is not TemporalKind.TIMESTAMP:
             return False
-        return self.awareness is not TemporalAwareness.NAIVE or self.source_timezone is not None
+        return (self.awareness is not TemporalAwareness.NAIVE or self.source_timezone is not None
+                or self.city_timezones is not None)
+
+    @property
+    def zone_basis(self) -> tuple[object, ...]:
+        """What decides this field's zone (fixed zone, city map and selector) - equal bases compare as wall times."""
+        return (self.awareness, self.source_timezone, self.city_timezones, self.timezone_selector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1073,6 +1193,11 @@ class TemporalReconciliationDefinition:
                     f"a '{field.dataset}' temporal column is not in its contract"
                 )
         _zone(self.canonical_timezone)
+        for field in self.fields:
+            if field.timezone_selector is not None:
+                dataset, column = field.timezone_selector
+                if dataset is not self.relationship.parent or column not in registry[dataset].columns:
+                    raise TemporalConfigurationError("the timezone selector must be a parent contract column")
         if self.ordering is not None:
             for ref in (self.ordering.earlier, self.ordering.later):
                 if self.field(ref).kind is not TemporalKind.TIMESTAMP:
@@ -1115,33 +1240,34 @@ def _zone(name: str) -> ZoneInfo:
 
 _ISO_DATE: Final = "%Y-%m-%d"
 
-#: The temporal contract. Established facts (source formats and provenance):
+#: The authority-free *template* of the temporal contract. Established facts
+#: (source formats and provenance):
 #:
 #: * ``finished_at`` (jobs) - when the collection job finished; a *naive*
-#:   local timestamp. Record v5 approves its zone per parent-job city
-#:   (``FINISHED_AT_TIMEZONE``), applied only by
-#:   :mod:`ql2_sixt_canada_analysis.collection_schedule` for schedule
-#:   assignment; this per-field contract has no per-row zone, so here it is
-#:   still NOT resolved to an instant (never assumed UTC or machine-local).
+#:   local wall-clock timestamp. Its zone is approved per **parent-job city**
+#:   (``FINISHED_AT_TIMEZONE``, record v5, confirmed in v6); the template has
+#:   no zone, and the authority-backed contract
+#:   (:func:`~ql2_sixt_canada_analysis.temporal_authority.current_temporal_reconciliation`)
+#:   adds the exhaustive :class:`CityTimezoneMap` with the selector
+#:   :data:`FINISHED_AT_TIMEZONE_SELECTOR`. Never assumed UTC or machine-local.
 #: * ``job_finished_at`` (cars) - the parent job's ``finished_at`` repeated on
 #:   each detail row (``job_*`` columns repeat parent-job attributes), so it
-#:   must equal its parent's value (replication rule).
+#:   must equal its parent's value (replication rule); it resolves with the
+#:   parent's city zone.
 #: * ``scraped_at`` (cars) - when each detail row was scraped; every value
 #:   ends with the designator ``MST``. Per the IANA/POSIX definition ``MST``
 #:   is fixed UTC-07:00 (no daylight time). It labels the collector's clock -
 #:   it appears year-round and for markets in other zones - so it is *not* a
-#:   market-local time. If the source meant daylight-adjusted Mountain time,
-#:   this mapping must be corrected by the data owner.
+#:   market-local time. The policy stays unless superseded by authority.
 #: * ``scrape_date`` (jobs and cars) and ``date_clean`` (cars) - ISO calendar
 #:   dates supplied by the source (not generated by repository code).
 #:
-#: Not established (no approved authority decision), hence unavailable and
-#: failing closed: the ordering between ``finished_at`` and ``scraped_at``,
-#: which timestamp and reporting time zone define ``scrape_date``, and which
-#: define ``date_clean``. The markets span several time zones; the approved
-#: city-to-zone map for ``finished_at`` (record v5) is used only by the
-#: per-stream schedule, not by this per-field contract. No tolerance is
-#: authorised.
+#: The template leaves the ordering unset; the authority-backed contract adds
+#: the approved ordering (record v6: ``scraped_at <= finished_at`` on UTC
+#: instants, equality allowed, zero tolerance). Not established (no approved
+#: authority decision), hence unavailable and failing closed in both: which
+#: timestamp and reporting time zone define ``scrape_date``, and which define
+#: ``date_clean`` (never a pricing date while unresolved).
 TEMPORAL_RECONCILIATION: Final = TemporalReconciliationDefinition(
     fields=(
         TemporalFieldDefinition(DatasetKey.JOBS, 'finished_at', TemporalKind.TIMESTAMP, True,

@@ -74,6 +74,8 @@ from ql2_sixt_canada_analysis.schemas import (
     DATASET_DEFINITIONS,
     JOB_DETAIL_RELATIONSHIP,
     DatasetKey,
+    TemporalConfigurationError,
+    region_iana_zone,
 )
 
 __all__ = [
@@ -115,7 +117,7 @@ SCHEMA_2_VANCOUVER_GOVERNED_KEYS: tuple[tuple[str, str], ...] = (("Vancouver", "
 #: Canonical UTC instant text used by schema-3 schedule exceptions (``YYYYMMDDTHHMMSSZ``).
 UTC_INSTANT_PATTERN = re.compile(r"\d{8}T\d{6}Z")
 #: The current committed revision (repository-relative).
-CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v5.toml")
+CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v6.toml")
 
 
 class DecisionRecordError(ValueError):
@@ -1015,15 +1017,12 @@ def _v3_capture(res, by_id, d):  # type: ignore[no-untyped-def]
 
 
 def _iana_zone(value: object, name: str) -> str:
-    """A region-style IANA zone (``Area/Location``); fixed offsets and aliases such as UTC are refused."""
+    """A region IANA zone (shared rule :func:`~ql2_sixt_canada_analysis.schemas.region_iana_zone`)."""
     try:
-        if (not isinstance(value, str) or "/" not in value or value.startswith(("Etc/", "SystemV/"))
-                or value != value.strip()):
-            raise ValueError
-        ZoneInfo(value)
-    except (ValueError, ZoneInfoNotFoundError):
+        region_iana_zone(value)
+    except TemporalConfigurationError:
         raise DecisionRecordError(f"{name}: timezone must be a region IANA zone name") from None
-    return value
+    return value  # type: ignore[return-value]
 
 
 def _v3_city_timezones(res, by_id, d):  # type: ignore[no-untyped-def]
@@ -1142,6 +1141,29 @@ def _v3_exceptions(res, by_id, d):  # type: ignore[no-untyped-def]
         seen.add(marker)
 
 
+#: The only ordering the temporal contract implements: a detail row's scrape time is not after its
+#: parent job's finish time (both resolved to UTC instants).
+SCHEDULE_ORDERING_EARLIER, SCHEDULE_ORDERING_LATER = f"{_DETAIL}.scraped_at", f"{_PARENT}.finished_at"
+
+
+def _v3_ordering(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"earlier", "later", "equal_allowed"}, d.value)
+    _field_ref(res, "earlier", (SCHEDULE_ORDERING_EARLIER,), d.value)
+    _field_ref(res, "later", (SCHEDULE_ORDERING_LATER,), d.value)
+    _flag(res, "equal_allowed", d.value)
+    zones = _approved(by_id, _D.FINISHED_AT_TIMEZONE, d.value).resolution      # instants need the city map
+    if "city_timezones" not in zones:
+        raise DecisionRecordError(f"{d.value}: requires the per-city FINISHED_AT_TIMEZONE mapping")
+
+
+def _v3_tolerance(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"tolerance", "unit"}, d.value)
+    if type(res.get("tolerance")) is not int or res["tolerance"] < 0:
+        raise DecisionRecordError(f"{d.value}: tolerance must be a non-negative integer")
+    _choice(res, "unit", {"SECONDS", "MINUTES", "HOURS"}, d.value)
+    _approved(by_id, _D.SCRAPED_FINISHED_ORDERING, d.value)
+
+
 def _v3_vancouver(res, by_id, d):  # type: ignore[no-untyped-def]
     _vancouver(res, by_id, d, explicit_governed=True)
 
@@ -1154,6 +1176,8 @@ _RESOLVERS_V3 = {
     _D.SCHEDULE_SHARING_MODEL: _v3_sharing,
     _D.SCHEDULE_EXCEPTIONS: _v3_exceptions,
     _D.VANCOUVER_LOCATION_IDENTITY: _v3_vancouver,
+    _D.SCRAPED_FINISHED_ORDERING: _v3_ordering,
+    _D.SCRAPED_FINISHED_TOLERANCE: _v3_tolerance,
 }
 
 
@@ -1271,7 +1295,8 @@ _RESPONSE_SHAPE = {
     _D.SCHEDULE_EXCEPTIONS: ("NO_EXCEPTIONS, or listed exceptions (stream, UTC period, failure kind, reason, "
                              "authority kind, governance reference, schedule version)"),
     _D.FINISHED_AT_TIMEZONE: "an exhaustive map of exact parent-job city to region IANA zone (schema 3)",
-    _D.SCRAPED_FINISHED_ORDERING: "earlier field, later field, whether equality is allowed",
+    _D.SCRAPED_FINISHED_ORDERING: ("earlier field, later field, whether equality is allowed (schema 3: "
+                                   "cars.scraped_at not after jobs.finished_at, on UTC instants)"),
     _D.SCRAPED_FINISHED_TOLERANCE: "non-negative integer and unit (SECONDS or MINUTES or HOURS)",
     _D.REPORTING_DAY_SOURCE: "a dataset.column reference",
     _D.REPORTING_DAY_TIMEZONE: "an IANA timezone name",

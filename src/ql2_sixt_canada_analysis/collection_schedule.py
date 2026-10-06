@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import cache, cached_property
 from types import MappingProxyType
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -65,7 +65,14 @@ from ql2_sixt_canada_analysis.expected_stream_contract import (
     ExpectedStreamContract,
     current_expected_stream_contract,
 )
-from ql2_sixt_canada_analysis.schemas import JobDetailRelationshipDefinition, LocationCoverageDefinition
+from ql2_sixt_canada_analysis.schemas import (
+    CityTimezoneMap,
+    JobDetailRelationshipDefinition,
+    LocationCoverageDefinition,
+    TemporalConfigurationError,
+    classify_local_time,
+    region_iana_zone,
+)
 
 __all__ = [
     "FINISHED_AT_SOURCE_FORMAT",
@@ -187,57 +194,15 @@ def format_utc_instant(instant: dt.datetime) -> str:
 
 
 def _region_zone(name: object) -> ZoneInfo:
+    """The shared region-zone check (:func:`~ql2_sixt_canada_analysis.schemas.region_iana_zone`)."""
     try:
-        if (not isinstance(name, str) or "/" not in name or name != name.strip()
-                or name.startswith(("Etc/", "SystemV/"))):
-            raise ValueError
-        return ZoneInfo(name)
-    except (ValueError, ZoneInfoNotFoundError):
+        return region_iana_zone(name)
+    except TemporalConfigurationError:
         raise ScheduleConfigurationError("timezone must be a region IANA zone name") from None
 
 
-def _local_kind(local: dt.datetime, zone: ZoneInfo) -> str:
-    """``"ok"``, ``"nonexistent"`` or ``"ambiguous"`` for a naive local wall-clock value in ``zone``."""
-    first, second = local.replace(tzinfo=zone, fold=0), local.replace(tzinfo=zone, fold=1)
-    if first.astimezone(_UTC).astimezone(zone).replace(tzinfo=None) != local:
-        return "nonexistent"
-    return "ambiguous" if first.utcoffset() != second.utcoffset() else "ok"
-
-
-@dataclass(frozen=True, slots=True)
-class CityTimezoneMap:
-    """Exhaustive, exact ``city -> IANA zone`` map (``FINISHED_AT_TIMEZONE``)."""
-
-    entries: tuple[tuple[str, str], ...]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.entries, tuple) or not self.entries:
-            raise ScheduleConfigurationError("the city timezone map must be a non-empty tuple")
-        cities = []
-        for item in self.entries:
-            if not (isinstance(item, tuple) and len(item) == 2):
-                raise ScheduleConfigurationError("each entry must be (city, zone)")
-            city, zone = item
-            if not isinstance(city, str) or not city or city != city.strip():
-                raise ScheduleConfigurationError("a city must be an exact non-blank value")
-            _region_zone(zone)
-            cities.append(city)
-        if len(set(cities)) != len(cities):
-            raise ScheduleConfigurationError("duplicate city in the timezone map")
-
-    @property
-    def cities(self) -> tuple[str, ...]:
-        return tuple(city for city, _ in self.entries)
-
-    def zone_name(self, city: object) -> str:
-        """The zone of an exact, approved city; anything else raises (fails closed)."""
-        for known, zone in self.entries:
-            if isinstance(city, str) and city == known:
-                return zone
-        raise ScheduleConfigurationError("city is missing, blank or not in the approved timezone map")
-
-    def zone(self, city: object) -> ZoneInfo:
-        return ZoneInfo(self.zone_name(city))
+#: The shared DST classification (one mechanism for the schedule and the temporal contract).
+_local_kind = classify_local_time
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,7 +244,7 @@ def normalize_finished_at(raw: object, city: object, timezones: CityTimezoneMap)
         raise _AssignmentError(JobAssignmentFailure.MISSING_CITY)
     try:
         zone_name = timezones.zone_name(city)
-    except ScheduleConfigurationError:
+    except (ScheduleConfigurationError, TemporalConfigurationError):
         raise _AssignmentError(JobAssignmentFailure.UNKNOWN_CITY) from None
     if _missing(raw):
         raise _AssignmentError(JobAssignmentFailure.MISSING_FINISHED_AT)
