@@ -1566,3 +1566,58 @@ def test_ingestion_notebook_linkage_step_reports_aggregates_only(tmp_path: Path,
         assert value not in linkage + join + pricing
     assert not any(column in linkage for key in DatasetKey for column in contract_columns(key))
     assert list(workdir.iterdir()) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------- matched location pricing (02)
+
+MATCHED_PRICING_NOTEBOOK = NOTEBOOKS_DIR / "02_matched_location_pricing.ipynb"
+
+
+def test_matched_pricing_notebook_uses_package_apis_only() -> None:
+    notebook = read_notebook(MATCHED_PRICING_NOTEBOOK)
+    code = _code_source(notebook)
+    for name in ("run_matched_location_pricing", "match_count_frame", "city_summary_frame",
+                 "vehicle_type_summary_frame", "vehicle_type_test_frame", "plot_matched_location_premiums"):
+        assert re.search(rf"from ql2_sixt_canada_analysis import\s*\(?[^)]*?\b{name}\b", code, re.S), name
+        assert f"{name}(" in code
+    # No re-implemented matching, aggregation, statistics or plotting, and no row-level display.
+    for pattern in (r"\.merge\(", r"\.groupby\(", r"\.pivot", r"kruskal", r"scipy", r"\.boxplot\(",
+                    r"\.scatter\(", r"\.violinplot\(", r"pyplot", r"plt\.", r"\.median\(", r"\.mean\(",
+                    r"\.quantile\(", r"\.percentile\(", r"result\.pairs", r"\.pairs\b", r"\.offers\b",
+                    r"\.(head|tail|sample|describe|info|to_string|to_markdown)\(", r"job_id", r"\bjobs\b",
+                    r"\bcars\b", r"assess_matched_location_pricing\("):
+        assert not re.search(pattern, code), f"notebook re-implements or exposes: {pattern}"
+    assert "plt.show" not in code and "savefig(buffer" in code
+    assert re.search(r"REPORTS_DIR\s*=\s*None", code) and re.search(r"RAW_DIR_OVERRIDE\s*=\s*None", code)
+
+
+def test_matched_pricing_notebook_is_documented_and_independent_of_notebook_01() -> None:
+    notebook = read_notebook(MATCHED_PRICING_NOTEBOOK)
+    code = _code_source(notebook)
+    assert "%run" not in code and "01_data_ingestion" not in code and "import ipynb" not in code
+    text = " ".join("\n".join(c.source for c in notebook.cells if c.cell_type == "markdown").lower().split())
+    assert "confidential" in text and "associational" in text and "airport minus downtown" in text
+    readme = (NOTEBOOKS_DIR / "README.md").read_text(encoding="utf-8")
+    assert MATCHED_PRICING_NOTEBOOK.name in readme
+
+
+def test_matched_pricing_notebook_runs_clean_and_stops_when_not_ready(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
+    repo_before = _snapshot(PROJECT_ROOT)
+    workdir = tmp_path / "outside_repository"
+    workdir.mkdir()
+    result = execute_notebook_copy(MATCHED_PRICING_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)}, timeout_seconds=300)
+    assert result.execution_counts == tuple(range(1, len(_code_cells(result.executed)) + 1))
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "Matched location pricing status: blocked" in outputs
+    assert "pricing_not_ready" in outputs and "no commercial result" in outputs
+    assert "Skipped: matched location pricing is blocked." in outputs and "No files written." in outputs
+    assert "synthetic_" not in outputs and str(synthetic_raw_dir) not in outputs and str(tmp_path) not in outputs
+    assert not re.search(r"\b[0-9]+\b", outputs), "a blocked run shows no numbers"
+    assert not any(o.get("output_type") in {"execute_result", "display_data"}
+                   for c in _code_cells(result.executed) for o in c.outputs), "no tables or figures when blocked"
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")
+                  if "outside_repository" not in p.parts) == before
+    assert not any(workdir.iterdir()), "notebook wrote files"
+    assert _snapshot(PROJECT_ROOT) == repo_before
