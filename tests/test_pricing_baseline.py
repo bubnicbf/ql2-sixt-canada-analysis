@@ -37,10 +37,6 @@ from ql2_sixt_canada_analysis.schemas import (
     TEMPORAL_RECONCILIATION,
     DatasetKey,
     LocationCoverageMode,
-    TemporalAwareness,
-    TemporalFieldDefinition,
-    TemporalKind,
-    TemporalReplicationRule,
 )
 from ql2_sixt_canada_analysis.coverage import location_pair_evidence
 from ql2_sixt_canada_analysis.temporal import assess_temporal_reconciliation
@@ -102,7 +98,8 @@ def test_active_blockers_and_plan_gaps_are_separate():
     assert not gap_values & set(baseline.pricing_blockers)
     assert not any(gap_values & set(codes) for _, codes in baseline.subordinate_blockers)
     assert not gap_values & {b.value for b in B}                  # gaps are not PricingBlocker values
-    assert baseline.plan_gaps == (G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE,)
+    assert baseline.plan_gaps == ()                                # rental rules ran under an approved policy
+    assert project_baseline(rental_dates=None).plan_gaps == (G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE,)
     assert not any("exhaustive" in g.value for g in G)     # exhaustiveness is a central blocker, not a gap
 
 
@@ -136,20 +133,6 @@ def test_role_map_is_a_central_gate_not_a_plan_gap():
 
 
 J, C_ = DatasetKey.JOBS, DatasetKey.CARS
-# Synthetic approved agreements (test configuration only - the real semantics come from the
-# authority decision record): each detail rental-date field gets exactly one parent source.
-APPROVED = tuple(pb.ApprovedDateAgreement((J, src), (C_, tgt)) for src, tgt in (
-    ("pickup_date", "job_pickup_date"), ("return_date", "job_return_date"),
-    ("pickup_date", "pickup_date"), ("return_date", "return_date")))
-
-
-def _rental_contract(rules=APPROVED, *, required=True, fields=None):  # type: ignore[no-untyped-def]
-    T = TEMPORAL_RECONCILIATION
-    refs = pb.rental_date_fields(REL) if fields is None else fields
-    defs = [TemporalFieldDefinition(ds, col, TemporalKind.DATE, required, "%Y-%m-%d", TemporalAwareness.NOT_APPLICABLE)
-            for ds, col in refs]
-    reps = [TemporalReplicationRule(a.source, a.target) for a in rules]
-    return dataclasses.replace(T, fields=(*T.fields, *defs), replications=(*T.replications, *reps))
 
 
 def test_project_distinguishes_six_rental_date_fields():
@@ -158,31 +141,20 @@ def test_project_distinguishes_six_rental_date_fields():
         (C_, "pickup_date"), (C_, "return_date"))
 
 
-def test_rental_date_gap_requires_exact_approved_agreements():
-    def gaps(contract, authority=AUTHORITY, approved=APPROVED):  # type: ignore[no-untyped-def]
-        return project_baseline_with(temporal_contract=contract, rental_period_rule_authority=authority,
-                                     approved_rental_date_agreements=approved).plan_gaps
+def test_rental_date_gap_follows_the_central_rental_assessment():
+    from stream_contract_fixtures import synthetic_rental_policy
 
-    unrelated = pb.ApprovedDateAgreement((J, "pickup_date"), (C_, "scrape_date"))
-    same_named_only = APPROVED[2:]                                      # job_* copies left undefined
-    swapped = (pb.ApprovedDateAgreement((J, "return_date"), (C_, "job_pickup_date")), *APPROVED[1:])
-    still_open = [
-        (_rental_contract(), None, APPROVED),                                       # no authority
-        (_rental_contract(), AUTHORITY, None),                                      # no approved agreements
-        (_rental_contract(same_named_only), AUTHORITY, same_named_only),            # job_* semantics undefined
-        (_rental_contract((*APPROVED, unrelated)), AUTHORITY, APPROVED),            # unapproved extra rule
-        (_rental_contract(APPROVED[:3]), AUTHORITY, APPROVED),                      # approved rule not configured
-        (_rental_contract(swapped), AUTHORITY, APPROVED),                           # rule on the wrong target
-        (_rental_contract((*APPROVED[:3], unrelated)), AUTHORITY, (*APPROVED[:3], unrelated)),  # unrelated target
-        (_rental_contract(required=False), AUTHORITY, APPROVED),                    # validity not required
-        (_rental_contract(fields=pb.rental_date_fields(REL)[:4], rules=APPROVED[:2]), AUTHORITY, APPROVED),
-        (TEMPORAL_RECONCILIATION, AUTHORITY, APPROVED),                             # nothing modeled
-        (_rental_contract(), AUTHORITY, (*APPROVED, APPROVED[0])),                  # duplicate approval
-        (_rental_contract(), AUTHORITY, [*APPROVED]),                               # untyped container
-    ]
-    for contract, authority, approved in still_open:
-        assert G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE in gaps(contract, authority, approved)
-    assert G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE not in gaps(_rental_contract())
+    from ql2_sixt_canada_analysis.rental_dates import RentalDatePolicy, RentalDateReport, RentalPolicyStatus
+
+    assert project_baseline().plan_gaps == ()
+    unapproved = RentalDateReport(policy=RentalDatePolicy(status=RentalPolicyStatus.NOT_APPROVED))
+    baseline = project_baseline(rental_dates=unapproved)
+    assert baseline.plan_gaps == (G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE,)
+    assert "rental_date_rules_unavailable" in baseline.pricing_blockers         # and a central blocker
+    missing = project_baseline(rental_dates=None)
+    assert "rental_date_assessment_missing" in missing.pricing_blockers
+    assert missing.rental_dates.policy_status == "report_missing"
+    assert synthetic_rental_policy().available
 
 
 def project_baseline_with(**kwargs):  # type: ignore[no-untyped-def]

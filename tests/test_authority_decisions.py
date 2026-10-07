@@ -31,7 +31,7 @@ from ql2_sixt_canada_analysis.pricing_baseline import (
     rental_date_fields,
 )
 from ql2_sixt_canada_analysis.readiness import PricingBlocker
-from ql2_sixt_canada_analysis.schemas import JOB_DETAIL_RELATIONSHIP, LocationPolicyAuthority
+from ql2_sixt_canada_analysis.schemas import JOB_DETAIL_RELATIONSHIP
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD_DIR = ROOT / "docs" / "decisions" / "pricing_authorities"
@@ -552,8 +552,10 @@ def test_approved_record_supplies_typed_baseline_inputs() -> None:
         baseline_authority_inputs(approved_record())          # type: ignore[arg-type]
 
 
-def test_rental_rules_need_a_neutral_authority_reference() -> None:
-    from ql2_sixt_canada_analysis import pricing_baseline as pb
+def test_rental_rules_come_only_from_approved_records() -> None:
+    from ql2_sixt_canada_analysis.rental_dates import RentalPolicyStatus, rental_date_policy_from_record
 
-    legacy = LocationPolicyAuthority(source="SYNTH", reference="SYNTH")
-    assert not pb._rental_rules_sufficient(pb.TEMPORAL_RECONCILIATION, JOB_DETAIL_RELATIONSHIP, legacy, ())
+    assert rental_date_policy_from_record(load_decision_record(V1)).status is RentalPolicyStatus.NOT_APPROVED
+    assert rental_date_policy_from_record(None).status is RentalPolicyStatus.RECORD_UNAVAILABLE
+    # A schema-1 approval (historical shape) is never implemented as the current policy.
+    assert rental_date_policy_from_record(parse_decision_record(approved_record())).status is RentalPolicyStatus.INVALID

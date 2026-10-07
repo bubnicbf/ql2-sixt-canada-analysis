@@ -65,7 +65,7 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 # Cells that are required to report categorical gate results and aggregate
 # counts (never values or identifiers); the per-step "stay quiet" checks
 # exclude them and each has its own focused tests.
-REPORTING_STEPS = ("current_expected_stream_contract(", "current_location_authority(", "current_temporal_authority(", "assess_job_linkage(", "assess_per_stream_scheduled_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
+REPORTING_STEPS = ("current_expected_stream_contract(", "current_location_authority(", "current_temporal_authority(", "assess_rental_dates(", "assess_job_linkage(", "assess_per_stream_scheduled_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
                    "investigate_location_stream(", "assess_completeness(")

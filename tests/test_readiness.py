@@ -27,6 +27,7 @@ from ql2_sixt_canada_analysis.comparison import (
     compare_location_streams,
 )
 from ql2_sixt_canada_analysis.collection_schedule import ScheduleCoverageBlocker
+from ql2_sixt_canada_analysis.rental_dates import RentalDateBlocker
 from ql2_sixt_canada_analysis.readiness import (
     AnalyticalLocationKeys,
     LocationPolicyReport,
@@ -40,7 +41,7 @@ from ql2_sixt_canada_analysis.readiness import (
     validate_pricing_readiness,
 )
 from conftest import join_gates, linked_join
-from stream_contract_fixtures import synthetic_contract, synthetic_location_authority
+from stream_contract_fixtures import passing_rental_report, synthetic_contract, synthetic_location_authority
 from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
 from ql2_sixt_canada_analysis.job_linkage import JobLinkageBlocker
 from ql2_sixt_canada_analysis.stability import VehicleStabilityStatus, assess_vehicle_attribute_stability
@@ -167,11 +168,12 @@ LINKAGE_OK = JOIN_OK.job_linkage_report
 GATES = dict(completeness=COMPLETE, key_contracts_valid=True, one_to_many_contract_valid=True,
              temporal_fields_trusted=True, vehicle_stability=STABLE, scheduled_coverage=SCHEDULED_OK,
              job_detail_join=JOIN_OK, job_linkage=LINKAGE_OK, expected_stream_contract=synthetic_contract(SYNTH_COV),
-             location_authority=synthetic_location_authority(synthetic_contract(SYNTH_COV), SYNTH_ROLES, SYNTH_PAIRS))
+             location_authority=synthetic_location_authority(synthetic_contract(SYNTH_COV), SYNTH_ROLES, SYNTH_PAIRS),
+             rental_dates=passing_rental_report(*scheduled_frames()))
 FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE,
                                              "scheduled_coverage": None, "job_detail_join": None,
                                              "job_linkage": None, "expected_stream_contract": None,
-                                             "location_authority": None}
+                                             "location_authority": None, "rental_dates": None}
 
 
 def evidence(status: CS) -> LocationStreamComparisonReport:
@@ -198,6 +200,7 @@ SCOPE_BLOCKERS = {B(d.value) for d in LocationPolicyScopeDefect}
 # Detailed schedule/join blockers (a missing assessment reports only its own "missing" blocker).
 SCHEDULE_AND_JOIN_DETAIL = ({B(b.value) for b in ScheduledCoverageBlocker} | {B(b.value) for b in JobDetailJoinBlocker}
                             | {B(b.value) for b in ScheduleCoverageBlocker}
+                            | {B(b.value) for b in RentalDateBlocker}   # a missing rental assessment: its own value
                             | {B.SCHEDULED_COVERAGE_CONTRACT_MISMATCH, B.TRUSTED_JOIN_NOT_READY}
                             | {B(b.value) for b in JobLinkageBlocker}
                             | {B.JOB_IDENTIFIER_NORMALIZATION_NOT_READY, B.JOB_LINKAGE_REPORT_MISMATCH})

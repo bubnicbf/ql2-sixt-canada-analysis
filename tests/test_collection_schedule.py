@@ -127,9 +127,9 @@ def test_v5_is_a_schema_3_record_superseding_v4_and_carried_into_the_current_rec
     record = load_decision_record(V5)
     assert (record.schema_version, record.record_version, record.record_id, record.supersedes) == (
         3, 5, "pricing-authorities-v5", "pricing-authorities-v4")
-    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v6.toml"
+    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v7.toml"
     current = load_current_decision_record()
-    assert current.record_id == "pricing-authorities-v6" and current.supersedes == "pricing-authorities-v5"
+    assert current.record_id == "pricing-authorities-v7" and current.supersedes == "pricing-authorities-v6"
     for decision in SCHEDULE_DECISIONS:                   # v6 keeps every schedule decision unchanged
         assert current.decision(decision).resolution == record.decision(decision).resolution
         assert set(record.decision(decision).authority) <= set(current.decision(decision).authority)
@@ -388,7 +388,7 @@ def test_project_schedule_is_per_stream_and_computed_from_the_definitions() -> N
     schedule = current_per_stream_schedule()
     assert schedule is current_per_stream_schedule()                    # resolved once
     assert schedule.status is SS.AVAILABLE and schedule.blocking_reasons == ()
-    assert schedule.record_id == "pricing-authorities-v6" and schedule.schedule_version == "per_stream_hourly_v1"
+    assert schedule.record_id == "pricing-authorities-v7" and schedule.schedule_version == "per_stream_hourly_v1"
     assert schedule.sharing_mode is SharingMode.PER_STREAM and schedule.capture_field == "jobs.finished_at"
     assert (schedule.detail_copy_field, schedule.detail_observation_field) == ("cars.job_finished_at",
                                                                               "cars.scraped_at")
@@ -405,7 +405,7 @@ def test_project_schedule_is_per_stream_and_computed_from_the_definitions() -> N
     for s in schedule.schedules:
         assert (s.timezone, s.local_start, s.local_end, s.end_inclusive, s.cadence) == (
             ZONES[s.city], LOCAL_START, LOCAL_END, True, "PT1H")
-        assert s.record_id == "pricing-authorities-v6" and s.capture_field == "jobs.finished_at"
+        assert s.record_id == "pricing-authorities-v7" and s.capture_field == "jobs.finished_at"
 
 
 @pytest.mark.parametrize("city, first, last", [

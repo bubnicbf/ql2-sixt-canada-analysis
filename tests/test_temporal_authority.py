@@ -122,11 +122,15 @@ def test_history_is_unchanged_and_valid() -> None:
         load_decision_record(RECORD_DIR / name)
 
 
-def test_v6_is_current_and_adds_exactly_the_ordering_decisions() -> None:
+def test_v6_adds_exactly_the_ordering_decisions_and_is_carried_forward() -> None:
     record, v5 = load_decision_record(V6), load_decision_record(V5)
     assert (record.schema_version, record.record_version, record.record_id, record.supersedes) == (
         3, 6, "pricing-authorities-v6", "pricing-authorities-v5")
-    assert CURRENT_RECORD_PATH.name == "v6.toml" and load_current_decision_record() == record
+    assert CURRENT_RECORD_PATH.name == "v7.toml"
+    current = load_current_decision_record()                  # v7 keeps every v6 decision except the rental pair
+    for decision in record.decisions:
+        if decision.id not in (D.RENTAL_DATE_VALIDITY, D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS):
+            assert current.decision(decision.id) == decision, decision.id
     counts = record.counts()
     assert (counts[DecisionStatus.APPROVED], counts[DecisionStatus.PROPOSED], counts[DecisionStatus.REJECTED]) == (
         16, 6, 0)
@@ -206,7 +210,7 @@ def test_ordering_needs_the_city_map_and_tolerance_needs_the_ordering() -> None:
 
 def test_current_policy_is_available_with_zero_tolerance() -> None:
     authority = current_temporal_authority()
-    assert authority is current_temporal_authority() and authority.record_id == "pricing-authorities-v6"
+    assert authority is current_temporal_authority() and authority.record_id == "pricing-authorities-v7"
     assert (authority.timezone_status, authority.ordering_status, authority.tolerance_status) == (
         TS.APPROVED, TS.APPROVED, TS.APPROVED)
     assert dict(authority.city_timezones.entries) == ZONES

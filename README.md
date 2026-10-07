@@ -1446,11 +1446,72 @@ scrape/finish ordering (record v6) are approved and implemented; the
 reporting-day derivation and the scrape-date and cleaned-date semantics remain
 unresolved.
 
+### Rental dates (validity, parent/detail agreement, pricing eligibility)
+
+Authority record v7 approves `RENTAL_DATE_VALIDITY` (collection owner and
+business owner, joint) and `RENTAL_DATE_PARENT_DETAIL_AGREEMENTS` (collection
+owner), reference
+[`rental-date-validity-and-agreement-governance-v1-2026-10-06.md`](docs/decisions/governance/rental-date-validity-and-agreement-governance-v1-2026-10-06.md).
+`ql2_sixt_canada_analysis.rental_dates` builds the typed `RentalDatePolicy`
+from those APPROVED decisions only (`current_rental_date_policy()`), and
+`assess_rental_dates(jobs, cars, policy=..., job_linkage=...)` returns the
+aggregate `RentalDateReport` that pricing readiness, the baseline and the
+notebook all consume.
+
+- **Governed fields:** `jobs.pickup_date`, `jobs.return_date`,
+  `cars.job_pickup_date`, `cars.job_return_date`, `cars.pickup_date`,
+  `cars.return_date`.
+- **Format `ISO_8601_DATE`:** exactly `YYYY-MM-DD` text naming a real calendar
+  date. Dates are calendar dates - never timestamps, never midnight instants,
+  never given UTC or a city zone. Nothing is trimmed or coerced: a time, an
+  offset, slashes, month names, extra text, surrounding whitespace, numbers or
+  spreadsheet serials and other objects are *invalid*; nulls, empty and
+  whitespace-only text are *missing*. Raw values are preserved.
+- **Validity:** pickup and return are both required for pricing eligibility;
+  the return date must be on or after the pickup date (duration = return minus
+  pickup in calendar days, minimum zero), so **same-day rentals are valid**.
+  There is **no maximum** duration (`maximum_duration_mode = UNBOUNDED`): a
+  long, correctly ordered rental is valid data, and no threshold is ever
+  derived from observed values.
+- **Agreement:** each detail date repeats the parent job's search date -
+  `cars.job_pickup_date` and `cars.pickup_date` equal `jobs.pickup_date`;
+  `cars.job_return_date` and `cars.return_date` equal `jobs.return_date` -
+  compared as **parsed** calendar dates on rows linked through the valid
+  linkage report of the same frames (raw text alone never decides, and a
+  non-ISO value never agrees). Each mapping counts matches, mismatches,
+  parent/detail/both missing, parent/detail invalid, orphan details and
+  untrusted linkage separately. One-sided missing values fail, and both
+  missing is never a pass. Disagreements are **never repaired** (no side is
+  preferred) and no source value is overwritten.
+- **Validity versus analysis eligibility:** the report decides data validity
+  and *pricing eligibility* (valid, agreeing dates on a trusted row) and counts
+  every row - nothing is excluded to make the rest look valid. A study that
+  wants a duration cohort (same-day, weekly, ...) applies
+  `analysis_duration_cohort(derived, minimum_days=..., maximum_days=...)` to
+  `derive_rental_periods(...)` afterwards; it never changes validity and never
+  re-admits an ineligible row, and such a study population needs its own
+  approved analysis policy.
+- **Fail closed:** pricing readiness takes the report as the required
+  `rental_dates` argument. No report is `rental_date_assessment_missing`; an
+  unapproved, invalid or unavailable policy is `rental_date_rules_unavailable`;
+  violations are `rental_date_required_value_missing`,
+  `rental_date_format_invalid`, `rental_date_ordering_invalid`,
+  `rental_date_parent_detail_mismatch` and `rental_date_agreement_unassessable`
+  (missing, invalid or orphan rows, or untrusted, unavailable or stale
+  linkage). Same-day and long valid rentals never block.
+- **Real data (counts only):** 270 parent rows and 11,940 detail rows; all six
+  fields are present and valid ISO dates (0 missing, 0 invalid), no return
+  precedes its pickup, no same-day rental and no period of 30 days or more
+  (an informational band only), and all four mappings match on every detail
+  row (0 mismatches, 0 unassessable). Every row is pricing eligible under the
+  rental-date rules, which add no blocker.
+
 **Definition of done for pricing readiness:** an approved, `EXHAUSTIVE`
 source-stream contract from the current authority record, complete data
 (every approved stream exactly once and healthy, no missing, unexpected or
 misspelled stream, counts, city integrity), valid key contracts,
-a valid one-to-many relationship, trusted temporal fields, a stable,
+a valid one-to-many relationship, trusted temporal fields, valid and agreeing rental dates under the
+approved rental-date policy, a stable,
 fully assessed vehicle population, the available authority-backed
 per-stream collection schedule with every expected stream-period covered by
 its own stream (or excused by a governed, versioned exception), a validated trusted job-detail join (no
@@ -1467,15 +1528,17 @@ partial stream continuity behind `data_incomplete` and
 (`temporal_fields_untrusted` - now only because the reporting-day and
 date-semantics decisions are unresolved: every finish time resolves,
 replicates and orders correctly); the unresolved combination of the aliased
-Vancouver streams' offers (`canonical_offer_combination_unresolved`); and the
-rental-date rules (plan gap). `expected_stream_authority_unavailable` and
+Vancouver streams' offers (`canonical_offer_combination_unresolved`).
+`expected_stream_authority_unavailable` and
 `expected_stream_universe_not_exhaustive` are cleared by revision 3;
 `branch_role_authority_unavailable`, `comparison_pair_authority_unavailable`
 and `vancouver_policy_unresolved` by revision 4; the source-spelling blockers
 (`expected_pairs_missing`, `unexpected_pairs`, `source_spelling_mismatch`),
 `governed_source_stream_missing` and `collection_schedule_unavailable` by
-revision 5; the unavailable `timestamp_ordering` rule by revision 6. The
-dataset is **not** pricing ready.
+revision 5; the unavailable `timestamp_ordering` rule by revision 6; the
+rental-date plan gap (`rental_period_date_rules_unavailable`, now the central
+`rental_date_rules_unavailable`) by revision 7, whose rules the real data
+satisfies. The dataset is **not** pricing ready.
 
 ### Sanitized pricing-readiness baseline
 
@@ -1484,8 +1547,9 @@ runs the same assessments as the ingestion notebook on the real files and
 prints a sanitized Markdown baseline (`pricing_baseline.py`: a reporting
 layer only - it never re-decides readiness). It separates **active
 blockers** (the exact typed values the existing reports emitted) from
-**plan-level gaps** (`PlanReadinessGap`: no pickup/return-date rules - not a
-`PricingBlocker`; the expected-stream universe, the role map and the
+**plan-level gaps** (`PlanReadinessGap`: reported only while no rental-date
+assessment ran under an approved policy - not a `PricingBlocker`; the
+rental-date rules themselves, the expected-stream universe, the role map and the
 comparison pairs are central blockers, not gaps), reports the location
 authority in aggregate (role-map and pair statuses, streams per role, the
 approved pairs on canonical keys, the Vancouver policy state and canonical
@@ -1500,14 +1564,9 @@ continuity of every observed stream, so a partial observed stream stays
 visible without printing its source value. The investigated approved
 stream's continuity is reported in aggregate only. Serialization
 is fail closed: only counts, booleans, snake-case codes and digit-free
-location labels are accepted. The plan gap closes only on sufficient,
-authority-backed inputs: the rental-period gap needs
-`rental_period_rule_authority` plus `approved_rental_date_agreements` from the
-authority decision record that give each detail rental-date field
-(`cars.job_pickup_date`, `cars.job_return_date`, `cars.pickup_date`,
-`cars.return_date`) exactly one approved parent source (`jobs.pickup_date` /
-`jobs.return_date`); all six must be required `DATE` fields and the temporal
-contract's rental-date replication rules must be exactly the approved pairs. The current baseline is
+location labels are accepted. The rental-date section reports the policy
+status, field, period and agreement counts, eligible rows and blockers (no
+dates). The current baseline is
 `docs/investigations/pricing_readiness_baseline.md`.
 
 ### Pricing-authority decision record
@@ -1527,27 +1586,31 @@ comparison pairs (business owner) and the Vancouver `CONFIRMED_ALIAS`
 raw source keys (roles, pairs and alias unchanged in meaning) and approves
 `SCHEDULE_CAPTURE_TIMESTAMP`, `SCHEDULE_EXPECTED_PERIODS`,
 `SCHEDULE_SHARING_MODEL` (`PER_STREAM`), `SCHEDULE_EXCEPTIONS`
-(`NO_EXCEPTIONS`, joint) and the per-city `FINISHED_AT_TIMEZONE`. The current
-revision 6 (`v6.toml`, schema 3, `CURRENT_RECORD_PATH`) keeps all of these
-and approves `SCRAPED_FINISHED_ORDERING` (`cars.scraped_at` earlier than or
-equal to `jobs.finished_at`) and `SCRAPED_FINISHED_TOLERANCE` (zero seconds;
-joint), leaving the other 6 `PROPOSED` and blocking on external input; raw-data observations, behavioural analyses, repository notes and
+(`NO_EXCEPTIONS`, joint) and the per-city `FINISHED_AT_TIMEZONE`. Revision 6
+(`v6.toml`, schema 3, unchanged) keeps all of these and approves
+`SCRAPED_FINISHED_ORDERING` (`cars.scraped_at` earlier than or equal to
+`jobs.finished_at`) and `SCRAPED_FINISHED_TOLERANCE` (zero seconds; joint).
+The current revision 7 (`v7.toml`, schema 3, `CURRENT_RECORD_PATH`) keeps
+everything and approves `RENTAL_DATE_VALIDITY` (`ISO_8601_DATE`, both dates
+required, return on or after pickup, minimum zero days, `UNBOUNDED` maximum;
+joint) and `RENTAL_DATE_PARENT_DETAIL_AGREEMENTS` (the four mappings above),
+leaving the other 4 `PROPOSED` and blocking on external input; raw-data observations, behavioural analyses, repository notes and
 review notes remain non-authoritative evidence only. The questions still to
 send are in
 [`authority_request_checklist.md`](docs/decisions/pricing_authorities/authority_request_checklist.md).
 Validate a revision with
-`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v6.toml`
-(sanitized summary; non-zero exit when invalid). The baseline's
-`location_role_authority` and `rental_period_rule_authority` take the
-domain-neutral `AuthorityReference`, and `baseline_authority_inputs(record)`
-passes on APPROVED decisions only, so a PROPOSED record clears nothing.
+`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v7.toml`
+(sanitized summary; non-zero exit when invalid). `baseline_authority_inputs(record)`
+passes on typed APPROVED rental agreements only, so a PROPOSED record clears
+nothing.
 Approved decisions are implemented in separate, tested changes: the
 job-identifier approvals by `job_linkage` (`job_linkage_policy_from_record`
 builds its policy only when all four are approved and consistent), the
 expected-stream approvals by `expected_stream_contract`, the location roles,
 pairs and Vancouver alias by `location_authority`, the schedule decisions
-by `collection_schedule`, and the finish-time zones, replication and ordering
-by `temporal_authority` and `temporal`.
+by `collection_schedule`, the finish-time zones, replication and ordering
+by `temporal_authority` and `temporal`, and the rental-date validity and
+agreements by `rental_dates`.
 
 ## Vehicle-attribute stability
 
@@ -1664,6 +1727,7 @@ python -m pytest tests/test_notebooks.py
 - Job level counts = detail row counts
 - Valid offers duplicated
 - Job timestamps consistent: finish times resolved in the parent city's IANA zone, every detail copy replicating its parent exactly, every scrape time earlier than or equal to its parent's finish time (zero tolerance)
+- Rental dates valid (exact ISO dates, return on or after pickup, no maximum) and agreeing with their parent job
 - Date field that defines reporting day (unresolved: `date_clean` is not a pricing date)
 - Location/Product attributes stability
 

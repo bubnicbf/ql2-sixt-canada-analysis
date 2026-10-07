@@ -89,6 +89,7 @@ if TYPE_CHECKING:  # imported lazily at run time
     from ql2_sixt_canada_analysis.location_authority import LocationAuthorityReport
     from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
     from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
+    from ql2_sixt_canada_analysis.rental_dates import RentalDateReport
 
 __all__ = [
     "CompletenessBlocker",
@@ -163,6 +164,15 @@ class PricingBlocker(StrEnum):
     # Per-stream schedule (values equal ScheduleCoverageBlocker values).
     SCHEDULED_JOB_ASSIGNMENT_FAILED = "scheduled_job_assignment_failed"
     SCHEDULED_DETAIL_COPY_MISMATCH = "scheduled_detail_copy_mismatch"
+    # Rental dates (values equal RentalDateBlocker values; a missing assessment has its own value).
+    RENTAL_DATE_ASSESSMENT_MISSING = "rental_date_assessment_missing"
+    RENTAL_DATE_RULES_UNAVAILABLE = "rental_date_rules_unavailable"
+    RENTAL_DATE_REQUIRED_VALUE_MISSING = "rental_date_required_value_missing"
+    RENTAL_DATE_FORMAT_INVALID = "rental_date_format_invalid"
+    RENTAL_DATE_ORDERING_INVALID = "rental_date_ordering_invalid"
+    RENTAL_DATE_DURATION_ABOVE_MAXIMUM = "rental_date_duration_above_maximum"
+    RENTAL_DATE_PARENT_DETAIL_MISMATCH = "rental_date_parent_detail_mismatch"
+    RENTAL_DATE_AGREEMENT_UNASSESSABLE = "rental_date_agreement_unassessable"
     # Trusted job-detail join (JOIN_* values equal JobDetailJoinBlocker values).
     TRUSTED_JOIN_ASSESSMENT_MISSING = "trusted_join_assessment_missing"
     TRUSTED_JOIN_NOT_READY = "trusted_join_not_ready"
@@ -406,6 +416,16 @@ class PricingReadinessReport:
     expected_stream_contract: ExpectedStreamContract | None = None
     #: Authority-backed roles and comparison pairs (kept for audit; ``None`` = missing).
     location_authority: LocationAuthorityReport | None = None
+    #: Rental-date validity and parent/detail agreement (kept for audit; ``None`` = missing).
+    rental_dates: RentalDateReport | None = None
+
+    @property
+    def rental_date_rules_available(self) -> bool:
+        return self.rental_dates is not None and self.rental_dates.policy.available
+
+    @property
+    def rental_dates_valid(self) -> bool:
+        return self.rental_dates is not None and self.rental_dates.is_valid
 
     @property
     def ready(self) -> bool:
@@ -553,6 +573,7 @@ def assess_pricing_readiness(
     job_linkage: JobLinkageReport | None,
     expected_stream_contract: ExpectedStreamContract | None,
     location_authority: LocationAuthorityReport | None,
+    rental_dates: RentalDateReport | None,
 ) -> PricingReadinessReport:
     """Combine every foundational gate with the location policy (all must pass).
 
@@ -583,6 +604,15 @@ def assess_pricing_readiness(
     ``job_key_normalization_not_ready`` plus every linkage blocker by the same
     value and ``job_linkage_report_mismatch`` when the trusted join was
     assessed with a different report object.
+    ``rental_dates`` (:func:`~ql2_sixt_canada_analysis.rental_dates.assess_rental_dates`)
+    must hold an available authority-backed rental-date policy with every
+    governed date present, valid (exact ISO calendar date), ordered (return on
+    or after pickup; no maximum unless an approved bounded policy sets one) and
+    agreeing with its parent on trusted linked rows: ``None`` is
+    ``rental_date_assessment_missing``, an unavailable policy
+    ``rental_date_rules_unavailable``, and each violation keeps its own value.
+    Excluding invalid rows never satisfies it; same-day and long valid rentals
+    never block.
     ``expected_stream_contract``
     (:func:`~ql2_sixt_canada_analysis.expected_stream_contract.current_expected_stream_contract`)
     must be approved and ``EXHAUSTIVE`` (``expected_stream_authority_unavailable``
@@ -646,12 +676,18 @@ def assess_pricing_readiness(
     reasons.extend(_join_blockers(job_detail_join))
     reasons.extend(_linkage_blockers(job_linkage, job_detail_join))
     reasons.extend(_location_authority_blockers(location_authority, location_policy, expected_stream_contract))
+    from ql2_sixt_canada_analysis.rental_dates import RentalDateReport
+
+    if rental_dates is not None and not isinstance(rental_dates, RentalDateReport):
+        raise TypeError("rental_dates must be a RentalDateReport or None")
+    reasons.extend([PricingBlocker.RENTAL_DATE_ASSESSMENT_MISSING] if rental_dates is None
+                   else [PricingBlocker(b.value) for b in rental_dates.blocking_reasons])
     reasons.extend(location_policy.blocking_reasons)
     return PricingReadinessReport(blocking_reasons=tuple(dict.fromkeys(reasons)), location_policy=location_policy,
                                   completeness=completeness, scheduled_coverage=scheduled_coverage,
                                   job_detail_join=job_detail_join, job_linkage=job_linkage,
                                   expected_stream_contract=expected_stream_contract,
-                                  location_authority=location_authority)
+                                  location_authority=location_authority, rental_dates=rental_dates)
 
 
 def _location_authority_blockers(report: LocationAuthorityReport | None, policy: LocationPolicyReport,

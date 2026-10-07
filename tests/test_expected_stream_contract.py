@@ -145,7 +145,7 @@ def test_v1_and_v2_are_unchanged_and_still_valid() -> None:
 def test_v3_is_a_valid_revision_superseding_v2_carried_into_v4_and_respelled_in_v5() -> None:
     record = load_decision_record(V3)
     assert (record.schema_version, record.record_version, record.record_id) == (2, 3, "pricing-authorities-v3")
-    assert record.supersedes == "pricing-authorities-v2" and CURRENT_RECORD_PATH.name == "v6.toml"
+    assert record.supersedes == "pricing-authorities-v2" and CURRENT_RECORD_PATH.name == "v7.toml"
     v4 = load_decision_record(V4)                                  # v4 kept both expected-stream approvals
     for decision in EXPECTED_STREAM_DECISIONS:
         assert v4.decision(decision).resolution == record.decision(decision).resolution
@@ -626,7 +626,7 @@ def test_baseline_reports_seven_expected_streams_and_a_separate_observed_populat
     # The misspelled observation is a case variant: an unverified alias, never applied.
     assert baseline.expected_stream_health[0].stream_status == LocationStreamStatus.UNVERIFIED_ALIAS.value
     assert sum(h.spelling_variant for h in baseline.observed_stream_health) == 1
-    assert baseline.authority_record_version == 6
+    assert baseline.authority_record_version == 7
     assert ("expected_stream_authority", "approved") in baseline.statuses
     assert ("expected_stream_universe_mode", "exhaustive") in baseline.statuses
     assert {"source_spelling_mismatch", "unexpected_pairs", "expected_pairs_missing"} <= set(baseline.pricing_blockers)

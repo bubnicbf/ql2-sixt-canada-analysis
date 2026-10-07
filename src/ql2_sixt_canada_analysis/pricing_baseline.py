@@ -11,9 +11,9 @@ re-deciding anything. It has two strictly separate parts:
   booleans and no new readiness rule is applied.
 * **Plan-level gaps** (:class:`PlanReadinessGap`) - prerequisites of the
   analysis plan that the central pricing gate does **not** model as
-  ``PricingBlocker`` values (now only: no rental-period date rules). They are
-  derived from configuration only and are never presented as active
-  blockers. (The exhaustive expected-stream universe, the airport/downtown
+  ``PricingBlocker`` values (now only: no rental-date assessment under an
+  approved rental-date policy - the rules themselves are central blockers).
+  They are never presented as active blockers. (The exhaustive expected-stream universe, the airport/downtown
   role map and the comparison pairs are central blockers - for example
   ``expected_stream_authority_unavailable``,
   ``branch_role_authority_unavailable``,
@@ -77,16 +77,19 @@ import pandas as pd
 
 from ql2_sixt_canada_analysis.authority_decisions import (
     AuthorityDecisionRecord,
-    AuthorityReference,
     DecisionId,
 )
 from ql2_sixt_canada_analysis.coverage import location_pair_evidence, spelling_variant_keys
 from ql2_sixt_canada_analysis.expected_stream_contract import ExpectedStreamContract
 from ql2_sixt_canada_analysis.readiness import PricingReadinessReport
+from ql2_sixt_canada_analysis.rental_dates import (
+    INFORMATIONAL_LONG_RENTAL_DAYS,
+    AgreementStatus as _AS,
+    PeriodStatus as _PS,
+)
 from ql2_sixt_canada_analysis.schemas import (
     PROJECT_DEFAULT,
     project_default,
-    TemporalKind,
     INVESTIGATED_LOCATION_STREAM,
     JOB_DETAIL_RELATIONSHIP,
     TEMPORAL_RECONCILIATION,
@@ -107,6 +110,10 @@ __all__ = [
     "LocationAuthoritySummary",
     "StreamScheduleSummary",
     "TemporalBaselineSummary",
+    "RentalDateSummary",
+    "RentalFieldSummary",
+    "RentalPeriodSummary",
+    "RentalAgreementSummary",
     "TemporalFieldSummary",
     "BaselineInputError",
     "ContinuityFinding",
@@ -195,7 +202,8 @@ class PlanReadinessGap(StrEnum):
 
 _GAP_TEXT = {
     PlanReadinessGap.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE:
-        "Pickup/return dates have no temporal-contract rules; central readiness does not check them.",
+        "No rental-date assessment ran under an approved rental-date policy (see the central "
+        "`rental_date_rules_unavailable` / `rental_date_assessment_missing` blockers).",
 }
 
 
@@ -360,6 +368,55 @@ class TemporalBaselineSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class RentalFieldSummary:
+    field: str
+    rows: int
+    valid: int
+    missing: int
+    invalid: int
+
+
+@dataclass(frozen=True, slots=True)
+class RentalPeriodSummary:
+    period: str
+    rows: int
+    valid: int
+    return_before_pickup: int
+    incomplete_or_invalid: int
+    same_day: int
+    long_informational: int        # valid and >= INFORMATIONAL_LONG_RENTAL_DAYS: descriptive only
+
+
+@dataclass(frozen=True, slots=True)
+class RentalAgreementSummary:
+    target: str
+    source: str
+    rows: int
+    match: int
+    mismatch: int
+    unassessable: int
+
+
+@dataclass(frozen=True, slots=True)
+class RentalDateSummary:
+    """Rental-date authority, validity, agreement and eligibility in aggregate (no dates)."""
+
+    policy_status: str             # approved | not_approved | record_unavailable | invalid | report_missing
+    maximum_duration_mode: str | None
+    parent_rows: int
+    detail_rows: int
+    fields: tuple[RentalFieldSummary, ...]
+    periods: tuple[RentalPeriodSummary, ...]
+    agreements: tuple[RentalAgreementSummary, ...]
+    linkage_trusted: bool
+    validity_holds: bool
+    agreement_holds: bool
+    eligible_parent_rows: int
+    eligible_detail_rows: int
+    blockers: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PricingReadinessBaseline:
     """Sanitized baseline: active typed blockers, plan gaps, populations, continuity."""
 
@@ -377,6 +434,7 @@ class PricingReadinessBaseline:
     location_authority: LocationAuthoritySummary | None = None
     collection_schedule: CollectionScheduleSummary | None = None
     temporal: TemporalBaselineSummary | None = None
+    rental_dates: RentalDateSummary | None = None
 
     def to_dict(self) -> dict:
         """Plain, sanitized structure; raises :class:`UnsafeBaselineValueError` on anything unsafe."""
@@ -397,24 +455,14 @@ def build_pricing_baseline(
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
     temporal_contract: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
     investigated_stream: tuple[str, ...] = INVESTIGATED_LOCATION_STREAM,
-    rental_period_rule_authority: AuthorityReference | None = None,
-    approved_rental_date_agreements: tuple[ApprovedDateAgreement, ...] | None = None,
     temporal_authority: object = None,
 ) -> PricingReadinessBaseline:
     """Assemble the sanitized baseline from existing assessment results (inputs are not modified).
 
-    Plan gaps close only on sufficient, authority-backed evidence (fail closed):
-
-    * the rental-period gap closes only with ``rental_period_rule_authority``
-      and ``approved_rental_date_agreements`` (from the authority decision
-      record) that give **every** detail rental-date field
-      (``job_pickup_date``, ``job_return_date``, ``pickup_date``,
-      ``return_date``) exactly one approved parent source, when all six
-      rental-date fields (:func:`rental_date_fields`) are required ``DATE``
-      fields of the temporal contract and the contract's rental-date
-      replication rules are **exactly** the approved source-to-target pairs
-      (none missing, none unapproved). A rule from a parent field to an
-      unrelated detail field never counts.
+    The rental-period plan gap is reported only while the pricing report holds
+    no rental-date assessment under an available, authority-backed
+    :class:`~ql2_sixt_canada_analysis.rental_dates.RentalDatePolicy`; the rules
+    themselves (validity, agreement) are central ``PricingBlocker`` values.
 
     ``coverage`` defaults to the contract the pricing report was assessed
     with (``pricing.expected_stream_contract``); a different contract is
@@ -457,8 +505,7 @@ def build_pricing_baseline(
         pricing_blockers=tuple(dict.fromkeys(b.value for b in pricing.blocking_reasons)),
         subordinate_blockers=subordinate,
         statuses=statuses,
-        plan_gaps=_plan_gaps(relationship, temporal_contract, rental_period_rule_authority,
-                             approved_rental_date_agreements),
+        plan_gaps=_plan_gaps(pricing),
         expected_population=StreamPopulation(
             population="configured_expected",
             authority=("authority_unavailable" if not coverage.is_configured
@@ -475,6 +522,7 @@ def build_pricing_baseline(
         location_authority=_location_summary(pricing),
         collection_schedule=_schedule_summary(pricing),
         temporal=_temporal_summary(temporal, temporal_authority),
+        rental_dates=_rental_summary(pricing),
     )
 
 
@@ -685,6 +733,12 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
         statuses.append(("location_role_map", authority.role_map.status.value))
         statuses.append(("comparison_pairs", authority.pair_set.status.value))
         blockers.append(("location_authority", _codes(authority.blocking_reasons)))
+    rental = pricing.rental_dates
+    if rental is None:
+        blockers.append(("rental_dates", ("rental_date_assessment_missing",)))
+    else:
+        statuses.append(("rental_date_policy", rental.policy.status.value))
+        blockers.append(("rental_dates", _codes(rental.blocking_reasons)))
     policy = pricing.location_policy
     statuses.append(("location_policy_state", policy.state.value))
     blockers.append(("location_policy", _codes(policy.blocking_reasons)))
@@ -692,39 +746,35 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
     return tuple(blockers), tuple(statuses)
 
 
-def _plan_gaps(relationship: JobDetailRelationshipDefinition, temporal_contract: TemporalReconciliationDefinition,
-               rental_authority: object, approved_agreements: object) -> tuple[PlanReadinessGap, ...]:
+def _plan_gaps(pricing: PricingReadinessReport) -> tuple[PlanReadinessGap, ...]:
+    """The rental-period gap stays open until a rental-date assessment ran under an approved policy."""
     G = PlanReadinessGap
-    gaps = []
-    if not _rental_rules_sufficient(temporal_contract, relationship, rental_authority, approved_agreements):
-        gaps.append(G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE)
-    return tuple(g for g in G if g in gaps)
+    return () if pricing.rental_date_rules_available else (G.RENTAL_PERIOD_DATE_RULES_UNAVAILABLE,)
 
 
-def _rental_rules_sufficient(contract: object, relationship: JobDetailRelationshipDefinition, authority: object,
-                             approved: object) -> bool:
-    """Authority, an exact approved agreement per detail rental field, validity and matching rules."""
-    if not isinstance(contract, TemporalReconciliationDefinition) or not isinstance(authority, AuthorityReference):
-        return False
-    if (not isinstance(approved, tuple) or not approved
-            or not all(isinstance(a, ApprovedDateAgreement) for a in approved)):
-        return False
-    fields = rental_date_fields(relationship)
-    parents = set(fields[:len(RENTAL_PERIOD_COLUMNS)])
-    details = set(fields[len(RENTAL_PERIOD_COLUMNS):])
-    pairs = [(tuple(a.source), tuple(a.target)) for a in approved]
-    if len(set(pairs)) != len(pairs) or not all(src in parents and tgt in details for src, tgt in pairs):
-        return False
-    targets = [tgt for _, tgt in pairs]
-    if sorted(targets, key=repr) != sorted(details, key=repr):         # every detail field exactly once
-        return False
-    for ref in fields:                                                  # validity of all six fields
-        field = next((f for f in contract.fields if f.ref == ref), None)
-        if field is None or field.kind is not TemporalKind.DATE or field.required is not True:
-            return False
-    configured = {(tuple(r.source), tuple(r.replica)) for r in contract.replications
-                  if tuple(r.source) in set(fields) or tuple(r.replica) in set(fields)}
-    return configured == set(pairs)                                     # exactly the approved rules
+def _rental_summary(pricing: PricingReadinessReport) -> RentalDateSummary:
+    """Statuses and aggregate counts of the rental-date assessment (no dates, identifiers or rows)."""
+    report = pricing.rental_dates
+    if report is None:
+        return RentalDateSummary(policy_status="report_missing", maximum_duration_mode=None, parent_rows=0,
+                                 detail_rows=0, fields=(), periods=(), agreements=(), linkage_trusted=False,
+                                 validity_holds=False, agreement_holds=False, eligible_parent_rows=0,
+                                 eligible_detail_rows=0, blockers=("rental_date_assessment_missing",))
+    policy = report.policy
+    return RentalDateSummary(
+        policy_status=policy.status.value,
+        maximum_duration_mode=policy.maximum_duration_mode.lower() if policy.maximum_duration_mode else None,
+        parent_rows=report.parent_rows, detail_rows=report.detail_rows,
+        fields=tuple(RentalFieldSummary(f.field, f.rows, f.valid, f.missing, f.invalid) for f in report.fields),
+        periods=tuple(RentalPeriodSummary(p.period, p.rows, p.count(_PS.VALID), p.count(_PS.RETURN_BEFORE_PICKUP),
+                                          p.rows - p.count(_PS.VALID) - p.count(_PS.RETURN_BEFORE_PICKUP),
+                                          p.same_day, p.long_informational) for p in report.periods),
+        agreements=tuple(RentalAgreementSummary(a.target, a.source, a.rows, a.count(_AS.MATCH), a.count(_AS.MISMATCH),
+                                                a.rows - a.count(_AS.MATCH) - a.count(_AS.MISMATCH))
+                         for a in report.agreements),
+        linkage_trusted=report.linkage_trusted, validity_holds=report.validity_holds,
+        agreement_holds=report.agreement_holds, eligible_parent_rows=report.eligible_parent_rows,
+        eligible_detail_rows=report.eligible_detail_rows, blockers=_codes(report.blocking_reasons))
 
 
 def _observed_keys(cars: pd.DataFrame, coverage: LocationCoverageDefinition) -> tuple[tuple[str, ...], ...]:
@@ -807,7 +857,8 @@ def _sanitize(value: object, where: str):  # type: ignore[no-untyped-def]
 
 _SERIALIZABLE = (PricingReadinessBaseline, StreamPopulation, ObservedPopulation, StreamHealth, ObservedStreamHealth,
                  ContinuityFinding, LocationAuthoritySummary, CollectionScheduleSummary, StreamScheduleSummary,
-                 TemporalBaselineSummary, TemporalFieldSummary)
+                 TemporalBaselineSummary, TemporalFieldSummary, RentalDateSummary, RentalFieldSummary,
+                 RentalPeriodSummary, RentalAgreementSummary)
 
 
 def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str, date: str) -> str:
@@ -855,6 +906,30 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
         lines += [f"  - {key(a)} versus {key(dn)}" for a, dn in la["keys"]]
         lines += [f"- Vancouver identity policy: `{la['vancouver_policy_state']}`; canonical location: {canonical}. "
                   "Both raw Vancouver source streams stay separately required by the source contract."]
+    rd = d["rental_dates"]
+    if rd is not None:
+        lines += ["", "### Rental dates (validity, parent/detail agreement, eligibility)", "",
+                  f"- Policy: `{rd['policy_status']}`; maximum duration `{rd['maximum_duration_mode'] or 'none'}`; "
+                  f"{rd['parent_rows']} parent rows and {rd['detail_rows']} detail rows assessed; linkage trusted: "
+                  f"{rd['linkage_trusted']}.",
+                  f"- Data validity holds: {rd['validity_holds']}; parent/detail agreement holds: "
+                  f"{rd['agreement_holds']}.",
+                  f"- Pricing-eligible rows: {rd['eligible_parent_rows']} parent, {rd['eligible_detail_rows']} detail "
+                  "(validity and agreement only; no duration cohort applied).",
+                  "- Blockers: " + (", ".join(f"`{b}`" for b in rd["blockers"]) or "none") + ".", "",
+                  "| Field | Rows | Valid | Missing | Invalid format |", "| --- | --- | --- | --- | --- |"]
+        lines += [f"| `{f['field']}` | {f['rows']} | {f['valid']} | {f['missing']} | {f['invalid']} |"
+                  for f in rd["fields"]] or ["| none | | | | |"]
+        lines += ["", "| Period | Rows | Valid | Return before pickup | Missing or invalid | Same day | "
+                  f">= {INFORMATIONAL_LONG_RENTAL_DAYS} days (informational) |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        lines += [f"| `{p['period']}` | {p['rows']} | {p['valid']} | {p['return_before_pickup']} | "
+                  f"{p['incomplete_or_invalid']} | {p['same_day']} | {p['long_informational']} |"
+                  for p in rd["periods"]] or ["| none | | | | | | |"]
+        lines += ["", "| Detail field | Must equal | Rows | Match | Mismatch | Unassessable |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        lines += [f"| `{a['target']}` | `{a['source']}` | {a['rows']} | {a['match']} | {a['mismatch']} | "
+                  f"{a['unassessable']} |" for a in rd["agreements"]] or ["| none | | | | | |"]
     tp = d["temporal"]
     if tp is not None:
         tol = f"{tp['tolerance_seconds']} seconds" if tp["tolerance_seconds"] is not None else "none"
@@ -951,6 +1026,7 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
     )
     from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
     from ql2_sixt_canada_analysis.temporal_authority import temporal_authority_from_record
+    from ql2_sixt_canada_analysis.rental_dates import assess_rental_dates, rental_date_policy_from_record
     from ql2_sixt_canada_analysis.location_authority import location_authority_from_record
     from ql2_sixt_canada_analysis.authority_decisions import load_current_decision_record
     from ql2_sixt_canada_analysis.paths import resolve_raw_data_dir
@@ -987,6 +1063,9 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
     schedule = schedule_from_record(record, contract)
     scheduled = attempt(lambda: assess_per_stream_scheduled_coverage(jobs, cars, schedule=schedule, contract=contract,
                                                                      relationship=rel), ScheduleConfigurationError)
+    # Authority-backed rental-date validity and parent/detail agreement on the linked frames.
+    rental_dates = attempt(lambda: assess_rental_dates(jobs, cars, policy=rental_date_policy_from_record(record),
+                                                       job_linkage=linkage.report, relationship=rel), ValueError)
     # The authority-backed temporal policy (city-local finish times, zero-tolerance scrape/finish ordering).
     temporal_authority = temporal_authority_from_record(record, ANALYSIS_TEMPORAL_RECONCILIATION, contract)
     temporal = attempt(lambda: assess_temporal_reconciliation(jobs, cars, temporal_authority.definition),
@@ -1006,6 +1085,7 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         temporal_fields_trusted=bool(temporal is not None and temporal.is_valid),
         vehicle_stability=stability, scheduled_coverage=scheduled, job_detail_join=join,
         job_linkage=linkage.report, expected_stream_contract=contract,
+        rental_dates=rental_dates,
         location_authority=location_authority_from_record(record, contract,
                                                           VANCOUVER_LOCATION_POLICY))
     return build_pricing_baseline(pricing=pricing, jobs=jobs, cars=cars, temporal=temporal, vehicle_stability=stability,

@@ -117,7 +117,7 @@ SCHEMA_2_VANCOUVER_GOVERNED_KEYS: tuple[tuple[str, str], ...] = (("Vancouver", "
 #: Canonical UTC instant text used by schema-3 schedule exceptions (``YYYYMMDDTHHMMSSZ``).
 UTC_INSTANT_PATTERN = re.compile(r"\d{8}T\d{6}Z")
 #: The current committed revision (repository-relative).
-CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v6.toml")
+CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v7.toml")
 
 
 class DecisionRecordError(ValueError):
@@ -1164,6 +1164,50 @@ def _v3_tolerance(res, by_id, d):  # type: ignore[no-untyped-def]
     _approved(by_id, _D.SCRAPED_FINISHED_ORDERING, d.value)
 
 
+#: Schema-3 rental-date validity vocabulary.
+RENTAL_DATE_FORMATS = ("ISO_8601_DATE",)
+RENTAL_DATE_ORDERINGS = {"RETURN_ON_OR_AFTER_PICKUP": True, "RETURN_AFTER_PICKUP": False}   # -> equality allowed
+RENTAL_MAXIMUM_MODES = ("UNBOUNDED", "BOUNDED")
+#: The only parent field each detail field may repeat: pickup fields repeat the parent pickup, return the return.
+RENTAL_DATE_ROLE = {f: ("pickup" if f.endswith("pickup_date") else "return")
+                    for f in (*RENTAL_DATE_PARENT_FIELDS, *RENTAL_DATE_DETAIL_FIELDS)}
+
+
+def _v3_rental_validity(res, by_id, d):  # type: ignore[no-untyped-def]
+    """Explicit format, requiredness, ordering, equality, minimum and maximum-duration mode (no hidden default)."""
+    required = {"date_format", "pickup_required", "return_required", "ordering", "equal_dates_allowed",
+                "minimum_duration_days", "maximum_duration_mode"}
+    mode = res.get("maximum_duration_mode")
+    _keys(res, required | ({"maximum_duration_days"} if mode == "BOUNDED" else set()), d.value)
+    _choice(res, "date_format", set(RENTAL_DATE_FORMATS), d.value)
+    _flag(res, "pickup_required", d.value)
+    _flag(res, "return_required", d.value)
+    ordering = _choice(res, "ordering", set(RENTAL_DATE_ORDERINGS), d.value)
+    equal = _flag(res, "equal_dates_allowed", d.value)
+    if equal is not RENTAL_DATE_ORDERINGS[ordering]:
+        raise DecisionRecordError(f"{d.value}: equal_dates_allowed contradicts the ordering")
+    low = res.get("minimum_duration_days")
+    if type(low) is not int or low < 0:
+        raise DecisionRecordError(f"{d.value}: minimum_duration_days must be a non-negative integer")
+    if equal and low != 0:
+        raise DecisionRecordError(f"{d.value}: same-day rentals are allowed, so the minimum duration must be zero")
+    if not equal and low < 1:
+        raise DecisionRecordError(f"{d.value}: a strict ordering needs a minimum duration of at least one day")
+    _choice(res, "maximum_duration_mode", set(RENTAL_MAXIMUM_MODES), d.value)
+    if mode == "BOUNDED":
+        high = res.get("maximum_duration_days")
+        if type(high) is not int or high < low or high < 1:
+            raise DecisionRecordError(f"{d.value}: a bounded maximum must be an integer of at least the minimum")
+
+
+def _v3_rental_agreements(res, by_id, d):  # type: ignore[no-untyped-def]
+    """Exactly one parent source per detail field, pickup to pickup and return to return."""
+    _rental_agreements(res, by_id, d)
+    for item in res["agreements"]:
+        if RENTAL_DATE_ROLE[item["source"]] != RENTAL_DATE_ROLE[item["target"]]:
+            raise DecisionRecordError(f"{d.value}: a pickup field must repeat a pickup field (and return a return)")
+
+
 def _v3_vancouver(res, by_id, d):  # type: ignore[no-untyped-def]
     _vancouver(res, by_id, d, explicit_governed=True)
 
@@ -1178,6 +1222,8 @@ _RESOLVERS_V3 = {
     _D.VANCOUVER_LOCATION_IDENTITY: _v3_vancouver,
     _D.SCRAPED_FINISHED_ORDERING: _v3_ordering,
     _D.SCRAPED_FINISHED_TOLERANCE: _v3_tolerance,
+    _D.RENTAL_DATE_VALIDITY: _v3_rental_validity,
+    _D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS: _v3_rental_agreements,
 }
 
 
@@ -1302,7 +1348,8 @@ _RESPONSE_SHAPE = {
     _D.REPORTING_DAY_TIMEZONE: "an IANA timezone name",
     _D.SCRAPE_DATE_SEMANTICS: "meaning and derivation (REPORTING_DAY or SOURCE_SUPPLIED_UNDERIVED)",
     _D.DATE_CLEAN_SEMANTICS: "meaning and derivation (REPORTING_DAY or SOURCE_SUPPLIED_UNDERIVED)",
-    _D.RENTAL_DATE_VALIDITY: "date format, pickup-before-return required, equality allowed, min/max duration days",
+    _D.RENTAL_DATE_VALIDITY: ("date format (schema 3: ISO_8601_DATE), pickup and return requiredness, ordering, "
+                              "equality allowed, minimum duration days, maximum-duration mode (UNBOUNDED or BOUNDED)"),
     _D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS: "for each of cars.job_pickup_date, cars.job_return_date, "
     "cars.pickup_date, cars.return_date: the jobs field it must equal",
 }

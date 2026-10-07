@@ -164,7 +164,7 @@ def test_history_is_unchanged_and_valid() -> None:
 def test_v4_is_history_and_approves_exactly_nine_decisions() -> None:
     record = load_decision_record(V4)
     assert (record.schema_version, record.record_version, record.supersedes) == (2, 4, "pricing-authorities-v3")
-    assert CURRENT_RECORD_PATH.name == "v6.toml" and load_current_decision_record() != record
+    assert CURRENT_RECORD_PATH.name == "v7.toml" and load_current_decision_record() != record
     approved = {d.id for d in record.decisions if d.is_approved}
     assert approved == set(JOB_IDENTIFIER_DECISIONS) | set(EXPECTED_STREAM_DECISIONS) | set(LOCATION_DECISIONS)
     counts = record.counts()
@@ -290,12 +290,12 @@ def test_checklist_is_regenerated_from_the_current_record() -> None:
     for decision in LOCATION_DECISIONS:
         assert f"`{decision.value}`" in resolved and f"`{decision.value}`" not in requests
     assert GOVERNANCE in resolved
-    assert len([line for line in requests.splitlines() if line.startswith("| `")]) == 6
+    assert len([line for line in requests.splitlines() if line.startswith("| `")]) == 4
 
 
 def test_record_readme_identifies_v5_as_current() -> None:
     readme = (RECORD_DIR / "README.md").read_text(encoding="utf-8")
-    for phrase in ("v4.toml", "v5.toml", "v6.toml", "current revision", "CONFIRMED_ALIAS", Path(GOVERNANCE).name,
+    for phrase in ("v4.toml", "v5.toml", "v6.toml", "v7.toml", "current revision", "CONFIRMED_ALIAS", Path(GOVERNANCE).name,
                    Path(SCHEDULE_GOVERNANCE).name):
         assert phrase in readme, phrase
 
@@ -437,7 +437,7 @@ def test_project_policy_is_the_approved_alias_with_authority() -> None:
     assert POLICY == vancouver_policy_from_record(load_current_decision_record(), COV)
     assert POLICY.state is PS.CONFIRMED_ALIAS and (POLICY.first, POLICY.second) == (VAN_DOWN, VAN_THUR)
     assert POLICY.canonical_location == VAN_DOWN and POLICY.scope.is_valid
-    assert POLICY.authority.reference == GOVERNANCE and "pricing-authorities-v6" in POLICY.authority.note
+    assert POLICY.authority.reference == GOVERNANCE and "pricing-authorities-v7" in POLICY.authority.note
     assert dict(POLICY.alias_mapping) == {VAN_DOWN: VAN_DOWN, VAN_THUR: VAN_DOWN}
 
 
