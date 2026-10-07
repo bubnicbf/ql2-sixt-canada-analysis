@@ -40,12 +40,13 @@ from __future__ import annotations
 import datetime as dt
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import cache, cached_property
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from ql2_sixt_canada_analysis.authority_decisions import (
@@ -75,6 +76,11 @@ from ql2_sixt_canada_analysis.schemas import (
 )
 
 __all__ = [
+    "ParentCaptureExclusion",
+    "ExcludedStreamPeriod",
+    "ExcludedCapture",
+    "CaptureExclusionSet",
+    "CapturePeriodIndex",
     "FINISHED_AT_SOURCE_FORMAT",
     "SCHEDULE_DECISIONS",
     "CityTimezoneMap",
@@ -151,6 +157,9 @@ class ScheduleFailureKind(StrEnum):
     PARENT_JOB_ABSENT = "PARENT_JOB_ABSENT"                     # no valid job for the city-period
     PARENT_JOB_AMBIGUOUS = "PARENT_JOB_AMBIGUOUS"               # several jobs claim the city-period (never excusable)
     PARENT_JOB_INVALID = "PARENT_JOB_INVALID"                   # the only job failed a check (never excusable)
+    #: The whole parent collection execution of one city-period is governed as incomplete: every approved
+    #: stream of that city is analytically null for that period, even streams whose rows exist.
+    INCOMPLETE_PARENT_CAPTURE = "INCOMPLETE_PARENT_CAPTURE"
 
 
 #: Failure kinds a governed exception may excuse.
@@ -181,6 +190,7 @@ class ScheduleCoverageBlocker(StrEnum):
     SCHEDULED_JOB_ASSIGNMENT_FAILED = "scheduled_job_assignment_failed"
     SCHEDULED_DETAIL_COPY_MISMATCH = "scheduled_detail_copy_mismatch"
     SCHEDULED_COVERAGE_INCOMPLETE = "scheduled_coverage_incomplete"
+    SCHEDULE_EXCLUSION_UNMATCHED = "schedule_exclusion_unmatched"    # an exclusion matches no or several captures
 
 
 # ------------------------------------------------------------------ instants
@@ -409,11 +419,54 @@ class StreamScheduleException:
 
 
 @dataclass(frozen=True, slots=True)
+class ParentCaptureExclusion:
+    """One governed ``INCOMPLETE_PARENT_CAPTURE``: a whole city-period collection execution is analytically null.
+
+    Names the city, every approved stream of that city, the scheduled UTC
+    period with its local start and offset, the reason, the responsible
+    authority, the durable reference and the schedule version - never a job
+    identifier. It applies to exactly this city, period and version; at
+    assessment it must match exactly one parent capture.
+    """
+
+    city: str
+    streams: tuple[Key, ...]
+    period_start_utc: str
+    local_start: dt.datetime
+    utc_offset: dt.timedelta
+    reason: str
+    authority_kind: AuthorityKind
+    reference: str
+    schedule_version: str
+    failure: ScheduleFailureKind = ScheduleFailureKind.INCOMPLETE_PARENT_CAPTURE
+
+    def __post_init__(self) -> None:
+        if self.failure is not ScheduleFailureKind.INCOMPLETE_PARENT_CAPTURE:
+            raise ScheduleConfigurationError("a parent-capture exclusion has the INCOMPLETE_PARENT_CAPTURE kind")
+        if not (isinstance(self.period_start_utc, str) and UTC_INSTANT_PATTERN.fullmatch(self.period_start_utc)):
+            raise ScheduleConfigurationError("an exclusion's period must be YYYYMMDDTHHMMSSZ")
+        if (not isinstance(self.streams, tuple) or not self.streams or len(set(self.streams)) != len(self.streams)
+                or any(not isinstance(k, tuple) or len(k) != 2 or k[0] != self.city for k in self.streams)):
+            raise ScheduleConfigurationError("an exclusion names distinct streams of its own city")
+        if not isinstance(self.authority_kind, AuthorityKind):
+            raise ScheduleConfigurationError("an exclusion needs a responsible authority kind")
+        if not self.reason or not self.reference or not self.schedule_version:
+            raise ScheduleConfigurationError("an exclusion needs a reason, a durable reference and a version")
+
+    def applies(self, stream: Key, period: ScheduledPeriod, version: str) -> bool:
+        return (stream in self.streams and self.period_start_utc == period.utc_text
+                and self.local_start == period.local_start and self.utc_offset == period.utc_offset
+                and self.schedule_version == version)
+
+
+@dataclass(frozen=True, slots=True)
 class ScheduleExceptions:
-    """The exceptions model. ``NO_EXCEPTIONS`` is explicit; ``LISTED_EXCEPTIONS`` must list at least one."""
+    """The exceptions model. ``NO_EXCEPTIONS`` is explicit; ``LISTED_EXCEPTIONS`` must list at least one
+    stream-level exception or parent-capture exclusion."""
 
     model: ExceptionsModel
     exceptions: tuple[StreamScheduleException, ...] = ()
+    parent_capture_exclusions: tuple[ParentCaptureExclusion, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, ExceptionsModel):
@@ -421,11 +474,24 @@ class ScheduleExceptions:
         if not isinstance(self.exceptions, tuple) or not all(
                 isinstance(e, StreamScheduleException) for e in self.exceptions):
             raise ScheduleConfigurationError("exceptions must be a tuple of StreamScheduleException")
-        if (self.model is ExceptionsModel.NO_EXCEPTIONS) == bool(self.exceptions):
+        if not isinstance(self.parent_capture_exclusions, tuple) or not all(
+                isinstance(e, ParentCaptureExclusion) for e in self.parent_capture_exclusions):
+            raise ScheduleConfigurationError("parent-capture exclusions must be ParentCaptureExclusion objects")
+        listed = bool(self.exceptions) or bool(self.parent_capture_exclusions)
+        if (self.model is ExceptionsModel.NO_EXCEPTIONS) == listed:
             raise ScheduleConfigurationError("NO_EXCEPTIONS lists none; LISTED_EXCEPTIONS lists at least one")
         markers = [(e.stream, e.period_start_utc, e.failure) for e in self.exceptions]
         if len(set(markers)) != len(markers):
             raise ScheduleConfigurationError("duplicate exception")
+        captures = [(e.city, e.period_start_utc) for e in self.parent_capture_exclusions]
+        if len(set(captures)) != len(captures):
+            raise ScheduleConfigurationError("duplicate parent-capture exclusion")
+        covered = {(k, e.period_start_utc) for e in self.parent_capture_exclusions for k in e.streams}
+        if any((e.stream, e.period_start_utc) in covered for e in self.exceptions):
+            raise ScheduleConfigurationError("a stream-period cannot be both excused and excluded")
+
+    def excluding(self, stream: Key, period: ScheduledPeriod, version: str) -> ParentCaptureExclusion | None:
+        return next((e for e in self.parent_capture_exclusions if e.applies(stream, period, version)), None)
 
     @classmethod
     def none(cls) -> ScheduleExceptions:
@@ -497,6 +563,16 @@ class PerStreamSchedule:
                 raise ScheduleConfigurationError("a stream schedule's zone differs from its city's zone")
             if schedule.schedule_version != self.schedule_version or schedule.capture_field != self.capture_field:
                 raise ScheduleConfigurationError("a stream schedule disagrees with the schedule version or anchor")
+        for exclusion in self.exceptions.parent_capture_exclusions:
+            city_streams = {s.stream for s in self.schedules if s.city == exclusion.city}
+            if exclusion.schedule_version != self.schedule_version or set(exclusion.streams) != city_streams:
+                raise ScheduleConfigurationError("an exclusion must name every approved stream of its city")
+            for stream in exclusion.streams:
+                period = next((p for p in self.schedule_for(stream).periods
+                               if p.utc_text == exclusion.period_start_utc), None)
+                if period is None or (period.local_start, period.utc_offset) != (exclusion.local_start,
+                                                                                 exclusion.utc_offset):
+                    raise ScheduleConfigurationError("an exclusion names no expected period of its streams")
         for exc in self.exceptions.exceptions:
             if exc.schedule_version != self.schedule_version or exc.stream not in keys:
                 raise ScheduleConfigurationError("an exception names another version or an unknown stream")
@@ -544,7 +620,19 @@ class PerStreamSchedule:
 
     @property
     def excused_period_count(self) -> int:
+        """Stream-periods named by governed stream exceptions (excused missing periods)."""
         return len(self.exceptions.exceptions) if self.exceptions is not None else 0
+
+    @property
+    def excluded_period_count(self) -> int:
+        """Stream-periods named by governed parent-capture exclusions (every stream of each excluded capture)."""
+        if self.exceptions is None:
+            return 0
+        return sum(len(e.streams) for e in self.exceptions.parent_capture_exclusions)
+
+    @property
+    def parent_capture_exclusion_count(self) -> int:
+        return len(self.exceptions.parent_capture_exclusions) if self.exceptions is not None else 0
 
 
 def _local(value: str) -> dt.datetime:
@@ -591,8 +679,21 @@ def _exceptions(raw: Mapping, schedules: tuple[StreamSchedule, ...], zones: City
     model = ExceptionsModel(raw["model"])
     if model is ExceptionsModel.NO_EXCEPTIONS:
         return ScheduleExceptions.none()
-    items = []
+    items, exclusions = [], []
     for item in raw["exceptions"]:
+        if item["failure"] == ScheduleFailureKind.INCOMPLETE_PARENT_CAPTURE.value:
+            streams = tuple(sorted(tuple(k) for k in item["streams"]))
+            schedule = next((s for s in schedules if s.stream == streams[0]), None)
+            period = (next((p for p in schedule.periods if p.utc_text == item["period_start_utc"]), None)
+                      if schedule is not None else None)
+            if period is None:
+                raise ScheduleConfigurationError("an exclusion names no expected period")
+            exclusions.append(ParentCaptureExclusion(
+                city=item["city"], streams=streams, period_start_utc=item["period_start_utc"],
+                local_start=period.local_start, utc_offset=period.utc_offset, reason=item["reason"],
+                authority_kind=AuthorityKind(item["authority_kind"]), reference=item["reference"],
+                schedule_version=item["schedule_version"]))
+            continue
         stream = tuple(item["stream"])
         schedule = next((s for s in schedules if s.stream == stream), None)
         period = (next((p for p in schedule.periods if p.utc_text == item["period_start_utc"]), None)
@@ -604,7 +705,7 @@ def _exceptions(raw: Mapping, schedules: tuple[StreamSchedule, ...], zones: City
             utc_offset=period.utc_offset, failure=ScheduleFailureKind(item["failure"]), reason=item["reason"],
             authority_kind=AuthorityKind(item["authority_kind"]), reference=item["reference"],
             schedule_version=item["schedule_version"]))
-    return ScheduleExceptions(model=model, exceptions=tuple(items))
+    return ScheduleExceptions(model=model, exceptions=tuple(items), parent_capture_exclusions=tuple(exclusions))
 
 
 @cache
@@ -624,13 +725,104 @@ class MissingStreamPeriod:
 
 
 @dataclass(frozen=True, slots=True)
+class ExcludedCapture:
+    """One resolved excluded parent capture (holds a linkage key: in memory only, never reported)."""
+
+    parent_key: tuple = field(repr=False)
+    city: str = ""
+    streams: tuple[Key, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureExclusionSet:
+    """The governed parent captures excluded from pricing, resolved on the assessed frames.
+
+    Built only by :func:`assess_per_stream_scheduled_coverage` from matched
+    ``INCOMPLETE_PARENT_CAPTURE`` exclusions. Raw rows are never removed:
+    the masks select the parent and detail rows to keep out of the pricing
+    population and out of stream-continuity gaps.
+    """
+
+    parent_key_columns: tuple[str, ...]
+    detail_key_columns: tuple[str, ...]
+    entries: tuple[ExcludedCapture, ...] = ()
+
+    def _mask(self, frame: pd.DataFrame, columns: tuple[str, ...], stream: Key | None) -> np.ndarray:
+        keys = {e.parent_key for e in self.entries if stream is None or tuple(stream) in e.streams}
+        if not keys or not len(frame):
+            return np.zeros(len(frame), dtype=bool)
+        if any(c not in frame.columns for c in columns):
+            raise ScheduleConfigurationError("the exclusion key columns are absent")
+        values = frame.loc[:, list(columns)].astype(object).itertuples(index=False, name=None)
+        return np.fromiter((tuple(v) in keys for v in values), dtype=bool, count=len(frame))
+
+    def parent_mask(self, jobs: pd.DataFrame, stream: Key | None = None) -> np.ndarray:
+        """Parent rows of an excluded capture (optionally: only exclusions covering ``stream``)."""
+        return self._mask(jobs, self.parent_key_columns, stream)
+
+    def detail_mask(self, cars: pd.DataFrame) -> np.ndarray:
+        """Detail rows linked to an excluded parent capture (every stream of that capture)."""
+        return self._mask(cars, self.detail_key_columns, None)
+
+
+@dataclass(frozen=True)
+class CapturePeriodIndex:
+    """The scheduled period (``YYYYMMDDTHHMMSSZ`` UTC start) of every validly assigned parent capture.
+
+    Built only by :func:`assess_per_stream_scheduled_coverage`: a parent job
+    has a period only when it is the single valid claimant of its
+    city-period with every detail copy agreeing. Held in memory, never
+    reported (keys are linkage keys).
+    """
+
+    parent_key_columns: tuple[str, ...]
+    detail_key_columns: tuple[str, ...]
+    periods: Mapping[tuple, str] = field(default_factory=lambda: MappingProxyType({}), repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "periods", MappingProxyType(dict(self.periods)))
+
+    def _lookup(self, frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series:
+        if any(c not in frame.columns for c in columns):
+            raise ScheduleConfigurationError("the capture-period key columns are absent")
+        values = frame.loc[:, list(columns)].astype(object).itertuples(index=False, name=None)
+        return pd.Series([self.periods.get(tuple(v)) for v in values], index=frame.index, dtype=object)
+
+    def parent_periods(self, jobs: pd.DataFrame) -> pd.Series:
+        """Scheduled period text of each parent row (``None`` when not validly assigned)."""
+        return self._lookup(jobs, self.parent_key_columns)
+
+    def detail_periods(self, cars: pd.DataFrame) -> pd.Series:
+        """Scheduled period text of each detail row's parent capture (``None`` when not validly assigned)."""
+        return self._lookup(cars, self.detail_key_columns)
+
+
+@dataclass(frozen=True, slots=True)
+class ExcludedStreamPeriod:
+    """A stream-period that a governed parent-capture exclusion makes analytically null."""
+
+    period: ScheduledPeriod
+    exclusion: ParentCaptureExclusion
+
+
+@dataclass(frozen=True, slots=True)
 class StreamPeriodCoverage:
-    """Coverage of one stream's own expected periods (exact raw key only)."""
+    """Coverage of one stream's own expected periods (exact raw key only).
+
+    ``expected`` is the nominal count; periods excluded by a matched
+    parent-capture exclusion are neither covered nor missing, and the
+    remaining ``required`` periods must each be covered or excused.
+    """
 
     stream: Key
     expected: int
     covered: int
     missing: tuple[MissingStreamPeriod, ...]
+    excluded: tuple[ExcludedStreamPeriod, ...] = ()
+
+    @property
+    def required(self) -> int:
+        return self.expected - len(self.excluded)
 
     @property
     def unexcused_missing(self) -> int:
@@ -647,7 +839,7 @@ class StreamPeriodCoverage:
 
     @property
     def complete(self) -> bool:
-        return self.unexcused_missing == 0 and self.covered + self.excused == self.expected
+        return self.unexcused_missing == 0 and self.covered + self.excused + len(self.excluded) == self.expected
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,10 +855,36 @@ class PerStreamScheduledCoverageReport:
     detail_copy_mismatches: int = 0
     expected_city_periods: tuple[tuple[str, int], ...] = ()
     missing_city_periods: tuple[tuple[str, int], ...] = ()
+    #: Parent-capture exclusions that matched no or several parent captures (fail closed).
+    unmatched_exclusions: int = 0
+    #: The resolved excluded parent captures (in memory only, never reported: they hold linkage keys).
+    capture_exclusions: CaptureExclusionSet | None = field(default=None, repr=False)
+    #: The scheduled period of every validly assigned parent capture (in memory only).
+    capture_periods: CapturePeriodIndex | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.schedule, PerStreamSchedule):
             raise TypeError("schedule must be a PerStreamSchedule")
+
+    @property
+    def nominal_periods(self) -> int:
+        return sum(c.expected for c in self.streams)
+
+    @property
+    def excluded_periods(self) -> int:
+        return sum(len(c.excluded) for c in self.streams)
+
+    @property
+    def required_periods(self) -> int:
+        return sum(c.required for c in self.streams)
+
+    @property
+    def covered_periods(self) -> int:
+        return sum(c.covered for c in self.streams)
+
+    @property
+    def excluded_parent_captures(self) -> int:
+        return len(self.capture_exclusions.entries) if self.capture_exclusions is not None else 0
 
     @property
     def schedule_assessment(self) -> PerStreamSchedule:
@@ -701,6 +919,8 @@ class PerStreamScheduledCoverageReport:
             found.append(B.SCHEDULED_JOB_ASSIGNMENT_FAILED)
         if self.detail_copy_mismatches:
             found.append(B.SCHEDULED_DETAIL_COPY_MISMATCH)
+        if self.unmatched_exclusions:
+            found.append(B.SCHEDULE_EXCLUSION_UNMATCHED)
         if not self.streams or not all(c.complete for c in self.streams):
             found.append(B.SCHEDULED_COVERAGE_INCOMPLETE)
         return tuple(found)
@@ -812,11 +1032,27 @@ def assess_per_stream_scheduled_coverage(jobs: pd.DataFrame, cars: pd.DataFrame,
         if len(jobs_in_period) > 1:
             failures[JobAssignmentFailure.DUPLICATE_CITY_PERIOD] += len(jobs_in_period)
 
+    # Each parent-capture exclusion must resolve to exactly one valid parent capture of its city-period.
+    resolved: dict[tuple[str, str], tuple] = {}
+    unmatched = 0
+    for exclusion in schedule.exceptions.parent_capture_exclusions:
+        period = next(p for p in schedule.schedule_for(exclusion.streams[0]).periods
+                      if p.utc_text == exclusion.period_start_utc)
+        claimants = claims.get((exclusion.city, period.utc_start), [])
+        if len(claimants) == 1 and claimants[0] not in mismatched_jobs:
+            resolved[(exclusion.city, exclusion.period_start_utc)] = claimants[0]
+        else:
+            unmatched += 1
+
     streams = []
     for s in schedule.schedules:
-        covered, missing = 0, []
+        covered, missing, excluded = 0, [], []
         for p in s.periods:
             claimants = claims.get((s.city, p.utc_start), [])
+            exclusion = schedule.exceptions.excluding(s.stream, p, schedule.schedule_version)
+            if exclusion is not None and (s.city, p.utc_text) in resolved:
+                excluded.append(ExcludedStreamPeriod(period=p, exclusion=exclusion))   # analytically null
+                continue
             if len(claimants) > 1:
                 failure = ScheduleFailureKind.PARENT_JOB_AMBIGUOUS
             elif not claimants:
@@ -832,7 +1068,7 @@ def assess_per_stream_scheduled_coverage(jobs: pd.DataFrame, cars: pd.DataFrame,
                        and schedule.exceptions.excuses(s.stream, p, failure, schedule.schedule_version))
             missing.append(MissingStreamPeriod(period=p, failure=failure, excused=excused))
         streams.append(StreamPeriodCoverage(stream=s.stream, expected=s.period_count, covered=covered,
-                                            missing=tuple(missing)))
+                                            missing=tuple(missing), excluded=tuple(excluded)))
 
     expected_city = {c: len(ps) for c, ps in sorted(city_periods.items())}
     missing_city = {c: sum(1 for u in ps if len(claims.get((c, u), [])) != 1) for c, ps in sorted(city_periods.items())}
@@ -841,4 +1077,14 @@ def assess_per_stream_scheduled_coverage(jobs: pd.DataFrame, cars: pd.DataFrame,
         jobs_assigned=sum(1 for v in claims.values() if len(v) == 1 and v[0] not in mismatched_jobs),
         job_failures=tuple((k, failures[k]) for k in JobAssignmentFailure if failures[k]),
         detail_copy_mismatches=mismatches, expected_city_periods=tuple(expected_city.items()),
-        missing_city_periods=tuple(missing_city.items()))
+        missing_city_periods=tuple(missing_city.items()), unmatched_exclusions=unmatched,
+        capture_periods=CapturePeriodIndex(
+            parent_key_columns=tuple(pkeys), detail_key_columns=tuple(dkeys),
+            periods={key: city_periods[city][period_utc].utc_text for key, (city, period_utc, _) in assigned.items()
+                     if len(claims[(city, period_utc)]) == 1 and key not in mismatched_jobs}),
+        capture_exclusions=CaptureExclusionSet(
+            parent_key_columns=tuple(pkeys), detail_key_columns=tuple(dkeys),
+            entries=tuple(ExcludedCapture(parent_key=key, city=city, streams=next(
+                e.streams for e in schedule.exceptions.parent_capture_exclusions
+                if (e.city, e.period_start_utc) == (city, text)))
+                for (city, text), key in sorted(resolved.items()))))

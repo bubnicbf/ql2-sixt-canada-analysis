@@ -76,6 +76,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RECORD_DIR = ROOT / "docs" / "decisions" / "pricing_authorities"
 V4, V5 = RECORD_DIR / "v4.toml", RECORD_DIR / "v5.toml"
 GOVERNANCE = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+CALGARY_EXCLUSION_DOC = "docs/decisions/governance/calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md"
 D = DecisionId
 SCHEDULE_DECISIONS = (D.SCHEDULE_CAPTURE_TIMESTAMP, D.SCHEDULE_EXPECTED_PERIODS, D.SCHEDULE_SHARING_MODEL,
                       D.SCHEDULE_EXCEPTIONS, D.FINISHED_AT_TIMEZONE)
@@ -127,10 +128,14 @@ def test_v5_is_a_schema_3_record_superseding_v4_and_carried_into_the_current_rec
     record = load_decision_record(V5)
     assert (record.schema_version, record.record_version, record.record_id, record.supersedes) == (
         3, 5, "pricing-authorities-v5", "pricing-authorities-v4")
-    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v7.toml"
+    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v8.toml"
     current = load_current_decision_record()
-    assert current.record_id == "pricing-authorities-v7" and current.supersedes == "pricing-authorities-v6"
-    for decision in SCHEDULE_DECISIONS:                   # v6 keeps every schedule decision unchanged
+    assert current.record_id == "pricing-authorities-v8" and current.supersedes == "pricing-authorities-v7"
+    for decision in SCHEDULE_DECISIONS:   # later revisions keep every schedule decision but the exceptions unchanged
+        if decision is D.SCHEDULE_EXCEPTIONS:
+            assert record.decision(decision).resolution == {"model": "NO_EXCEPTIONS"}
+            assert current.decision(decision).resolution["model"] == "LISTED_EXCEPTIONS"   # superseded in v8
+            continue
         assert current.decision(decision).resolution == record.decision(decision).resolution
         assert set(record.decision(decision).authority) <= set(current.decision(decision).authority)
     counts = record.counts()
@@ -388,13 +393,22 @@ def test_project_schedule_is_per_stream_and_computed_from_the_definitions() -> N
     schedule = current_per_stream_schedule()
     assert schedule is current_per_stream_schedule()                    # resolved once
     assert schedule.status is SS.AVAILABLE and schedule.blocking_reasons == ()
-    assert schedule.record_id == "pricing-authorities-v7" and schedule.schedule_version == "per_stream_hourly_v1"
+    assert schedule.record_id == "pricing-authorities-v8" and schedule.schedule_version == "per_stream_hourly_v1"
     assert schedule.sharing_mode is SharingMode.PER_STREAM and schedule.capture_field == "jobs.finished_at"
     assert (schedule.detail_copy_field, schedule.detail_observation_field) == ("cars.job_finished_at",
                                                                               "cars.scraped_at")
-    assert schedule.exceptions == ScheduleExceptions.none() and schedule.exceptions.model is ExceptionsModel.NO_EXCEPTIONS
-    assert schedule.excused_period_count == 0 and schedule.references == (
-        GOVERNANCE, "docs/decisions/governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md")
+    # v8 supersedes NO_EXCEPTIONS with exactly one governed INCOMPLETE_PARENT_CAPTURE exclusion (no stream excuses).
+    assert schedule.exceptions.model is ExceptionsModel.LISTED_EXCEPTIONS and schedule.exceptions.exceptions == ()
+    exclusion, = schedule.exceptions.parent_capture_exclusions
+    assert (exclusion.city, exclusion.streams, exclusion.period_start_utc, exclusion.failure,
+            exclusion.schedule_version, exclusion.reference) == (
+        "calgary", (CAL_DOWN, CAL_AIR), "20260828T170000Z", FK.INCOMPLETE_PARENT_CAPTURE, "per_stream_hourly_v1",
+        CALGARY_EXCLUSION_DOC)
+    assert (exclusion.local_start, exclusion.utc_offset) == (dt.datetime(2026, 8, 28, 11), dt.timedelta(hours=-6))
+    assert schedule.excused_period_count == 0 and schedule.excluded_period_count == 2
+    assert schedule.parent_capture_exclusion_count == 1 and schedule.references == (
+        GOVERNANCE, "docs/decisions/governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md",
+        CALGARY_EXCLUSION_DOC)
     assert schedule.expected_streams == SUPPLIED == tuple(s.stream for s in schedule.schedules)
     assert dict(schedule.timezones.entries) == ZONES
     hours = int((LOCAL_END - LOCAL_START) / dt.timedelta(hours=1)) + 1          # inclusive end, no DST in window
@@ -405,7 +419,7 @@ def test_project_schedule_is_per_stream_and_computed_from_the_definitions() -> N
     for s in schedule.schedules:
         assert (s.timezone, s.local_start, s.local_end, s.end_inclusive, s.cadence) == (
             ZONES[s.city], LOCAL_START, LOCAL_END, True, "PT1H")
-        assert s.record_id == "pricing-authorities-v7" and s.capture_field == "jobs.finished_at"
+        assert s.record_id == "pricing-authorities-v8" and s.capture_field == "jobs.finished_at"
 
 
 @pytest.mark.parametrize("city, first, last", [
@@ -854,23 +868,54 @@ def real_report(j, c):  # type: ignore[no-untyped-def]
                                                 contract=current_expected_stream_contract(), relationship=REL)
 
 
+#: The governed exclusion's period is local hour 13 of the window (2026-08-28 11:00 MDT).
+EXCLUDED_HOUR = 13
+
+
 def test_readiness_clears_schedule_unavailability_with_the_approved_schedule() -> None:
     j, c = real_frames()
     scheduled = real_report(j, c)
     assert scheduled.blocking_reasons == () and scheduled.jobs_assigned == 270
-    assert sum(s.covered for s in scheduled.streams) == 630
+    # 630 nominal stream-periods; the governed Calgary exclusion makes 2 analytically null: 628 required and covered.
+    assert (scheduled.nominal_periods, scheduled.excluded_periods, scheduled.required_periods,
+            scheduled.covered_periods, scheduled.unexcused_missing_total) == (630, 2, 628, 628, 0)
+    assert sum(s.covered for s in scheduled.streams) == 628 and scheduled.excluded_parent_captures == 1
     completeness, pricing = pricing_with(j, c, scheduled)
-    # The corrected keys match exactly: no spelling or unexpected-stream blocker; only the offer combination remains.
+    # The corrected keys match exactly: no spelling or unexpected-stream blocker; with a ready, matching
+    # canonical-offer assessment nothing remains.
     assert not {CMP.SOURCE_SPELLING_MISMATCH, CMP.UNEXPECTED_PAIRS} & set(completeness.blocking_reasons)
-    assert pricing.blocking_reasons == (PB.CANONICAL_OFFER_COMBINATION_UNRESOLVED,) and not pricing.ready
+    assert pricing.blocking_reasons == () and pricing.ready
     assert pricing.schedule_available and pricing.scheduled_coverage_complete
+    _, without_offers = pricing_with(j, c, scheduled, canonical_offers=None)
+    assert without_offers.blocking_reasons == (PB.CANONICAL_OFFER_COMBINATION_UNRESOLVED,
+                                               PB.CANONICAL_OFFER_ASSESSMENT_MISSING)
 
 
-def test_the_calgary_downtown_gap_stays_an_unexcused_blocker() -> None:
-    j, c = real_frames(skip={(CAL_DOWN, 40)})
+def test_the_governed_calgary_capture_is_excluded_for_both_streams_not_missing() -> None:
+    # The decided situation: the Calgary capture of that period has Airport rows but no Downtown rows.
+    j, c = real_frames(skip={(CAL_DOWN, EXCLUDED_HOUR)})
     scheduled = real_report(j, c)
     streams = by_stream(scheduled)
-    assert (streams[CAL_DOWN].covered, streams[CAL_DOWN].unexcused_missing, streams[CAL_DOWN].excused) == (89, 1, 0)
+    for key in (CAL_DOWN, CAL_AIR):
+        entry = streams[key]
+        assert (entry.expected, len(entry.excluded), entry.required, entry.covered, entry.unexcused_missing,
+                entry.excused) == (90, 1, 89, 89, 0, 0)
+        assert entry.excluded[0].period.utc_text == "20260828T170000Z" and entry.complete
+    assert all((s.covered, s.excluded) == (90, ()) for k, s in streams.items() if k[0] != "calgary")
+    assert scheduled.blocking_reasons == () and scheduled.unmatched_exclusions == 0
+    # The raw rows stay: the excluded capture's Airport rows are still in the frames, and are selected by key only.
+    excluded = scheduled.capture_exclusions
+    assert excluded.parent_mask(j).sum() == 1 and excluded.detail_mask(c).sum() == 1
+    assert len(c) == 629 and excluded.parent_mask(j, CAL_AIR).sum() == 1
+    assert not excluded.parent_mask(j, ("toronto", "Toronto Downtown")).any()
+
+
+def test_any_other_calgary_downtown_gap_stays_an_unexcused_blocker() -> None:
+    j, c = real_frames(skip={(CAL_DOWN, 40)})                    # not the governed period: no general drop rule
+    scheduled = real_report(j, c)
+    streams = by_stream(scheduled)
+    assert (streams[CAL_DOWN].covered, streams[CAL_DOWN].unexcused_missing, streams[CAL_DOWN].excused) == (88, 1, 0)
+    assert len(streams[CAL_DOWN].excluded) == 1
     assert [m.failure for m in streams[CAL_DOWN].missing] == [FK.STREAM_ABSENT_FROM_CAPTURE]
     assert streams[CAL_AIR].complete                                        # airport never satisfies downtown
     assert all(s.complete for k, s in streams.items() if k != CAL_DOWN)
@@ -878,7 +923,7 @@ def test_the_calgary_downtown_gap_stays_an_unexcused_blocker() -> None:
     _, pricing = pricing_with(j, c, scheduled, temporal_fields_trusted=False)
     blockers = set(pricing.blocking_reasons)
     assert PB.SCHEDULED_COVERAGE_INCOMPLETE in blockers and PB.COLLECTION_SCHEDULE_UNAVAILABLE not in blockers
-    assert {PB.TEMPORAL_FIELDS_UNTRUSTED, PB.CANONICAL_OFFER_COMBINATION_UNRESOLVED} <= blockers   # unrelated stay
+    assert PB.TEMPORAL_FIELDS_UNTRUSTED in blockers                                    # unrelated stay
     assert not {PB.SOURCE_SPELLING_MISMATCH, PB.UNEXPECTED_SOURCE_STREAMS} & blockers
     assert not pricing.ready and not pricing.scheduled_coverage_complete
 
@@ -905,7 +950,7 @@ def test_the_display_spellings_no_longer_establish_coverage() -> None:
     keys = [display[(a, b)] for a, b in zip(c["city"], c["location"])]
     c["city"], c["location"] = [k[0] for k in keys], [k[1] for k in keys]
     streams = real_report(j, c).streams
-    assert all(s.covered == 0 and s.unexcused_missing == 90 for s in streams)
+    assert all(s.covered == 0 and s.unexcused_missing + len(s.excluded) == 90 for s in streams)
 
 
 # ============================================================= baseline and docs
@@ -924,16 +969,20 @@ def test_baseline_reports_the_schedule_in_aggregate_without_source_values() -> N
     summary = baseline.collection_schedule
     assert (summary.status, summary.schedule_version, summary.sharing_model, summary.capture_field,
             summary.exceptions_model, summary.excused_period_count) == (
-        "available", "per_stream_hourly_v1", "per_stream", "jobs.finished_at", "no_exceptions", 0)
+        "available", "per_stream_hourly_v1", "per_stream", "jobs.finished_at", "listed_exceptions", 0)
     assert (summary.schedule_count, summary.total_periods, summary.unexcused_missing_periods) == (7, 630, 1)
+    assert (summary.nominal_stream_periods, summary.excluded_stream_periods, summary.required_stream_periods,
+            summary.covered_stream_periods, summary.excluded_parent_captures, summary.unmatched_exclusions) == (
+        630, 2, 628, 627, 1, 0)
     assert dict(summary.city_periods) == {"calgary": 180, "toronto": 180, "vancouver": 270}
     assert (summary.jobs_assessed, summary.jobs_assigned, summary.job_failures) == (270, 270, ())
     rows = {s.stream: s for s in summary.streams}
     assert (rows[CAL_DOWN].expected_periods, rows[CAL_DOWN].covered_periods,
-            rows[CAL_DOWN].missing_by_failure) == (90, 89, (("stream_absent_from_capture", 1),))
+            rows[CAL_DOWN].missing_by_failure) == (90, 88, (("stream_absent_from_capture", 1),))
+    assert (rows[CAL_DOWN].excluded_periods, rows[CAL_DOWN].required_periods) == (1, 89)
     markdown = render_baseline_markdown(baseline, commit="abc1234", date="2026-10-06")
     assert "Collection schedule (authority-backed, per stream)" in markdown and "**NOT PRICING READY**" in markdown
-    assert "| calgary / Calgary Downtown | 90 | 89 | 1 | 0 |" in markdown
+    assert "| calgary / Calgary Downtown | 90 | 1 | 89 | 88 | 1 | 0 |" in markdown
     assert "SYNTH" not in markdown and not re.search(r"\d{8}T\d{6}Z|\d{4}-\d{2}-\d{2} \d{2}:", markdown)
     json.dumps(baseline.to_dict())
 
@@ -950,4 +999,4 @@ def test_documentation_describes_the_per_stream_schedule() -> None:
     for text in (readme, records):
         assert "global shared schedule" not in text.lower() or "not a global shared schedule" in text.lower()
         assert "Calgary Downtown gap is excused" not in text
-    assert "The dataset is **not** pricing ready" in readme
+    assert "The dataset is **pricing ready** under the current authority record" in readme
