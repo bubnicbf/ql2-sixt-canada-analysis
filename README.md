@@ -1844,8 +1844,10 @@ extracts and fingerprints are ignored by Git and must not be committed.
 
 Notebooks live in `notebooks/` and run in numeric-prefix order, top to bottom
 from a restarted kernel; `notebooks/README.md` lists the order and rules.
-Committed notebooks must have no outputs. Validate structure and execution
-(against synthetic temporary data) with:
+Committed notebooks must have no outputs. `01_data_ingestion.ipynb` runs the
+foundational controls; `02_matched_location_pricing.ipynb` presents the
+matched location pricing (see below) and stops unless pricing readiness is
+true. Validate structure and execution (against synthetic temporary data) with:
 
 ```bash
 python -m pytest tests/test_notebooks.py
@@ -1866,15 +1868,130 @@ python -m pytest tests/test_notebooks.py
 - Reporting day: the parent finish instant's local date in the parent city's zone (`jobs.finished_at`, record v8); both scrape dates agree; `date_clean` is retired from pricing
 - Location/Product attributes stability
 
-## Airport matched premium
+## Matched location pricing
 
-Charge difference between airport and downtown
+Same-job, same-car airport-versus-downtown price comparison
+(`src/ql2_sixt_canada_analysis/matched_location_pricing.py`, presented by
+`notebooks/02_matched_location_pricing.ipynb`). It is a derived analysis under
+the already approved authorities (record v8); it adds no authority decision.
 
-- City
-- Vehicle type
-- Capture time
-- Price percentile
-- Percentage of matches where the airport is higher
+**Analytical grain.** One matched pair is one approved city, one shared
+trusted collection job, one rental period, one exact approved vehicle
+product, one currency and one price basis, with exactly one airport offer and
+exactly one canonical downtown offer. The pair-level unique key
+(`PAIR_KEY_COLUMNS`) is
+`canonical_city, scheduled_capture_period, pickup_date, return_date, car_name, car_type, transmission, seats, bags, currency, price_basis`
+(the city determines the approved airport/downtown pair: one pair per city).
+
+**Required gates** (any failure returns a `BLOCKED` report with typed
+`MatchedLocationPricingBlocker` values and no commercial result):
+
+- `PricingReadinessReport.ready` (`pricing_analysis_ready`); otherwise
+  `pricing_not_ready` plus the existing readiness blockers by value;
+- the readiness report must be the assessment of exactly the supplied
+  per-stream schedule, canonical-offer and location-authority reports
+  (`readiness_evidence_mismatch`), and the population, canonical offers and
+  analysis-stage frames must share one frame binding (`frame_binding_mismatch`);
+- canonical offers ready with no unassessable row (the price amount equals
+  the strictly parsed `price_per_day` text; currency marker and basis come
+  from it);
+- valid effective approved comparison pairs from the location authority;
+- a valid per-stream scheduled-coverage assessment;
+- **same job proven**: the schedule assigns a period only to the single
+  valid claimant of its city-period; the module re-proves, on the
+  pricing-eligible rows and the derived job linkage key (never raw `job_id`),
+  that every (city, scheduled period) maps to exactly one parent capture, so
+  offers sharing city and period share one trusted collection job
+  (`same_job_not_proven` otherwise);
+- the pricing-population vehicle-stability report `passed` on exactly the
+  pricing-eligible rows (`vehicle_stability_not_passed`,
+  `vehicle_stability_population_mismatch`);
+- one currency and price basis across all matched pairs before any aggregate
+  (`mixed_price_units`).
+
+**Population and locations.** Only canonical offers of the pricing-eligible
+population enter; the governed Calgary `INCOMPLETE_PARENT_CAPTURE` capture
+stays in the source frames for audit and never enters. Pairs come only from
+the location authority's effective approved pairs, in authority order:
+Calgary airport versus Calgary downtown, Toronto airport versus Toronto
+downtown, Vancouver airport versus canonical Vancouver downtown. Vancouver
+`Downtown` and `Thurlow` are combined by the approved canonical-offer policy
+before matching, so `Thurlow` never forms a second comparison and an offer
+seen in both aliased streams is counted once. Nothing is derived from labels
+containing "Airport" or "Downtown", and nothing is compared across cities.
+
+**Same car.** Exact equality of the approved product identity
+(`APPROVED_PRODUCT_COLUMNS`: `car_name`, `car_type`, `transmission`, `seats`,
+`bags`) and of the pickup and return dates as the canonical-offer contract
+parsed them. No trimming, recasing, fuzzy matching or imputation; price is
+never part of the identity.
+
+**Ambiguity policy.** Each identity on an approved pair is one candidate
+match group with exactly one terminal outcome, in this order: `downtown_only`
+(no airport offer), `airport_only` (no downtown offer), `ambiguous` (more
+than one price-distinct canonical offer on either side, excluded: no
+Cartesian product, row order, minimum or average), `currency_mismatch`,
+`basis_mismatch`, `matched`. Match rate = matched pairs / candidate match
+groups. Counts are reported by city and overall, and the invariants
+(outcomes sum to candidates; pairs = pair rows; signs and percent-valid plus
+zero-denominator sum to matched; cities sum to overall) are enforced by the
+result objects.
+
+**Premiums.** Fixed direction airport minus downtown, in exact integer cents:
+`premium_dollars = airport_price - downtown_price` and
+`premium_percent = 100 x (airport_price - downtown_price) / downtown_price`.
+Positive is an airport premium, negative an airport discount. A zero
+downtown price keeps its dollar premium, has no percentage and is counted as
+`zero_denominator`. Rounding is applied only when formatting.
+
+**Distribution and vehicle type.** City and overall summaries report counts,
+mean, median, sample standard deviation, quartiles (linear interpolation),
+range and positive/zero/negative counts and shares; empty groups are explicit
+(`n = 0`, statistics `None`). City-by-`car_type` summaries describe each
+vehicle type. Within each city, a Kruskal-Wallis test compares premium
+distributions across vehicle types with at least
+`MIN_PAIRS_PER_TESTED_VEHICLE_TYPE` matched pairs (fixed before any result was
+seen), on percentage premiums (primary) and dollar premiums; a product-level
+sensitivity test uses one median premium per product and rental period with
+`MIN_PRODUCTS_PER_TESTED_VEHICLE_TYPE`. Each result reports the statistic,
+degrees of freedom, raw p-value, Holm-adjusted p-value (across the city tests
+of each metric/unit family) and epsilon-squared, or `not_testable` with a
+reason. These are associational comparisons of observed matched offers, not
+causal claims; hourly captures of one product are repeated measurements, so
+p-values are optimistic and magnitudes, distributions and effect sizes are
+compared alongside them.
+
+**Main visualization.** `plot_matched_location_premiums` returns a
+two-panel matplotlib `Figure` (dollar and percentage premium by city): box
+plots with every matched pair as a deterministic jittered point (no axis
+clipping), a zero-premium reference line, authority city order, per-city
+valid match count and median, airport premium/discount labels and an
+accessible palette. It never uses pyplot state or calls `plt.show`.
+
+**Run.** Generate the local deliverables after every gate passes (exit code
+2 and blocker categories only when blocked; nothing is written then):
+
+```bash
+python -m ql2_sixt_canada_analysis.matched_location_pricing
+python -m pytest tests/test_matched_location_pricing.py tests/test_notebooks.py
+```
+
+This writes `reports/matched_location_pricing.md` and
+`reports/figures/matched_location_pricing.png`, both Git-ignored by the
+`reports/*` rules. `run_pricing_pipeline`
+(`src/ql2_sixt_canada_analysis/pricing_pipeline.py`) is the single
+orchestration of the foundational assessments shared with the
+pricing-readiness baseline.
+
+> **Confidentiality.** The pair table (`MatchedLocationPricingResult.pairs`)
+> holds proprietary offer-level values and stays in memory; the generated
+> report and figure contain proprietary commercial results. Never commit or
+> force-add them, and never paste their figures into committed
+> documentation. Committed code, tests (synthetic data only), notebooks
+> (outputs cleared) and this documentation are metric-free.
+
+Planned extensions of the matched premium: capture time (hour of day) and
+price-percentile views.
 
 ## Genuine pricing events
 
