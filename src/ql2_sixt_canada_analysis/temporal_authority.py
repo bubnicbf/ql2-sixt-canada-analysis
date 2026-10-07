@@ -17,12 +17,23 @@ Built only from APPROVED decisions of the current authority record (schema 3,
 ``cars.scraped_at`` keeps its established designator policy (``MST`` = fixed
 UTC-07:00); it is never reinterpreted as market-local time.
 
-The reporting-day and date-semantics decisions are not implemented here:
-``REPORTING_DAY_SOURCE``, ``REPORTING_DAY_TIMEZONE``, ``SCRAPE_DATE_SEMANTICS``
-and ``DATE_CLEAN_SEMANTICS`` stay unavailable unless approved, the date
-derivation rules stay ``UNAVAILABLE`` and ``cars.date_clean`` is never a
-pricing date (:attr:`TemporalAuthority.pricing_date_fields`). Observed
-equality between date fields never creates authority.
+Reporting day and source dates (schema 4, ``pricing-authorities-v8`` onwards):
+
+* ``REPORTING_DAY_SOURCE`` = ``jobs.finished_at`` and ``REPORTING_DAY_TIMEZONE``
+  mode ``PARENT_CITY`` with an exhaustive city map: the reporting day is the
+  local calendar date of the parent finish instant in the parent city's zone
+  (detail rows: their trusted linked parent's, never ``scraped_at``).
+* ``SCRAPE_DATE_SEMANTICS`` = ``REPORTING_DAY``: ``jobs.scrape_date`` and
+  ``cars.scrape_date`` are strictly parsed ``ISO_8601_DATE`` values that must
+  equal that reporting day (date checks configured; no repair).
+* ``DATE_CLEAN_SEMANTICS`` = ``RETIRED_FROM_PRICING``: ``cars.date_clean`` is
+  kept, parsed and reported for presence and parse quality only; it has no
+  date check, never blocks and is never a pricing date.
+
+Until approved, the date derivation rules stay ``UNAVAILABLE`` and
+``cars.date_clean`` is never a pricing date
+(:attr:`TemporalAuthority.pricing_date_fields`). Observed equality between
+date fields never creates authority.
 
 Nothing here reads source rows; reports hold statuses and names only.
 """
@@ -49,8 +60,11 @@ from ql2_sixt_canada_analysis.expected_stream_contract import (
 from ql2_sixt_canada_analysis.schemas import (
     ANALYSIS_TEMPORAL_RECONCILIATION,
     FINISHED_AT_TIMEZONE_SELECTOR,
+    ISO_8601_DATE_FORMAT,
     CityTimezoneMap,
     DatasetKey,
+    ReportingDateRule,
+    TemporalDateCheck,
     TemporalAwareness,
     TemporalConfigurationError,
     TemporalKind,
@@ -58,8 +72,11 @@ from ql2_sixt_canada_analysis.schemas import (
     TimestampOrderingRule,
 )
 
+
 __all__ = [
+    "DATE_CLEAN_FIELD",
     "FINISHED_AT_FIELD",
+    "SCRAPE_DATE_FIELDS",
     "ORDERING_EARLIER_FIELD",
     "ORDERING_LATER_FIELD",
     "TEMPORAL_DECISIONS",
@@ -75,6 +92,9 @@ D = DecisionId
 #: The parent finish-time field whose zone the city map decides (its replicas follow it).
 FINISHED_AT_FIELD = (DatasetKey.JOBS, "finished_at")
 ORDERING_EARLIER_FIELD, ORDERING_LATER_FIELD = (DatasetKey.CARS, "scraped_at"), (DatasetKey.JOBS, "finished_at")
+#: The source scrape dates that must equal the reporting day, and the retired cleaned date.
+SCRAPE_DATE_FIELDS = ((DatasetKey.JOBS, "scrape_date"), (DatasetKey.CARS, "scrape_date"))
+DATE_CLEAN_FIELD = (DatasetKey.CARS, "date_clean")
 #: The temporal decisions this module reads.
 TEMPORAL_DECISIONS = (D.FINISHED_AT_TIMEZONE, D.SCRAPED_FINISHED_ORDERING, D.SCRAPED_FINISHED_TOLERANCE,
                       D.REPORTING_DAY_SOURCE, D.REPORTING_DAY_TIMEZONE, D.SCRAPE_DATE_SEMANTICS,
@@ -114,6 +134,11 @@ class TemporalAuthority:
     tolerance_seconds: int | None = None
     reporting_day_source: str | None = None
     references: tuple[str, ...] = ()
+    #: Per-city reporting-day zones (``REPORTING_DAY_TIMEZONE`` mode ``PARENT_CITY``) when approved.
+    reporting_day_timezones: CityTimezoneMap | None = None
+    #: Approved derivations (``REPORTING_DAY``, ``RETIRED_FROM_PRICING``...) or ``None``.
+    scrape_date_derivation: str | None = None
+    date_clean_derivation: str | None = None
 
     def __post_init__(self) -> None:
         if (self.timezone_status is TemporalDecisionStatus.APPROVED) != (self.city_timezones is not None):
@@ -140,6 +165,15 @@ class TemporalAuthority:
         ``date_clean`` qualifies only if an authority names it the source.
         """
         return (self.reporting_day_source,) if self.reporting_day_source is not None else ()
+
+    @property
+    def reporting_day_available(self) -> bool:
+        return (self.reporting_day_status is TemporalDecisionStatus.APPROVED
+                and self.date_semantics_status is TemporalDecisionStatus.APPROVED)
+
+    @property
+    def date_clean_retired(self) -> bool:
+        return self.date_clean_derivation == "RETIRED_FROM_PRICING"
 
     @property
     def blocking_reasons(self) -> tuple[TemporalAuthorityBlocker, ...]:
@@ -233,11 +267,58 @@ def temporal_authority_from_record(record: AuthorityDecisionRecord | None,
             rule = None
     elif ordering_status is S.APPROVED:          # approved but not implementable without tolerance and zones
         ordering_status = S.NOT_APPROVED
+
+    day_zones, scrape_derivation, clean_derivation = None, None, None
+    if semantics is S.APPROVED:
+        scrape_derivation = record.approved_resolution(D.SCRAPE_DATE_SEMANTICS)["derivation"]
+        clean_derivation = record.approved_resolution(D.DATE_CLEAN_SEMANTICS)["derivation"]
+    if reporting is S.APPROVED and semantics is S.APPROVED:   # configured only when every date decision is approved
+        try:
+            definition, day_zones = _with_reporting_day(record, definition, timezone, contract)
+            references += [a.reference for d in (D.REPORTING_DAY_SOURCE, D.REPORTING_DAY_TIMEZONE,
+                                                 D.SCRAPE_DATE_SEMANTICS, D.DATE_CLEAN_SEMANTICS)
+                           for a in record.decision(d).authority]
+        except (TemporalConfigurationError, ValueError, KeyError, TypeError):
+            reporting = semantics = S.INVALID
+            reporting_source = None
+            day_zones = scrape_derivation = clean_derivation = None
+            definition = replace(definition, date_checks=template.date_checks, retired_fields=())
     return TemporalAuthority(
         record_id=record.record_id, timezone_status=timezone, ordering_status=ordering_status,
         tolerance_status=tolerance_status, reporting_day_status=reporting, date_semantics_status=semantics,
         definition=definition, city_timezones=zones, ordering=rule, tolerance_seconds=tolerance_seconds,
-        reporting_day_source=reporting_source, references=tuple(dict.fromkeys(references)))
+        reporting_day_source=reporting_source, references=tuple(dict.fromkeys(references)),
+        reporting_day_timezones=day_zones, scrape_date_derivation=scrape_derivation,
+        date_clean_derivation=clean_derivation)
+
+
+def _with_reporting_day(record: AuthorityDecisionRecord, definition: TemporalReconciliationDefinition,
+                        timezone: TemporalDecisionStatus, contract: ExpectedStreamContract | None
+                        ) -> tuple[TemporalReconciliationDefinition, CityTimezoneMap]:
+    """Configure the reporting-day date checks and retire ``date_clean`` (fails closed on anything else)."""
+    if timezone is not TemporalDecisionStatus.APPROVED:
+        raise TemporalConfigurationError("the reporting day needs the approved finish-time zones")
+    if record.schema_version < 4:
+        raise TemporalConfigurationError("only the schema-4 per-city reporting day is implemented")
+    source = _ref(record.approved_resolution(D.REPORTING_DAY_SOURCE)["field"])
+    tz = record.approved_resolution(D.REPORTING_DAY_TIMEZONE)
+    if source != FINISHED_AT_FIELD or tz["mode"] != "PARENT_CITY":
+        raise TemporalConfigurationError("only the parent finish time in the parent city's zone is implemented")
+    day_zones = CityTimezoneMap(tuple(city_timezones(tz).items()))
+    if contract is not None and contract.status is ExpectedStreamAuthorityStatus.APPROVED and set(
+            day_zones.cities) != {k[0] for k in contract.expected_keys}:
+        raise TemporalConfigurationError("the reporting-day map must cover exactly the approved cities")
+    if record.approved_resolution(D.SCRAPE_DATE_SEMANTICS)["derivation"] != "REPORTING_DAY":
+        raise TemporalConfigurationError("only scrape dates that equal the reporting day are implemented")
+    if record.approved_resolution(D.DATE_CLEAN_SEMANTICS)["derivation"] != "RETIRED_FROM_PRICING":
+        raise TemporalConfigurationError("only a date_clean retired from pricing is implemented")
+    rule = ReportingDateRule(source=FINISHED_AT_FIELD, city_timezones=day_zones,
+                             timezone_selector=FINISHED_AT_TIMEZONE_SELECTOR)
+    strict = set(SCRAPE_DATE_FIELDS) | {DATE_CLEAN_FIELD}
+    fields = tuple(replace(f, source_format=ISO_8601_DATE_FORMAT) if f.ref in strict else f
+                   for f in definition.fields)
+    checks = tuple(TemporalDateCheck(target, rule) for target in SCRAPE_DATE_FIELDS)
+    return replace(definition, fields=fields, date_checks=checks, retired_fields=(DATE_CLEAN_FIELD,)), day_zones
 
 
 @cache

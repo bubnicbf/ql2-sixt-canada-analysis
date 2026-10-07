@@ -136,6 +136,7 @@ __all__ = [
     "LocationStreamComparisonDefinition",
     "TEMPORAL_RECONCILIATION",
     "ReportingDateRule",
+    "ISO_8601_DATE_FORMAT",
     "TemporalAwareness",
     "TemporalConfigurationError",
     "CityTimezoneMap",
@@ -1006,6 +1007,11 @@ class TemporalAwareness(StrEnum):
     NOT_APPLICABLE = "not_applicable"
 
 
+#: Strict calendar-date format: exactly ``YYYY-MM-DD`` (ASCII digits) naming a real date;
+#: nothing is trimmed or coerced (``REPORTING_DAY`` scrape dates, ``RENTAL_DATE_VALIDITY``).
+ISO_8601_DATE_FORMAT: Final = "ISO_8601_DATE"
+
+
 @dataclass(frozen=True, slots=True)
 class TemporalFieldDefinition:
     """One source temporal field and how to parse it.
@@ -1050,6 +1056,8 @@ class TemporalFieldDefinition:
             raise TemporalConfigurationError("column must be a non-empty string")
         if not isinstance(self.source_format, str) or not self.source_format:
             raise TemporalConfigurationError("source_format must be a non-empty string")
+        if self.source_format == ISO_8601_DATE_FORMAT and self.kind is not TemporalKind.DATE:
+            raise TemporalConfigurationError("ISO_8601_DATE applies to calendar dates only")
         if (self.kind is TemporalKind.DATE) != (self.awareness is TemporalAwareness.NOT_APPLICABLE):
             raise TemporalConfigurationError("dates (and only dates) have no time-zone awareness")
         if self.source_timezone is not None:
@@ -1120,17 +1128,34 @@ class TimestampOrderingRule:
 
 @dataclass(frozen=True, slots=True)
 class ReportingDateRule:
-    """The date equals the calendar date of ``source`` in ``reporting_timezone``.
+    """The date equals the calendar date of ``source`` in its reporting zone.
 
-    The source instant is converted to the reporting zone *before* its date is
-    taken. Dates are compared semantically (parsed), not as strings.
+    The zone is either one fixed ``reporting_timezone`` or, per row, the zone
+    of the exact **parent** city selected by ``timezone_selector`` through the
+    approved ``city_timezones`` map (``REPORTING_DAY_TIMEZONE`` mode
+    ``PARENT_CITY``; detail rows use their trusted linked parent's city, never
+    their own). The source instant is converted to that zone *before* its date
+    is taken. Dates are compared semantically (parsed), not as strings.
     """
 
     source: tuple[DatasetKey, str]
-    reporting_timezone: str
+    reporting_timezone: str | None = None
+    city_timezones: CityTimezoneMap | None = None
+    timezone_selector: tuple[DatasetKey, str] | None = None
 
     def __post_init__(self) -> None:
-        _zone(self.reporting_timezone)
+        if (self.city_timezones is None) != (self.timezone_selector is None):
+            raise TemporalConfigurationError("city_timezones and timezone_selector are set together")
+        if (self.reporting_timezone is None) == (self.city_timezones is None):
+            raise TemporalConfigurationError("a reporting day has one zone basis: a fixed zone or a city map")
+        if self.reporting_timezone is not None:
+            _zone(self.reporting_timezone)
+        elif not isinstance(self.city_timezones, CityTimezoneMap):
+            raise TemporalConfigurationError("city_timezones must be a CityTimezoneMap")
+
+    @property
+    def city_local(self) -> bool:
+        return self.city_timezones is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1177,6 +1202,9 @@ class TemporalReconciliationDefinition:
     date_checks: tuple[TemporalDateCheck, ...]
     replications: tuple[TemporalReplicationRule, ...]
     relationship: JobDetailRelationshipDefinition
+    #: Date fields retired from pricing (``DATE_CLEAN_SEMANTICS = RETIRED_FROM_PRICING``): still
+    #: parsed and reported for presence and parse quality, never checked, never blocking.
+    retired_fields: tuple[tuple[DatasetKey, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.fields, tuple) or not self.fields:
@@ -1210,6 +1238,18 @@ class TemporalReconciliationDefinition:
                 raise TemporalConfigurationError("date checks target date fields")
             if check.rule is not None and self.field(check.rule.source).kind is not TemporalKind.TIMESTAMP:
                 raise TemporalConfigurationError("reporting dates derive from timestamp fields")
+            if check.rule is not None and check.rule.timezone_selector is not None:
+                dataset, column = check.rule.timezone_selector
+                if dataset is not self.relationship.parent or column not in registry[dataset].columns:
+                    raise TemporalConfigurationError("the reporting-day selector must be a parent contract column")
+        retired = [tuple(r) for r in self.retired_fields]
+        if len(set(retired)) != len(retired):
+            raise TemporalConfigurationError("each retired field may be listed once")
+        for ref in retired:
+            if self.field(ref).kind is not TemporalKind.DATE:
+                raise TemporalConfigurationError("only date fields are retired from pricing")
+            if ref in targets or any(c.rule is not None and c.rule.source == ref for c in self.date_checks):
+                raise TemporalConfigurationError("a retired field is never checked or used as a source")
         for rule in self.replications:
             source, replica = self.field(rule.source), self.field(rule.replica)
             if (source.dataset, replica.dataset) != (self.relationship.parent, self.relationship.detail):

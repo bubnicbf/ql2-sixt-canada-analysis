@@ -74,8 +74,10 @@ import pandas as pd
 
 from ql2_sixt_canada_analysis.relationships import RelationshipPreconditionError, _check_relationship_inputs
 from ql2_sixt_canada_analysis.schemas import (
+    ISO_8601_DATE_FORMAT,
     TEMPORAL_RECONCILIATION,
     DatasetKey,
+    ReportingDateRule,
     TemporalAwareness,
     TemporalConfigurationError,
     TemporalFieldDefinition,
@@ -96,6 +98,9 @@ __all__ = [
     "TemporalRuleReport",
     "UTC_CANONICAL_FORMAT",
     "DerivedTimestamps",
+    "DerivedReportingDays",
+    "ScrapeDateStatus",
+    "derive_reporting_days",
     "assess_temporal_reconciliation",
     "canonical_utc_text",
     "derive_utc_timestamps",
@@ -105,6 +110,7 @@ __all__ = [
 
 _OFFSET_SUFFIX = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 _DESIGNATOR = re.compile(r"^(?P<body>.+) (?P<zone>[A-Z]+)$")
+_STRICT_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 #: Canonical serialized presentation of a UTC instant (whole seconds; never an identity).
 UTC_CANONICAL_FORMAT = "%Y%m%dT%H%M%SZ"
 
@@ -179,6 +185,11 @@ def parse_temporal_field(
     usable = text.where(candidate)
 
     if field.kind is TemporalKind.DATE:
+        if field.source_format == ISO_8601_DATE_FORMAT:     # exact YYYY-MM-DD text naming a real date
+            exact = usable.map(lambda v: isinstance(v, str) and bool(_STRICT_ISO_DATE.fullmatch(v)))
+            wall = pd.to_datetime(usable.where(exact.astype(bool)), format="%Y-%m-%d", errors="coerce")
+            parsed = wall.notna().to_numpy() & candidate
+            return done(nat, wall, candidate & ~parsed, unresolved)
         wall = pd.to_datetime(usable, format=field.source_format, errors="coerce")
         parsed = wall.notna().to_numpy()
         return done(nat, wall, candidate & ~parsed, unresolved)
@@ -306,6 +317,8 @@ class TemporalFieldReport:
     ambiguous_count: int = 0
     nonexistent_count: int = 0
     resolvable: bool = False
+    #: Retired from pricing: reported for presence and parse quality only, never blocking.
+    retired: bool = False
 
     def __post_init__(self) -> None:
         assert self.row_count == self.valid_count + self.missing_count + self.invalid_count
@@ -328,9 +341,14 @@ class TemporalFieldReport:
         return (self.dataset, self.column)
 
     @property
-    def parses(self) -> bool:
-        """No invalid values, and no missing values for a required field."""
+    def parse_quality_clean(self) -> bool:
+        """No invalid values, and no missing values for a required field (reported even when retired)."""
         return self.invalid_count == 0 and (not self.required or self.missing_count == 0)
+
+    @property
+    def parses(self) -> bool:
+        """The parse-quality gate: a retired field never blocks (its quality is still reported)."""
+        return self.retired or self.parse_quality_clean
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,6 +511,7 @@ def assess_temporal_reconciliation(
     linked = positions >= 0
     take = np.where(linked, positions, 0)
     parent_values = _parent_lookup(jobs, cars, positions)
+    retired_refs = {tuple(r) for r in definition.retired_fields}
     field_reports = tuple(
         TemporalFieldReport(
             dataset=f.dataset, column=f.column, kind=f.kind, required=f.required, row_count=len(frames[f.dataset]),
@@ -502,22 +521,14 @@ def assess_temporal_reconciliation(
             context_unavailable_count=int(parsed[f.ref].context_unavailable.sum()),
             ambiguous_count=int(parsed[f.ref].ambiguous.sum()),
             nonexistent_count=int(parsed[f.ref].nonexistent.sum()),
-            resolvable=f.resolvable_to_instant,
+            resolvable=f.resolvable_to_instant, retired=f.ref in retired_refs,
         )
         for f in definition.fields
     )
 
     # City integrity prerequisite: a linked detail row is trusted only when its scope equals its parent's.
-    agree = linked.copy()
-    for parent_column, detail_column in rel.scope_agreement_columns:
-        if parent_column not in jobs.columns or detail_column not in cars.columns:
-            raise TemporalConfigurationError("a scope agreement column is absent.")
-        mine = cars[detail_column].astype(object).reset_index(drop=True)
-        theirs = parent_values(parent_column)
-        same = [isinstance(a, str) and isinstance(b, str) and a == b for a, b in zip(mine.tolist(), theirs.tolist())]
-        agree &= np.asarray(same, dtype=bool)
-    trusted = agree
-    city_mismatch = linked & ~agree
+    trusted = _trusted_rows(cars, rel, linked, parent_values)
+    city_mismatch = linked & ~trusted
 
     def aligned(ref: tuple[DatasetKey, str], base: DatasetKey) -> tuple[pd.Series, pd.Series, np.ndarray]:
         """(instants, wall, row-linked mask) of ``ref`` aligned to ``base`` rows."""
@@ -582,9 +593,13 @@ def assess_temporal_reconciliation(
         base = base_of(check.target, check.rule.source)
         _, target_date, ok_t = aligned(check.target, base)
         source, _, ok_s = aligned(check.rule.source, base)
-        assessable = ok_t & ok_s & target_date.notna().to_numpy() & source.notna().to_numpy()
-        local = source[assessable].dt.tz_convert(check.rule.reporting_timezone)
-        expected = local.dt.tz_localize(None).dt.normalize()
+        # Detail rows take their reporting day only through a trusted linked parent (city integrity).
+        scope = trusted if base == rel.detail else np.ones(len(frames[base]), dtype=bool)
+        zones = _reporting_zones(check.rule, len(frames[base]), base == rel.detail, jobs, parent_values)
+        has_zone = np.asarray([z is not None for z in zones], dtype=bool)
+        assessable = (scope & ok_t & ok_s & has_zone & target_date.notna().to_numpy()
+                      & source.notna().to_numpy())
+        expected = _local_dates(source, zones, assessable)[assessable]
         match = (expected == target_date[assessable]).to_numpy()
         utc_date = source[assessable].dt.tz_convert("UTC").dt.tz_localize(None).dt.normalize()
         crossing = match & (utc_date != expected).to_numpy()
@@ -619,6 +634,42 @@ def validate_temporal_reconciliation(
 
 
 # ------------------------------------------------------------------- helpers
+
+
+def _trusted_rows(cars: pd.DataFrame, rel, linked: np.ndarray, parent_values) -> np.ndarray:  # type: ignore[no-untyped-def]
+    """Linked detail rows whose scope columns (``city``) equal their parent's exactly."""
+    agree = linked.copy()
+    for parent_column, detail_column in rel.scope_agreement_columns:
+        if detail_column not in cars.columns:
+            raise TemporalConfigurationError("a scope agreement column is absent.")
+        mine = cars[detail_column].astype(object).reset_index(drop=True)
+        theirs = parent_values(parent_column)
+        same = [isinstance(a, str) and isinstance(b, str) and a == b for a, b in zip(mine.tolist(), theirs.tolist())]
+        agree &= np.asarray(same, dtype=bool)
+    return agree
+
+
+def _reporting_zones(rule: ReportingDateRule, n: int, detail: bool, jobs: pd.DataFrame,  # type: ignore[no-untyped-def]
+                     parent_values) -> list:
+    """The reporting zone of every base row (``None`` = no approved zone; never a default)."""
+    if not rule.city_local:
+        return [rule.reporting_timezone] * n
+    column = rule.timezone_selector[1]           # type: ignore[index]
+    if column not in jobs.columns:
+        raise TemporalConfigurationError("the reporting-day selector column is absent.")
+    cities = parent_values(column) if detail else jobs[column].astype(object).reset_index(drop=True)
+    return [rule.city_timezones.zone_or_none(c) for c in cities.tolist()]   # type: ignore[union-attr]
+
+
+def _local_dates(instants: pd.Series, zones: list, mask: np.ndarray) -> pd.Series:
+    """Midnight-normalised local calendar date of each instant in its own zone (``NaT`` outside ``mask``)."""
+    out = pd.Series(pd.NaT, index=instants.index, dtype="datetime64[ns]")
+    zone_array = np.asarray(zones, dtype=object)
+    for zone in sorted({z for z, m in zip(zones, mask) if m and z is not None}):
+        rows = mask & (zone_array == zone)
+        local = instants[rows].dt.tz_convert(zone).dt.tz_localize(None).dt.normalize()
+        out[rows] = local.astype("datetime64[ns]")
+    return out
 
 
 def _unavailable(name: str, rows: int) -> TemporalRuleReport:
@@ -718,3 +769,142 @@ def derive_utc_timestamps(jobs: pd.DataFrame, cars: pd.DataFrame,
         out[f.dataset][f"{f.column}_utc"] = instants
         out[f.dataset][f"{f.column}_canonical"] = canonical_utc_text(instants)
     return DerivedTimestamps(jobs=out[rel.parent], cars=out[rel.detail])
+
+
+# ------------------------------------------------------------- reporting days
+
+
+class ScrapeDateStatus(StrEnum):
+    """Agreement of a source scrape date with the derived reporting day (per row; never repaired)."""
+
+    AGREES = "agrees"
+    MISMATCH = "mismatch"
+    MISSING = "missing"            # missing or blank scrape date
+    INVALID = "invalid"            # not exact ISO_8601_DATE text naming a real date
+    UNRESOLVABLE = "unresolvable"  # no reporting day: finish time unresolved or city not approved
+    UNLINKED = "unlinked"          # detail row with no linked parent
+    UNTRUSTED = "untrusted"        # detail row whose city disagrees with its parent (city integrity)
+
+
+@dataclass(frozen=True)
+class DerivedReportingDays:
+    """Derived reporting-day structure, separate from the source frames (never overwritten).
+
+    ``jobs`` (aligned with the parent rows) and ``cars`` (aligned with the
+    detail rows) hold: ``finished_at_raw`` (the raw parent finish value),
+    ``finished_at_utc`` (full-precision UTC instant), ``reporting_timezone``,
+    ``reporting_day`` (``datetime.date`` or ``None``), ``scrape_date_raw``,
+    ``scrape_date_parsed`` (``datetime.date`` or ``None``), ``scrape_date_status``
+    (:class:`ScrapeDateStatus` value) and ``reporting_day_provenance``. Detail
+    rows carry their trusted linked parent's values only - never anything
+    derived from ``scraped_at`` or from their own city. Values are for
+    analysis only and are never reported.
+    """
+
+    jobs: pd.DataFrame
+    cars: pd.DataFrame
+    rule: ReportingDateRule
+
+    def status_counts(self, dataset: DatasetKey) -> dict[str, int]:
+        frame = self.jobs if dataset is DatasetKey.JOBS else self.cars
+        counts = frame["scrape_date_status"].value_counts()
+        return {s.value: int(counts.get(s.value, 0)) for s in ScrapeDateStatus}
+
+    def eligible(self, dataset: DatasetKey) -> np.ndarray:
+        """Rows whose scrape date agrees with a resolved reporting day."""
+        frame = self.jobs if dataset is DatasetKey.JOBS else self.cars
+        return (frame["scrape_date_status"] == ScrapeDateStatus.AGREES.value).to_numpy()
+
+
+def _reporting_rule(definition: TemporalReconciliationDefinition) -> ReportingDateRule:
+    rules = {c.rule for c in definition.date_checks if c.rule is not None}
+    if len(rules) != 1 or any(c.rule is None for c in definition.date_checks):
+        raise TemporalConfigurationError("the reporting day is unavailable: no single approved reporting-day rule")
+    rule = next(iter(rules))
+    if rule.source[0] is not definition.relationship.parent:
+        raise TemporalConfigurationError("the reporting day derives from a parent timestamp")
+    return rule
+
+
+def derive_reporting_days(jobs: pd.DataFrame, cars: pd.DataFrame,
+                          definition: TemporalReconciliationDefinition) -> DerivedReportingDays:
+    """The reporting day of every parent job, and of every detail row through its trusted parent.
+
+    Reporting day = the local calendar date of the parent finish instant in
+    the parent city's approved zone. Each configured date check's target is
+    compared semantically (strictly parsed) with it; raw values are kept and
+    no value is repaired, preferred or overwritten. Missing, invalid,
+    mismatched, unlinked, untrusted and unresolvable rows are labelled, never
+    dropped.
+
+    Raises:
+        TemporalConfigurationError: No single approved reporting-day rule.
+    """
+    if not isinstance(definition, TemporalReconciliationDefinition):
+        raise TypeError("definition must be a TemporalReconciliationDefinition")
+    rule = _reporting_rule(definition)
+    rel = definition.relationship
+    _check_relationship_inputs(jobs, cars, rel, TemporalPreconditionError)
+    parsed, positions = _parse_fields(jobs, cars, definition)
+    linked = positions >= 0
+    take = np.where(linked, positions, 0)
+    parent_values = _parent_lookup(jobs, cars, positions)
+    trusted = _trusted_rows(cars, rel, linked, parent_values)
+    targets = {c.target[0]: c.target for c in definition.date_checks}
+    if set(targets) != {rel.parent, rel.detail}:
+        raise TemporalConfigurationError("one reporting-day date check per dataset is required")
+
+    finish = parsed[rule.source].instants.reset_index(drop=True).dt.tz_convert("UTC")
+    zones = _reporting_zones(rule, len(jobs), False, jobs, parent_values)
+    resolved = finish.notna().to_numpy() & np.asarray([z is not None for z in zones], dtype=bool)
+    day = _local_dates(finish, zones, resolved)
+    provenance = (f"{rule.source[0]}.{rule.source[1]}@" + (
+        f"{rule.timezone_selector[0]}.{rule.timezone_selector[1]}" if rule.city_local else "fixed_zone"))
+
+    def _dates(series: pd.Series) -> list:
+        return [None if pd.isna(v) else v.date() for v in series.tolist()]
+
+    def frame(base: DatasetKey, n: int, index: pd.Index, raw_finish: pd.Series, utc: pd.Series, zone: list,
+              rday: pd.Series, detail_scope: np.ndarray | None, prov: str) -> pd.DataFrame:
+        target = parsed[targets[base]]
+        source_frame = jobs if base == rel.parent else cars
+        target_day = target.wall.reset_index(drop=True)
+        missing, invalid = target.missing, target.invalid
+        status = np.full(n, ScrapeDateStatus.AGREES.value, dtype=object)
+        has_day = rday.notna().to_numpy()
+        same = (rday == target_day).to_numpy() & has_day & target_day.notna().to_numpy()
+        status[~same] = ScrapeDateStatus.MISMATCH.value
+        status[~has_day] = ScrapeDateStatus.UNRESOLVABLE.value
+        status[invalid] = ScrapeDateStatus.INVALID.value
+        status[missing] = ScrapeDateStatus.MISSING.value
+        if detail_scope is not None:
+            status[linked & ~trusted] = ScrapeDateStatus.UNTRUSTED.value
+            status[~linked] = ScrapeDateStatus.UNLINKED.value
+        return pd.DataFrame({
+            "finished_at_raw": raw_finish.to_numpy(dtype=object),
+            "finished_at_utc": utc.to_numpy(),
+            "reporting_timezone": np.asarray(zone, dtype=object),
+            "reporting_day": np.asarray(_dates(rday), dtype=object),
+            "scrape_date_raw": source_frame[targets[base][1]].astype(object).to_numpy(),
+            "scrape_date_parsed": np.asarray(_dates(target_day.where(~pd.Series(invalid | missing))), dtype=object),
+            "scrape_date_status": status,
+            "reporting_day_provenance": np.full(n, prov, dtype=object),
+        }, index=index)
+
+    job_frame = frame(rel.parent, len(jobs), jobs.index, jobs[rule.source[1]].astype(object).reset_index(drop=True),
+                      finish, zones, day, None, provenance)
+    keep = pd.Series(trusted)
+    n = len(cars)
+    if len(jobs):
+        d_utc = finish.iloc[take].reset_index(drop=True).where(keep)
+        d_raw = jobs[rule.source[1]].astype(object).reset_index(drop=True).iloc[take].reset_index(drop=True).where(
+            keep, None)
+        d_zone = [zones[p] if t else None for p, t in zip(take.tolist(), trusted.tolist())]
+        d_day = day.iloc[take].reset_index(drop=True).where(keep)
+    else:
+        d_utc = pd.Series(pd.NaT, index=range(n), dtype="datetime64[ns, UTC]")
+        d_raw = pd.Series([None] * n, dtype=object)
+        d_zone = [None] * n
+        d_day = pd.Series(pd.NaT, index=range(n), dtype="datetime64[ns]")
+    car_frame = frame(rel.detail, n, cars.index, d_raw, d_utc, d_zone, d_day, trusted, "linked_parent:" + provenance)
+    return DerivedReportingDays(jobs=job_frame, cars=car_frame, rule=rule)

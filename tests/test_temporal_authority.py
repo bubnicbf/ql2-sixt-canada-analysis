@@ -126,10 +126,11 @@ def test_v6_adds_exactly_the_ordering_decisions_and_is_carried_forward() -> None
     record, v5 = load_decision_record(V6), load_decision_record(V5)
     assert (record.schema_version, record.record_version, record.record_id, record.supersedes) == (
         3, 6, "pricing-authorities-v6", "pricing-authorities-v5")
-    assert CURRENT_RECORD_PATH.name == "v7.toml"
-    current = load_current_decision_record()                  # v7 keeps every v6 decision except the rental pair
+    assert CURRENT_RECORD_PATH.name == "v8.toml"
+    current = load_current_decision_record()   # v7 adds the rental pair; v8 the exclusion and the date decisions
+    later = {D.RENTAL_DATE_VALIDITY, D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS, D.SCHEDULE_EXCEPTIONS, *UNRESOLVED}
     for decision in record.decisions:
-        if decision.id not in (D.RENTAL_DATE_VALIDITY, D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS):
+        if decision.id not in later:
             assert current.decision(decision.id) == decision, decision.id
     counts = record.counts()
     assert (counts[DecisionStatus.APPROVED], counts[DecisionStatus.PROPOSED], counts[DecisionStatus.REJECTED]) == (
@@ -210,7 +211,7 @@ def test_ordering_needs_the_city_map_and_tolerance_needs_the_ordering() -> None:
 
 def test_current_policy_is_available_with_zero_tolerance() -> None:
     authority = current_temporal_authority()
-    assert authority is current_temporal_authority() and authority.record_id == "pricing-authorities-v7"
+    assert authority is current_temporal_authority() and authority.record_id == "pricing-authorities-v8"
     assert (authority.timezone_status, authority.ordering_status, authority.tolerance_status) == (
         TS.APPROVED, TS.APPROVED, TS.APPROVED)
     assert dict(authority.city_timezones.entries) == ZONES
@@ -219,8 +220,8 @@ def test_current_policy_is_available_with_zero_tolerance() -> None:
     assert (rule.earlier, rule.later, rule.inclusive, rule.tolerance) == (
         (CARS, "scraped_at"), (JOBS, "finished_at"), True, dt.timedelta(0))
     assert authority.tolerance_seconds == 0 and current_temporal_reconciliation().ordering == rule
-    assert authority.blocking_reasons == (TB.REPORTING_DAY_UNRESOLVED, TB.DATE_SEMANTICS_UNRESOLVED)
-    assert authority.pricing_date_fields == ()
+    assert authority.blocking_reasons == ()                                  # v8 approves the date decisions
+    assert authority.pricing_date_fields == ("jobs.finished_at",)
     for ref in ((JOBS, "finished_at"), (CARS, "job_finished_at")):
         field = authority.definition.field(ref)
         assert field.city_timezones == authority.city_timezones and field.timezone_selector == (JOBS, "city")
@@ -529,11 +530,16 @@ def test_temporal_trust_and_pricing_stay_blocked(rows) -> None:
     assert PB.TEMPORAL_FIELDS_UNTRUSTED in readiness.blocking_reasons and not readiness.ready
 
 
-def test_reporting_day_and_date_semantics_remain_blockers() -> None:
-    authority = current_temporal_authority()
-    assert (authority.reporting_day_status, authority.date_semantics_status) == (TS.NOT_APPROVED, TS.NOT_APPROVED)
-    assert {TB.REPORTING_DAY_UNRESOLVED, TB.DATE_SEMANTICS_UNRESOLVED} <= set(authority.blocking_reasons)
-    assert all(check.rule is None for check in authority.definition.date_checks)
+def test_reporting_day_and_date_semantics_were_blockers_until_v8() -> None:
+    for name in ("v6.toml", "v7.toml"):
+        authority = temporal_authority_from_record(load_decision_record(RECORD_DIR / name), TEMPORAL_RECONCILIATION,
+                                                   current_expected_stream_contract())
+        assert (authority.reporting_day_status, authority.date_semantics_status) == (TS.NOT_APPROVED,
+                                                                                     TS.NOT_APPROVED)
+        assert {TB.REPORTING_DAY_UNRESOLVED, TB.DATE_SEMANTICS_UNRESOLVED} <= set(authority.blocking_reasons)
+        assert all(check.rule is None for check in authority.definition.date_checks)
+    current = current_temporal_authority()
+    assert (current.reporting_day_status, current.date_semantics_status) == (TS.APPROVED, TS.APPROVED)
 
 
 # ====================================================================== date_clean
@@ -549,8 +555,8 @@ def test_date_clean_is_preserved_and_never_a_pricing_date() -> None:
     assert "date_clean" not in set(derived.cars.columns) | set(derived.jobs.columns)
     assert fields_of(report)["cars.date_clean"].valid_count == 1           # parsed for traceability only
     # Observed equality with scrape_date (identical above) creates no authority and no trust.
-    assert "date_derivation:cars.date_clean" in report.unavailable_rules
-    assert current_temporal_authority().pricing_date_fields == ()
+    assert "date_derivation:cars.date_clean" in report.unavailable_rules       # under v6 (history)
+    assert "cars.date_clean" not in current_temporal_authority().pricing_date_fields
 
 
 def test_an_approved_reporting_day_is_never_overridden_by_date_clean() -> None:
@@ -595,7 +601,7 @@ def test_baseline_reports_the_temporal_policy_in_aggregate() -> None:
     from ql2_sixt_canada_analysis.stability import assess_vehicle_attribute_stability
 
     j, c = real_frames()
-    _, readiness = pricing_with(j, c, real_report(j, c))
+    _, readiness = pricing_with(j, c, real_report(j, c), canonical_offers=None)
     temporal = assess_temporal_reconciliation(j, c, DEF)
     stable = assess_vehicle_attribute_stability(c.assign(car_name="SYNTH Vehicle"))
     baseline = build_pricing_baseline(pricing=readiness, jobs=j, cars=c, temporal=temporal, vehicle_stability=stable,
@@ -640,4 +646,4 @@ def test_documentation_describes_the_temporal_policy() -> None:
     assert "No authoritative time zone is documented" not in readme
     for phrase in ("v6.toml", "SCRAPED_FINISHED_ORDERING", "SCRAPED_FINISHED_TOLERANCE", "zero seconds"):
         assert phrase in records, phrase
-    assert "The dataset is **not** pricing ready" in readme
+    assert "The dataset is **pricing ready** under the current authority record" in readme
