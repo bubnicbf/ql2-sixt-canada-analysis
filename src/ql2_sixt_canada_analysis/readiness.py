@@ -129,6 +129,11 @@ class PricingBlocker(StrEnum):
     COMPARISON_PAIRS_INVALID = "comparison_pairs_invalid"
     COMPARISON_PAIR_IDENTITY_UNRESOLVED = "comparison_pair_identity_unresolved"
     CANONICAL_OFFER_COMBINATION_UNRESOLVED = "canonical_offer_combination_unresolved"
+    # Authority-backed canonical offer combination (values equal CanonicalOfferBlocker values).
+    CANONICAL_OFFER_ASSESSMENT_MISSING = "canonical_offer_assessment_missing"
+    CANONICAL_OFFER_POLICY_UNAVAILABLE = "canonical_offer_policy_unavailable"
+    CANONICAL_OFFERS_UNASSESSABLE = "canonical_offers_unassessable"
+    CANONICAL_OFFER_POLICY_MISMATCH = "canonical_offer_policy_mismatch"
     LOCATION_AUTHORITY_POLICY_MISMATCH = "roles_pairs_policy_mismatch"
     LOCATION_AUTHORITY_CONTRACT_MISMATCH = "roles_pairs_contract_mismatch"
     # A confirmed alias whose governed raw source streams are not both present exactly.
@@ -164,6 +169,7 @@ class PricingBlocker(StrEnum):
     # Per-stream schedule (values equal ScheduleCoverageBlocker values).
     SCHEDULED_JOB_ASSIGNMENT_FAILED = "scheduled_job_assignment_failed"
     SCHEDULED_DETAIL_COPY_MISMATCH = "scheduled_detail_copy_mismatch"
+    SCHEDULE_EXCLUSION_UNMATCHED = "schedule_exclusion_unmatched"
     # Rental dates (values equal RentalDateBlocker values; a missing assessment has its own value).
     RENTAL_DATE_ASSESSMENT_MISSING = "rental_date_assessment_missing"
     RENTAL_DATE_RULES_UNAVAILABLE = "rental_date_rules_unavailable"
@@ -418,6 +424,8 @@ class PricingReadinessReport:
     location_authority: LocationAuthorityReport | None = None
     #: Rental-date validity and parent/detail agreement (kept for audit; ``None`` = missing).
     rental_dates: RentalDateReport | None = None
+    #: Authority-backed canonical offer combination (kept for audit; ``None`` = missing).
+    canonical_offers: object = None
 
     @property
     def rental_date_rules_available(self) -> bool:
@@ -574,6 +582,7 @@ def assess_pricing_readiness(
     expected_stream_contract: ExpectedStreamContract | None,
     location_authority: LocationAuthorityReport | None,
     rental_dates: RentalDateReport | None,
+    canonical_offers: object,
 ) -> PricingReadinessReport:
     """Combine every foundational gate with the location policy (all must pass).
 
@@ -613,6 +622,17 @@ def assess_pricing_readiness(
     ``rental_date_rules_unavailable``, and each violation keeps its own value.
     Excluding invalid rows never satisfies it; same-day and long valid rentals
     never block.
+    ``canonical_offers`` (:func:`~ql2_sixt_canada_analysis.canonical_offers.assess_canonical_offers`)
+    is the offer-level assessment of the pricing-eligible population:
+    ``None`` is ``canonical_offer_assessment_missing`` and any unassessable
+    in-scope row is ``canonical_offers_unassessable``. While an approved alias
+    merges two source streams (``canonical_offer_combination_unresolved``) the
+    blocker is resolved only when the report holds the approved
+    ``CANONICAL_OFFER_COMBINATION`` policy for exactly the alias of the
+    location policy and has no unassessable row; otherwise the blocker stays
+    and the report's blockers are added by value
+    (``canonical_offer_policy_mismatch`` when the policy names other streams
+    or another canonical location).
     ``expected_stream_contract``
     (:func:`~ql2_sixt_canada_analysis.expected_stream_contract.current_expected_stream_contract`)
     must be approved and ``EXHAUSTIVE`` (``expected_stream_authority_unavailable``
@@ -682,12 +702,37 @@ def assess_pricing_readiness(
         raise TypeError("rental_dates must be a RentalDateReport or None")
     reasons.extend([PricingBlocker.RENTAL_DATE_ASSESSMENT_MISSING] if rental_dates is None
                    else [PricingBlocker(b.value) for b in rental_dates.blocking_reasons])
+    reasons = _canonical_offer_blockers(reasons, canonical_offers, location_policy)
     reasons.extend(location_policy.blocking_reasons)
     return PricingReadinessReport(blocking_reasons=tuple(dict.fromkeys(reasons)), location_policy=location_policy,
                                   completeness=completeness, scheduled_coverage=scheduled_coverage,
                                   job_detail_join=job_detail_join, job_linkage=job_linkage,
                                   expected_stream_contract=expected_stream_contract,
-                                  location_authority=location_authority, rental_dates=rental_dates)
+                                  location_authority=location_authority, rental_dates=rental_dates,
+                                  canonical_offers=canonical_offers)
+
+
+def _canonical_offer_blockers(reasons: list[PricingBlocker], report: object,
+                              policy: LocationPolicyReport) -> list[PricingBlocker]:
+    """Resolve the merged-stream blocker only with a ready, matching, authority-backed combination."""
+    from ql2_sixt_canada_analysis.canonical_offers import CanonicalOfferReport
+
+    B = PricingBlocker
+    if report is not None and not isinstance(report, CanonicalOfferReport):
+        raise TypeError("canonical_offers must be a CanonicalOfferReport or None")
+    if report is None:
+        return reasons + [B.CANONICAL_OFFER_ASSESSMENT_MISSING]
+    if B.CANONICAL_OFFER_COMBINATION_UNRESOLVED not in reasons:
+        return reasons + ([B.CANONICAL_OFFERS_UNASSESSABLE] if report.unassessable_rows else [])
+    extra = [B(b.value) for b in report.blocking_reasons]
+    identity = policy.policy
+    if report.policy.available and (identity is None or identity.canonical_location is None or set(
+            report.policy.source_streams) != {tuple(identity.first), tuple(identity.second)}
+            or report.policy.canonical_location != tuple(identity.canonical_location)):
+        extra.append(B.CANONICAL_OFFER_POLICY_MISMATCH)
+    if extra:
+        return reasons + extra
+    return [r for r in reasons if r is not B.CANONICAL_OFFER_COMBINATION_UNRESOLVED]
 
 
 def _location_authority_blockers(report: LocationAuthorityReport | None, policy: LocationPolicyReport,

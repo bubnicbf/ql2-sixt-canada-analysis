@@ -64,3 +64,28 @@ def passing_rental_report(jobs, cars):  # type: ignore[no-untyped-def]
 
     result = link(*with_rental_dates(jobs, cars))
     return assess_rental_dates(result.jobs, result.cars, policy=synthetic_rental_policy(), job_linkage=result.report)
+
+
+#: The project's governed alias keys (approved configuration, not source data), so gate fixtures match the
+#: project identity policy; synthetic alias worlds with other keys see ``canonical_offer_policy_mismatch``.
+SYNTH_OFFER_STREAMS = (("vancouver", "Vancouver Downtown"), ("vancouver", "Vancouver Thurlow"))
+
+
+def synthetic_offer_policy(streams=SYNTH_OFFER_STREAMS, canonical=None):  # type: ignore[no-untyped-def]
+    """An approved synthetic CANONICAL_OFFER_COMBINATION policy (no committed record involved)."""
+    from ql2_sixt_canada_analysis.authority_decisions import CANONICAL_OFFER_IDENTITY_COMPONENTS
+    from ql2_sixt_canada_analysis.canonical_offers import CanonicalOfferPolicy, CanonicalOfferStatus
+
+    streams = tuple(sorted(tuple(s) for s in streams))
+    return CanonicalOfferPolicy(CanonicalOfferStatus.APPROVED, "pricing-authorities-v99", streams,
+                                tuple(canonical or streams[0]), CANONICAL_OFFER_IDENTITY_COMPONENTS,
+                                ("SYNTH-OFFER-REFERENCE",))
+
+
+def passing_canonical_report(policy=None, **counts):  # type: ignore[no-untyped-def]
+    """An empty but ready synthetic canonical-offer report (a readiness gate fixture; no offers)."""
+    from ql2_sixt_canada_analysis.canonical_offers import CanonicalOfferReport
+    from ql2_sixt_canada_analysis.pricing_population import FrameBinding
+
+    return CanonicalOfferReport(policy=policy or synthetic_offer_policy(), binding=FrameBinding(0, 0, "synthetic"),
+                                **counts)

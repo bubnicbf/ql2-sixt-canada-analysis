@@ -164,7 +164,7 @@ def test_history_is_unchanged_and_valid() -> None:
 def test_v4_is_history_and_approves_exactly_nine_decisions() -> None:
     record = load_decision_record(V4)
     assert (record.schema_version, record.record_version, record.supersedes) == (2, 4, "pricing-authorities-v3")
-    assert CURRENT_RECORD_PATH.name == "v7.toml" and load_current_decision_record() != record
+    assert CURRENT_RECORD_PATH.name == "v8.toml" and load_current_decision_record() != record
     approved = {d.id for d in record.decisions if d.is_approved}
     assert approved == set(JOB_IDENTIFIER_DECISIONS) | set(EXPECTED_STREAM_DECISIONS) | set(LOCATION_DECISIONS)
     counts = record.counts()
@@ -290,12 +290,13 @@ def test_checklist_is_regenerated_from_the_current_record() -> None:
     for decision in LOCATION_DECISIONS:
         assert f"`{decision.value}`" in resolved and f"`{decision.value}`" not in requests
     assert GOVERNANCE in resolved
-    assert len([line for line in requests.splitlines() if line.startswith("| `")]) == 4
+    assert requests.startswith("Open requests") and "None: no decision is blocked on external input." in requests
+    assert not [line for line in requests.splitlines() if line.startswith("| `")]       # v8 leaves no request open
 
 
 def test_record_readme_identifies_v5_as_current() -> None:
     readme = (RECORD_DIR / "README.md").read_text(encoding="utf-8")
-    for phrase in ("v4.toml", "v5.toml", "v6.toml", "v7.toml", "current revision", "CONFIRMED_ALIAS", Path(GOVERNANCE).name,
+    for phrase in ("v4.toml", "v5.toml", "v6.toml", "v7.toml", "v8.toml", "current revision", "CONFIRMED_ALIAS", Path(GOVERNANCE).name,
                    Path(SCHEDULE_GOVERNANCE).name):
         assert phrase in readme, phrase
 
@@ -437,7 +438,7 @@ def test_project_policy_is_the_approved_alias_with_authority() -> None:
     assert POLICY == vancouver_policy_from_record(load_current_decision_record(), COV)
     assert POLICY.state is PS.CONFIRMED_ALIAS and (POLICY.first, POLICY.second) == (VAN_DOWN, VAN_THUR)
     assert POLICY.canonical_location == VAN_DOWN and POLICY.scope.is_valid
-    assert POLICY.authority.reference == GOVERNANCE and "pricing-authorities-v7" in POLICY.authority.note
+    assert POLICY.authority.reference == GOVERNANCE and "pricing-authorities-v8" in POLICY.authority.note
     assert dict(POLICY.alias_mapping) == {VAN_DOWN: VAN_DOWN, VAN_THUR: VAN_DOWN}
 
 
@@ -522,8 +523,12 @@ def test_former_blockers_clear_only_with_the_approved_record() -> None:
     cleared = {PB.BRANCH_ROLE_AUTHORITY_UNAVAILABLE, PB.COMPARISON_PAIR_AUTHORITY_UNAVAILABLE,
                PB.LOCATION_POLICY_UNRESOLVED}
     assert not cleared & set(approved.blocking_reasons) and approved.location_roles_and_pairs_ready
-    assert approved.blocking_reasons == (PB.CANONICAL_OFFER_COMBINATION_UNRESOLVED,)   # stays explicit
-    assert not approved.ready
+    assert approved.blocking_reasons == () and approved.ready          # with a ready, matching offer assessment
+    without = assess_pricing_readiness(
+        location_policy=assess_location_policy(POLICY, None, apply_location_policy(c, POLICY)),
+        **(_project_gates(j, c, completeness) | {"canonical_offers": None}))
+    assert without.blocking_reasons == (PB.CANONICAL_OFFER_COMBINATION_UNRESOLVED,
+                                        PB.CANONICAL_OFFER_ASSESSMENT_MISSING)   # stays explicit without one
     v3 = load_decision_record(V3)
     policy3 = vancouver_policy_from_record(v3, COV)
     gates = {"location_authority": location_authority_from_record(v3, CONTRACT, policy3)}
@@ -611,7 +616,8 @@ def test_baseline_reports_the_location_authority_in_aggregate() -> None:
     markdown = render_baseline_markdown(baseline, commit="abc1234", date="2026-10-06")
     assert "vancouver / Vancouver Int Airport versus vancouver / Vancouver Downtown" in markdown
     assert "vancouver / Vancouver Thurlow" in markdown and "versus vancouver / Vancouver Thurlow" not in markdown
-    assert "SYNTH" not in markdown and "**NOT PRICING READY**" in markdown
+    assert "SYNTH" not in markdown
+    assert ("**PRICING READY**" if baseline.pricing_ready else "**NOT PRICING READY**") in markdown
     json.dumps(baseline.to_dict())
 
 
@@ -632,4 +638,4 @@ def test_documentation_describes_the_approved_identity() -> None:
                    "governed_source_stream_missing"):
         assert phrase in readme, phrase
     assert "Until then no Vancouver pricing conclusion" not in readme
-    assert "The dataset is **not** pricing ready" in readme
+    assert "The dataset is **pricing ready** under the current authority record" in readme

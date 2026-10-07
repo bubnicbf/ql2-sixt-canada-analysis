@@ -109,7 +109,7 @@ def _finish(data: dict) -> dict:
 def proposed_record() -> dict:
     return _finish({"schema_version": 1, "record_version": 1, "record_id": "pricing-authorities-v1",
                     "created": dt.date(2000, 1, 1), "scope": "SYNTH scope", "source_commit": "abcdef1",
-                    "decisions": [_proposed_entry(d) for d in DecisionId]})
+                    "decisions": [_proposed_entry(d) for d in ad.required_decisions(1)]})
 
 
 def approved_record() -> dict:
@@ -140,9 +140,9 @@ def with_resolution(decision: DecisionId, **changes: object) -> dict:
 def test_committed_v1_validates_with_every_decision_proposed_and_blocking() -> None:
     record = load_decision_record(V1)
     assert record.record_id == "pricing-authorities-v1" and record.supersedes is None
-    assert [d.id for d in record.decisions] == list(DecisionId)
-    assert record.counts()[DecisionStatus.PROPOSED] == len(DecisionId) == 22
-    assert record.external_inputs == tuple(DecisionId)
+    assert [d.id for d in record.decisions] == list(ad.required_decisions(1))
+    assert record.counts()[DecisionStatus.PROPOSED] == len(ad.required_decisions(1)) == 22
+    assert record.external_inputs == ad.required_decisions(1)
     for decision in record.decisions:
         assert decision.blocking_external_input and not decision.authority
         assert decision.resolution is None and decision.rejected is None
@@ -243,7 +243,7 @@ def test_rejected_decision_needs_authority_and_rejection_statement() -> None:
 
 
 def test_versions_ids_and_supersession_fail_closed() -> None:
-    for change, needle in ((dict(schema_version=4), "schema_version"), (dict(schema_version="1"), "schema_version"),
+    for change, needle in ((dict(schema_version=5), "schema_version"), (dict(schema_version="1"), "schema_version"),
                            (dict(schema_version=0), "schema_version"),
                            (dict(record_version=0), "record_version"),
                            (dict(record_id="pricing-authorities-v9"), "record_id"),

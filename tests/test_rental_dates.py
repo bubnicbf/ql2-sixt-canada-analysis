@@ -106,11 +106,14 @@ def test_history_is_unchanged_and_valid() -> None:
                    for d in RENTAL)
 
 
-def test_v7_is_current_and_approves_exactly_the_rental_decisions() -> None:
+def test_v7_approves_exactly_the_rental_decisions_and_v8_carries_them() -> None:
     record, v6 = load_decision_record(V7), load_decision_record(V6)
     assert (record.schema_version, record.record_version, record.record_id, record.supersedes) == (
         3, 7, "pricing-authorities-v7", "pricing-authorities-v6")
-    assert CURRENT_RECORD_PATH.name == "v7.toml" and load_current_decision_record() == record
+    assert CURRENT_RECORD_PATH.name == "v8.toml"
+    current = load_current_decision_record()
+    for decision in (D.RENTAL_DATE_VALIDITY, D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS):
+        assert current.decision(decision) == record.decision(decision)
     counts = record.counts()
     assert (counts[DecisionStatus.APPROVED], counts[DecisionStatus.PROPOSED], counts[DecisionStatus.REJECTED]) == (
         18, 4, 0)
@@ -147,7 +150,7 @@ def test_a_missing_governance_reference_fails_closed(tmp_path: Path) -> None:
 
 
 def test_current_policy_is_typed_and_explicitly_unbounded() -> None:
-    assert POLICY is current_rental_date_policy() and POLICY.available and POLICY.record_id == "pricing-authorities-v7"
+    assert POLICY is current_rental_date_policy() and POLICY.available and POLICY.record_id == "pricing-authorities-v8"
     assert (POLICY.source_format, POLICY.pickup_required, POLICY.return_required, POLICY.ordering,
             POLICY.equal_dates_allowed, POLICY.minimum_duration_days, POLICY.maximum_duration_mode,
             POLICY.maximum_duration_days) == ("ISO_8601_DATE", True, True, "RETURN_ON_OR_AFTER_PICKUP", True, 0,
@@ -586,4 +589,4 @@ def test_documentation_describes_the_rental_date_policy() -> None:
     assert "Pickup/return dates have no temporal-contract rules" not in readme
     for phrase in ("v7.toml", "RENTAL_DATE_VALIDITY", "UNBOUNDED"):
         assert phrase in records, phrase
-    assert "The dataset is **not** pricing ready" in readme
+    assert "The dataset is **pricing ready** under the current authority record" in readme

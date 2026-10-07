@@ -24,6 +24,7 @@ from test_readiness import DISTINCT, GATES, gates_for
 
 from ql2_sixt_canada_analysis import authority_decisions as ad
 from ql2_sixt_canada_analysis.authority_decisions import (
+    required_decisions,
     CURRENT_RECORD_PATH,
     JOB_IDENTIFIER_DECISIONS,
     AuthorityKind,
@@ -145,7 +146,7 @@ def test_v1_and_v2_are_unchanged_and_still_valid() -> None:
 def test_v3_is_a_valid_revision_superseding_v2_carried_into_v4_and_respelled_in_v5() -> None:
     record = load_decision_record(V3)
     assert (record.schema_version, record.record_version, record.record_id) == (2, 3, "pricing-authorities-v3")
-    assert record.supersedes == "pricing-authorities-v2" and CURRENT_RECORD_PATH.name == "v7.toml"
+    assert record.supersedes == "pricing-authorities-v2" and CURRENT_RECORD_PATH.name == "v8.toml"
     v4 = load_decision_record(V4)                                  # v4 kept both expected-stream approvals
     for decision in EXPECTED_STREAM_DECISIONS:
         assert v4.decision(decision).resolution == record.decision(decision).resolution
@@ -175,7 +176,7 @@ def test_v3_approves_exactly_the_job_and_expected_stream_decisions() -> None:
         if decision.id not in approved:
             assert decision.status is DecisionStatus.PROPOSED and decision.blocking_external_input
             assert decision.resolution is None and not decision.authority
-    assert set(record.external_inputs) == set(DecisionId) - approved
+    assert set(record.external_inputs) == set(required_decisions(record.schema_version)) - approved
     # The four job-identifier approvals are carried over unchanged from v2.
     v2 = load_decision_record(V2)
     for decision in JOB_IDENTIFIER_DECISIONS:
@@ -468,8 +469,9 @@ def test_exactly_one_healthy_report_per_approved_stream_is_complete():
     report = completeness_of(j, c, streams)
     assert report.complete and report.expected_streams is streams
     pricing = pricing_of(j, c, report)
-    # Every gate under test passes; the aliased Vancouver streams' offer combination stays explicitly unresolved.
-    assert pricing.blocking_reasons == (PB.CANONICAL_OFFER_COMBINATION_UNRESOLVED,)
+    # Every gate under test passes; the aliased Vancouver streams' offer combination is resolved only by a ready,
+    # matching canonical-offer assessment (the synthetic gate fixture).
+    assert pricing.blocking_reasons == () and pricing.ready
     assert pricing.expected_stream_contract_usable and pricing.location_roles_and_pairs_ready
 
 
@@ -626,7 +628,7 @@ def test_baseline_reports_seven_expected_streams_and_a_separate_observed_populat
     # The misspelled observation is a case variant: an unverified alias, never applied.
     assert baseline.expected_stream_health[0].stream_status == LocationStreamStatus.UNVERIFIED_ALIAS.value
     assert sum(h.spelling_variant for h in baseline.observed_stream_health) == 1
-    assert baseline.authority_record_version == 7
+    assert baseline.authority_record_version == 8
     assert ("expected_stream_authority", "approved") in baseline.statuses
     assert ("expected_stream_universe_mode", "exhaustive") in baseline.statuses
     assert {"source_spelling_mismatch", "unexpected_pairs", "expected_pairs_missing"} <= set(baseline.pricing_blockers)

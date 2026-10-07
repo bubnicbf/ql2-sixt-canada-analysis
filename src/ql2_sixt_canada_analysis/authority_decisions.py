@@ -88,6 +88,8 @@ __all__ = [
     "SCHEDULE_ANCHOR_FIELDS",
     "SCHEMA_2_VANCOUVER_GOVERNED_KEYS",
     "SUPPORTED_SCHEMA_VERSIONS",
+    "CANONICAL_OFFER_IDENTITY_COMPONENTS",
+    "required_decisions",
     "city_timezones",
     "governed_vancouver_keys",
     "AuthorityDecisionRecord",
@@ -109,7 +111,7 @@ __all__ = [
 ]
 
 #: Record schema versions this module understands.
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
 #: Schema 1 and 2 records name no governed keys for ``VANCOUVER_LOCATION_IDENTITY``; they
 #: govern these two keys, as spelled when those records were written (history; schema 3
 #: records name their governed keys explicitly in the resolution).
@@ -117,7 +119,7 @@ SCHEMA_2_VANCOUVER_GOVERNED_KEYS: tuple[tuple[str, str], ...] = (("Vancouver", "
 #: Canonical UTC instant text used by schema-3 schedule exceptions (``YYYYMMDDTHHMMSSZ``).
 UTC_INSTANT_PATTERN = re.compile(r"\d{8}T\d{6}Z")
 #: The current committed revision (repository-relative).
-CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v7.toml")
+CURRENT_RECORD_PATH = Path("docs/decisions/pricing_authorities/v8.toml")
 
 
 class DecisionRecordError(ValueError):
@@ -178,6 +180,7 @@ class DecisionId(StrEnum):
     DATE_CLEAN_SEMANTICS = "DATE_CLEAN_SEMANTICS"
     RENTAL_DATE_VALIDITY = "RENTAL_DATE_VALIDITY"
     RENTAL_DATE_PARENT_DETAIL_AGREEMENTS = "RENTAL_DATE_PARENT_DETAIL_AGREEMENTS"
+    CANONICAL_OFFER_COMBINATION = "CANONICAL_OFFER_COMBINATION"   # schema 4 onwards
 
 
 _D, _A = DecisionId, AuthorityKind
@@ -206,7 +209,16 @@ REQUIRED_DECISIONS: Mapping[DecisionId, tuple[tuple[AuthorityKind, ...], bool]] 
     _D.DATE_CLEAN_SEMANTICS: (_CO_SUP, False),
     _D.RENTAL_DATE_VALIDITY: ((_A.COLLECTION_OWNER, _A.BUSINESS_OWNER), True),
     _D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS: (_CO_SUP, False),
+    _D.CANONICAL_OFFER_COMBINATION: ((_A.COLLECTION_OWNER, _A.BUSINESS_OWNER), True),
 })
+
+#: Decisions introduced by a schema version (absent from - and refused in - older schemas).
+_INTRODUCED_IN_SCHEMA: Mapping[DecisionId, int] = MappingProxyType({_D.CANONICAL_OFFER_COMBINATION: 4})
+
+
+def required_decisions(schema_version: int) -> tuple[DecisionId, ...]:
+    """The decisions a record of ``schema_version`` must contain (record order)."""
+    return tuple(d for d in DecisionId if _INTRODUCED_IN_SCHEMA.get(d, 1) <= schema_version)
 
 _PARENT, _DETAIL = JOB_DETAIL_RELATIONSHIP.parent, JOB_DETAIL_RELATIONSHIP.detail
 #: The six rental-date fields whose relationships must be approved pair by pair.
@@ -310,18 +322,30 @@ class AuthorityDecisionRecord:
     external_inputs: tuple[DecisionId, ...]
 
     def decision(self, decision_id: DecisionId) -> DecisionEntry:
-        return next(d for d in self.decisions if d.id is decision_id)
+        """The entry for ``decision_id``; ``KeyError`` when the record's schema does not define it."""
+        for entry in self.decisions:
+            if entry.id is decision_id:
+                return entry
+        raise KeyError(DecisionId(decision_id).value)
+
+    def has_decision(self, decision_id: DecisionId) -> bool:
+        """Whether this record (its schema) defines ``decision_id``."""
+        return any(d.id is DecisionId(decision_id) for d in self.decisions)
 
     def counts(self) -> Mapping[DecisionStatus, int]:
         return MappingProxyType({s: sum(d.status is s for d in self.decisions) for s in DecisionStatus})
 
     def approved_resolution(self, decision_id: DecisionId) -> Mapping[str, object] | None:
         """The resolution for production use - only for an APPROVED decision; ``None`` otherwise."""
+        if not self.has_decision(decision_id):
+            return None
         entry = self.decision(DecisionId(decision_id))
         return entry.resolution if entry.status is DecisionStatus.APPROVED else None
 
     def approved_authority(self, decision_id: DecisionId) -> AuthorityReference | None:
         """The (first) authority reference of an APPROVED decision; ``None`` otherwise."""
+        if not self.has_decision(decision_id):
+            return None
         entry = self.decision(DecisionId(decision_id))
         return entry.authority[0] if entry.status is DecisionStatus.APPROVED and entry.authority else None
 
@@ -413,9 +437,11 @@ def parse_decision_record(data: Mapping[str, object], *,
                 _check_local_reference(authority.reference, repository_root, entry.id.value)
         if entry.id in seen:
             raise DecisionRecordError(f"duplicate decision {entry.id.value}")
+        if entry.id not in required_decisions(data["schema_version"]):  # type: ignore[arg-type]
+            raise DecisionRecordError(f"{entry.id.value}: not defined in this schema_version")
         seen.append(entry.id)
         entries.append(entry)
-    missing = [d.value for d in DecisionId if d not in seen]
+    missing = [d.value for d in required_decisions(schema_version) if d not in seen]
     if missing:
         raise DecisionRecordError("missing required decisions: " + ", ".join(missing))
     order = list(DecisionId)
@@ -867,6 +893,10 @@ def _date_semantics(res, by_id, d):  # type: ignore[no-untyped-def]
         _approved(by_id, _D.REPORTING_DAY_TIMEZONE, d.value)
 
 
+def _schema4_only(res, by_id, d):  # type: ignore[no-untyped-def]
+    raise DecisionRecordError(f"{d.value}: defined from schema_version 4")
+
+
 def _rental_validity(res, by_id, d):  # type: ignore[no-untyped-def]
     _keys(res, {"date_format", "pickup_before_return_required", "equal_dates_allowed",
                 "minimum_duration_days", "maximum_duration_days"}, d.value)
@@ -918,6 +948,7 @@ _RESOLVERS = {
     _D.DATE_CLEAN_SEMANTICS: _date_semantics,
     _D.RENTAL_DATE_VALIDITY: _rental_validity,
     _D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS: _rental_agreements,
+    _D.CANONICAL_OFFER_COMBINATION: _schema4_only,
 }
 assert set(_RESOLVERS) == set(DecisionId) == set(REQUIRED_DECISIONS)
 
@@ -1120,15 +1151,32 @@ def _v3_exceptions(res, by_id, d):  # type: ignore[no-untyped-def]
     for item in raw:
         if not isinstance(item, Mapping):
             raise DecisionRecordError(f"{d.value}: each exception must be a table")
-        _keys(item, {"stream", "period_start_utc", "failure", "reason", "authority_kind", "reference",
-                     "schedule_version"}, d.value)
-        key = _stream_key(item.get("stream"), f"{d.value}: exception stream")
-        if key not in _universe(by_id, d.value):
-            raise DecisionRecordError(f"{d.value}: an exception names a stream outside the approved universe")
+        if item.get("failure") == "INCOMPLETE_PARENT_CAPTURE":
+            # A whole parent collection execution: one exact city, every approved stream of that city.
+            _keys(item, {"city", "streams", "period_start_utc", "failure", "reason", "authority_kind",
+                         "reference", "schedule_version"}, d.value)
+            city = item.get("city")
+            streams = item.get("streams")
+            if not isinstance(streams, tuple) or not streams:
+                raise DecisionRecordError(f"{d.value}: a parent-capture exclusion names its streams")
+            keys = [_stream_key(k, f"{d.value}: exclusion stream") for k in streams]
+            universe = _universe(by_id, d.value)
+            if (not isinstance(city, str) or len(set(keys)) != len(keys)
+                    or set(keys) != {k for k in universe if k[0] == city}):
+                raise DecisionRecordError(
+                    f"{d.value}: a parent-capture exclusion names an approved city and exactly all its streams")
+            key = (city, "*")
+        else:
+            _keys(item, {"stream", "period_start_utc", "failure", "reason", "authority_kind", "reference",
+                         "schedule_version"}, d.value)
+            key = _stream_key(item.get("stream"), f"{d.value}: exception stream")
+            if key not in _universe(by_id, d.value):
+                raise DecisionRecordError(f"{d.value}: an exception names a stream outside the approved universe")
         if not isinstance(item.get("period_start_utc"), str) or not UTC_INSTANT_PATTERN.fullmatch(
                 item["period_start_utc"]):
             raise DecisionRecordError(f"{d.value}: period_start_utc must be YYYYMMDDTHHMMSSZ")
-        _choice(item, "failure", {"STREAM_ABSENT_FROM_CAPTURE", "PARENT_JOB_ABSENT"}, d.value)
+        _choice(item, "failure", {"STREAM_ABSENT_FROM_CAPTURE", "PARENT_JOB_ABSENT", "INCOMPLETE_PARENT_CAPTURE"},
+                d.value)
         _text(item.get("reason"), f"{d.value}: exception reason")
         _choice(item, "authority_kind", {k.value for k in AuthorityKind}, d.value)
         if not isinstance(item.get("reference"), str) or not _REFERENCE_PATH.fullmatch(item["reference"]):
@@ -1139,6 +1187,9 @@ def _v3_exceptions(res, by_id, d):  # type: ignore[no-untyped-def]
         if marker in seen:
             raise DecisionRecordError(f"{d.value}: duplicate exception")
         seen.add(marker)
+    excluded = {(k[0], period) for k, period, _ in seen if k[1] == "*"}
+    if any(k[1] != "*" and (k[0], period) in excluded for k, period, _ in seen):
+        raise DecisionRecordError(f"{d.value}: a stream-period cannot be both excused and excluded")
 
 
 #: The only ordering the temporal contract implements: a detail row's scrape time is not after its
@@ -1227,8 +1278,84 @@ _RESOLVERS_V3 = {
 }
 
 
+# --------------------------------------- schema 4: reporting day, date semantics, offers
+
+#: The exact semantic identity of a canonical offer (``CANONICAL_OFFER_COMBINATION``).
+CANONICAL_OFFER_IDENTITY_COMPONENTS = (
+    "canonical_location", "scheduled_capture_period", "pickup_date", "return_date",
+    "approved_product_identity", "normalized_price", "price_basis", "currency",
+)
+_REPORTING_DAY_FIELD = f"{_PARENT}.finished_at"
+
+
+def _v4_reporting_source(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"field"}, d.value)
+    if _field_ref(res, "field", _TIMESTAMP_FIELDS, d.value) != _REPORTING_DAY_FIELD:
+        raise DecisionRecordError(f"{d.value}: the reporting day derives from the parent finish time")
+    _approved(by_id, _D.FINISHED_AT_TIMEZONE, d.value)
+
+
+def _v4_reporting_timezone(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"mode", "city_timezones"}, d.value)
+    _choice(res, "mode", {"PARENT_CITY"}, d.value)
+    _v3_city_timezones({"city_timezones": res.get("city_timezones")}, by_id, d)
+
+
+def _v4_date_semantics(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"meaning", "derivation"}, d.value)
+    _text(res.get("meaning"), f"{d.value}: meaning")
+    allowed = {"REPORTING_DAY", "SOURCE_SUPPLIED_UNDERIVED"}
+    if d is _D.DATE_CLEAN_SEMANTICS:
+        allowed.add("RETIRED_FROM_PRICING")
+    if _choice(res, "derivation", allowed, d.value) == "REPORTING_DAY":
+        _approved(by_id, _D.REPORTING_DAY_SOURCE, d.value)
+        _approved(by_id, _D.REPORTING_DAY_TIMEZONE, d.value)
+
+
+def _v4_canonical_offers(res, by_id, d):  # type: ignore[no-untyped-def]
+    _keys(res, {"alias_policy", "source_streams", "canonical_location", "validation", "union", "identity",
+                "exact_duplicates", "price_variation", "provenance", "unassessable"}, d.value)
+    _choice(res, "alias_policy", {"SEPARATE_REQUIRED_SOURCE_STREAMS"}, d.value)
+    _choice(res, "validation", {"ALL_FOUNDATIONAL_CONTROLS_BEFORE_COMBINATION"}, d.value)
+    _choice(res, "union", {"ORDER_INDEPENDENT_NO_STREAM_PRIORITY"}, d.value)
+    _choice(res, "exact_duplicates", {"ONE_CANONICAL_ROW_WITH_PROVENANCE"}, d.value)
+    _choice(res, "price_variation", {"RETAIN_SEPARATE_AND_FLAG"}, d.value)
+    _choice(res, "unassessable", {"FAIL_CLOSED"}, d.value)
+    identity = res.get("identity")
+    if (not isinstance(identity, tuple) or len(set(identity)) != len(identity)
+            or set(identity) != set(CANONICAL_OFFER_IDENTITY_COMPONENTS)):
+        raise DecisionRecordError(f"{d.value}: identity must list exactly the approved identity components")
+    provenance = res.get("provenance")
+    if (not isinstance(provenance, tuple) or len(set(provenance)) != len(provenance) or set(provenance) != {
+            "source_location_labels", "contributing_observation_count", "unique_or_deduplicated"}):
+        raise DecisionRecordError(f"{d.value}: provenance must list exactly the approved provenance fields")
+    sources = _streams(res, "source_streams", d.value)
+    canonical = _stream_key(res.get("canonical_location"), f"{d.value}: canonical_location")
+    identity_entry = _approved(by_id, _D.VANCOUVER_LOCATION_IDENTITY, d.value)
+    alias = identity_entry.resolution
+    if alias.get("state") != "CONFIRMED_ALIAS":
+        raise DecisionRecordError(f"{d.value}: combination requires a confirmed alias")
+    if set(sources) != set(_governed_keys(alias)) or canonical != _stream_key(
+            alias.get("canonical_location"), d.value):
+        raise DecisionRecordError(f"{d.value}: streams and canonical location must match the approved alias")
+    if not set(sources) <= _universe(by_id, d.value):
+        raise DecisionRecordError(f"{d.value}: every source stream must stay a required expected stream")
+
+
+_RESOLVERS_V4 = {
+    **_RESOLVERS_V3,
+    _D.REPORTING_DAY_SOURCE: _v4_reporting_source,
+    _D.REPORTING_DAY_TIMEZONE: _v4_reporting_timezone,
+    _D.SCRAPE_DATE_SEMANTICS: _v4_date_semantics,
+    _D.DATE_CLEAN_SEMANTICS: _v4_date_semantics,
+    _D.CANONICAL_OFFER_COMBINATION: _v4_canonical_offers,
+}
+
+
 def _resolver(schema_version: int, decision: DecisionId):  # type: ignore[no-untyped-def]
-    """Schema-specific resolution validator (schema 1, 2 and 3 shapes never mix)."""
+    """Schema-specific resolution validator (schema 1, 2, 3 and 4 shapes never mix)."""
+    if schema_version >= 4 and decision in _RESOLVERS_V4:
+        return _RESOLVERS_V4[decision]
     if schema_version >= 3 and decision in _RESOLVERS_V3:
         return _RESOLVERS_V3[decision]
     if schema_version >= 2 and decision in _RESOLVERS_V2:
@@ -1344,14 +1471,19 @@ _RESPONSE_SHAPE = {
     _D.SCRAPED_FINISHED_ORDERING: ("earlier field, later field, whether equality is allowed (schema 3: "
                                    "cars.scraped_at not after jobs.finished_at, on UTC instants)"),
     _D.SCRAPED_FINISHED_TOLERANCE: "non-negative integer and unit (SECONDS or MINUTES or HOURS)",
-    _D.REPORTING_DAY_SOURCE: "a dataset.column reference",
-    _D.REPORTING_DAY_TIMEZONE: "an IANA timezone name",
+    _D.REPORTING_DAY_SOURCE: "a dataset.column reference (schema 4: jobs.finished_at)",
+    _D.REPORTING_DAY_TIMEZONE: ("an IANA timezone name (schema 4: mode PARENT_CITY and an exhaustive map of "
+                                "exact parent-job city to region IANA zone)"),
     _D.SCRAPE_DATE_SEMANTICS: "meaning and derivation (REPORTING_DAY or SOURCE_SUPPLIED_UNDERIVED)",
-    _D.DATE_CLEAN_SEMANTICS: "meaning and derivation (REPORTING_DAY or SOURCE_SUPPLIED_UNDERIVED)",
+    _D.DATE_CLEAN_SEMANTICS: ("meaning and derivation (REPORTING_DAY or SOURCE_SUPPLIED_UNDERIVED; schema 4 also "
+                              "RETIRED_FROM_PRICING)"),
     _D.RENTAL_DATE_VALIDITY: ("date format (schema 3: ISO_8601_DATE), pickup and return requiredness, ordering, "
                               "equality allowed, minimum duration days, maximum-duration mode (UNBOUNDED or BOUNDED)"),
     _D.RENTAL_DATE_PARENT_DETAIL_AGREEMENTS: "for each of cars.job_pickup_date, cars.job_return_date, "
     "cars.pickup_date, cars.return_date: the jobs field it must equal",
+    _D.CANONICAL_OFFER_COMBINATION: ("schema 4: alias policy, source streams and canonical location (matching the "
+                                     "approved alias), validation before combination, order-independent union, "
+                                     "identity components, duplicate, variation, provenance and fail-closed rules"),
 }
 
 
@@ -1371,6 +1503,8 @@ def render_authority_request_checklist(record: AuthorityDecisionRecord) -> str:
             refs = ", ".join(dict.fromkeys(f"`{a.reference}`" for a in entry.authority))
             lines.append(f"| `{entry.id.value}` | {entry.status.value} | {kinds} | {refs} |")
         lines.append("")
+    if not any(d.blocking_external_input for d in record.decisions):
+        lines += ["## Open requests", "", "None: no decision is blocked on external input.", ""]
     titles = {"collection_owner_or_supplier": "Collection owner or supplier", "business_owner": "Business owner",
               "joint": "Joint decision (collection owner and business owner)"}
     for label, entries in _groups(record):

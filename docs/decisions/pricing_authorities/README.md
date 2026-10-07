@@ -4,8 +4,9 @@ This directory holds the versioned record of every **external decision** the
 dataset needs before it can be called pricing ready: job-identifier rules,
 the expected stream universe and its spelling, location roles and comparison
 pairs, the Vancouver location identity, the collection schedule, timestamp and
-reporting-day semantics, and rental-date validity and parent/detail
-agreements (22 atomic decisions, `DecisionId` in
+reporting-day semantics, rental-date validity and parent/detail agreements,
+and the canonical offer combination (22 atomic decisions in schemas 1 to 3,
+23 from schema 4, `DecisionId` and `required_decisions` in
 `src/ql2_sixt_canada_analysis/authority_decisions.py`).
 
 | File | Purpose |
@@ -16,8 +17,9 @@ agreements (22 atomic decisions, `DecisionId` in
 | [`v4.toml`](v4.toml) | Revision 4 (schema 2, historical, unchanged) - supersedes v3; keeps the six earlier approvals and approves `LOCATION_ROLE_ASSIGNMENTS` and `VALID_LOCATION_COMPARISON_PAIRS` (business owner) and `VANCOUVER_LOCATION_IDENTITY` (`CONFIRMED_ALIAS`, canonical `Vancouver / Downtown` in the display-style spelling of that revision; collection owner); the other 13 remain `PROPOSED`. |
 | [`v5.toml`](v5.toml) | Revision 5 (schema 3, historical, unchanged) - supersedes v4; keeps the four job-identifier approvals, supersedes the display-style source spellings with the exact raw source keys (`calgary / Calgary Downtown`, ...; universe, roles, pairs and alias unchanged in meaning) and approves `SCHEDULE_CAPTURE_TIMESTAMP`, `SCHEDULE_EXPECTED_PERIODS`, `SCHEDULE_SHARING_MODEL` (`PER_STREAM`), `SCHEDULE_EXCEPTIONS` (`NO_EXCEPTIONS`; joint) and the per-city `FINISHED_AT_TIMEZONE`; the other 8 remain `PROPOSED`. |
 | [`v6.toml`](v6.toml) | Revision 6 (schema 3, historical, unchanged) - supersedes v5; keeps every earlier approval unchanged (the `FINISHED_AT_TIMEZONE` map gains a confirming reference) and approves `SCRAPED_FINISHED_ORDERING` (`cars.scraped_at` earlier than or equal to `jobs.finished_at`; collection owner) and `SCRAPED_FINISHED_TOLERANCE` (zero seconds; collection owner and business owner); the other 6 remain `PROPOSED`. |
-| [`v7.toml`](v7.toml) | Revision 7 (schema 3, **current revision**) - supersedes v6; keeps every earlier approval unchanged and approves `RENTAL_DATE_VALIDITY` (`ISO_8601_DATE`, both dates required, return on or after pickup, minimum 0 days, `UNBOUNDED` maximum; collection owner and business owner) and `RENTAL_DATE_PARENT_DETAIL_AGREEMENTS` (four pickup-to-pickup and return-to-return mappings; collection owner); the other 4 remain `PROPOSED`. |
-| [`authority_request_checklist.md`](authority_request_checklist.md) | Generated from the current revision: the resolved decisions with their references, and neutral questions for the 4 decisions still blocked on external input. |
+| [`v7.toml`](v7.toml) | Revision 7 (schema 3, historical, unchanged) - supersedes v6; keeps every earlier approval unchanged and approves `RENTAL_DATE_VALIDITY` (`ISO_8601_DATE`, both dates required, return on or after pickup, minimum 0 days, `UNBOUNDED` maximum; collection owner and business owner) and `RENTAL_DATE_PARENT_DETAIL_AGREEMENTS` (four pickup-to-pickup and return-to-return mappings; collection owner); the other 4 remain `PROPOSED`. |
+| [`v8.toml`](v8.toml) | Revision 8 (**schema 4**, **current revision**) - supersedes v7; keeps every earlier approval, supersedes the `NO_EXCEPTIONS` resolution of `SCHEDULE_EXCEPTIONS` with one `INCOMPLETE_PARENT_CAPTURE` exclusion (joint), approves `REPORTING_DAY_SOURCE` and `REPORTING_DAY_TIMEZONE` (business owner), `SCRAPE_DATE_SEMANTICS` and `DATE_CLEAN_SEMANTICS` (collection owner) and the new `CANONICAL_OFFER_COMBINATION` (joint); no decision remains `PROPOSED`. |
+| [`authority_request_checklist.md`](authority_request_checklist.md) | Generated from the current revision: the resolved decisions with their references, and neutral questions for any decision still blocked on external input (none in v8). |
 | [`../governance/rental-date-validity-and-agreement-governance-v1-2026-10-06.md`](../governance/rental-date-validity-and-agreement-governance-v1-2026-10-06.md) | Durable authority reference for the rental-date validity and parent/detail agreement approvals (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
 | [`../governance/job-identifier-governance-2026-10-06.md`](../governance/job-identifier-governance-2026-10-06.md) | Durable authority reference for the job-identifier approvals (collection-governance outcome supplied by the repository owner, recorded 2026-10-06). |
 | [`../governance/expected-stream-governance-2026-10-06.md`](../governance/expected-stream-governance-2026-10-06.md) | Durable authority reference for the expected-stream approvals (direct written decisions supplied by the repository owner, recorded 2026-10-06). |
@@ -205,7 +207,7 @@ and `ql2_sixt_canada_analysis.temporal`.
 
 ## Revision 7: rental-date validity and parent/detail agreements
 
-`v7.toml` (the current revision, `CURRENT_RECORD_PATH`; schema 3) references
+`v7.toml` (superseded by v8, unchanged; schema 3) references
 [`rental-date-validity-and-agreement-governance-v1-2026-10-06.md`](../governance/rental-date-validity-and-agreement-governance-v1-2026-10-06.md).
 It keeps every earlier approval unchanged and approves:
 
@@ -232,7 +234,44 @@ coverage are rejected. Schema 1 and 2 shapes are unchanged history. The
 policy is implemented separately, with its own tests, in
 `ql2_sixt_canada_analysis.rental_dates`. `REPORTING_DAY_SOURCE`,
 `REPORTING_DAY_TIMEZONE`, `SCRAPE_DATE_SEMANTICS` and `DATE_CLEAN_SEMANTICS`
-remain `PROPOSED`. Any change to the rental-date policy needs a new revision.
+remain `PROPOSED` in v7. Any change to the rental-date policy needs a new revision.
+
+## Revision 8: governed Calgary exclusion, reporting day and canonical offers
+
+`v8.toml` (the current revision, `CURRENT_RECORD_PATH`; **schema 4**) keeps
+every earlier approval unchanged except one superseded resolution, and
+references three new governance documents:
+
+* [`calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md`](../governance/calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md) -
+  `SCHEDULE_EXCEPTIONS` (joint) moves from `NO_EXCEPTIONS` to
+  `LISTED_EXCEPTIONS` with exactly one item: `city = "calgary"`, both
+  `streams` of that city, `period_start_utc = "20260828T170000Z"`,
+  `failure = "INCOMPLETE_PARENT_CAPTURE"`, a reason, the authority kind, the
+  governance reference and `schedule_version = "per_stream_hourly_v1"`. The
+  incomplete parent capture is analytically null for that one period; raw
+  data is preserved and nothing is deleted. The item names no job identifier;
+  it must match exactly one parent capture. An `INCOMPLETE_PARENT_CAPTURE`
+  item must name exactly every approved stream of its city, and one
+  stream-period cannot be both excused and excluded.
+* [`reporting-day-and-source-date-governance-v1-2026-10-06.md`](../governance/reporting-day-and-source-date-governance-v1-2026-10-06.md) -
+  `REPORTING_DAY_SOURCE` = `jobs.finished_at`; `REPORTING_DAY_TIMEZONE` =
+  `mode = "PARENT_CITY"` with the exhaustive city map (`calgary`
+  `America/Edmonton`, `toronto` `America/Toronto`, `vancouver`
+  `America/Vancouver`); `SCRAPE_DATE_SEMANTICS` derivation `REPORTING_DAY`;
+  `DATE_CLEAN_SEMANTICS` derivation `RETIRED_FROM_PRICING` (new in schema 4,
+  allowed for `DATE_CLEAN_SEMANTICS` only).
+* [`vancouver-canonical-offer-combination-governance-v1-2026-10-06.md`](../governance/vancouver-canonical-offer-combination-governance-v1-2026-10-06.md) -
+  the new schema-4 decision `CANONICAL_OFFER_COMBINATION` (joint: collection
+  owner and business owner; the roles were not named with the decision and
+  are recorded by the repository) with the alias policy
+  (`SEPARATE_REQUIRED_SOURCE_STREAMS`), source streams and canonical location
+  matching the approved Vancouver alias, validation before combination,
+  an order-independent union with no stream priority, the exact identity
+  components, one canonical row per exact duplicate with provenance, price
+  variation retained and flagged, and fail-closed unassessable rows.
+
+Schema 4 validates these shapes; schema 1 to 3 records stay valid without
+`CANONICAL_OFFER_COMBINATION` and are refused if they contain it.
 
 ## Status semantics
 
@@ -295,12 +334,13 @@ python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_au
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v5.toml
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v6.toml
 python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v7.toml
+python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v8.toml
 ```
 
 prints a sanitized status summary (decision ids, statuses, roles and counts
 only) and exits non-zero if the record is invalid. Error messages name
 categories, decision ids and field names only, never record values. The test
-suite validates every committed revision (v1 to v6 byte-for-byte unchanged)
+suite validates every committed revision (v1 to v7 byte-for-byte unchanged)
 and checks that the checklist matches `render_authority_request_checklist`
 for the current revision.
 
@@ -318,5 +358,10 @@ location roles, comparison pairs and Vancouver identity,
 the per-city finish-time zones, `ql2_sixt_canada_analysis.collection_schedule`; for the
 finish-time zones, replication and scrape/finish ordering in the temporal contract,
 `ql2_sixt_canada_analysis.temporal_authority`; for the rental-date validity and
-agreements, `ql2_sixt_canada_analysis.rental_dates`.
+agreements, `ql2_sixt_canada_analysis.rental_dates`; for the reporting day and the
+scrape-date and cleaned-date semantics, `ql2_sixt_canada_analysis.temporal_authority`
+and `ql2_sixt_canada_analysis.temporal`; for the governed parent-capture exclusion,
+`ql2_sixt_canada_analysis.collection_schedule` and
+`ql2_sixt_canada_analysis.pricing_population`; for the offer combination,
+`ql2_sixt_canada_analysis.canonical_offers`.
 `pricing_baseline.baseline_authority_inputs` reads APPROVED decisions only.

@@ -41,7 +41,12 @@ from ql2_sixt_canada_analysis.readiness import (
     validate_pricing_readiness,
 )
 from conftest import join_gates, linked_join
-from stream_contract_fixtures import passing_rental_report, synthetic_contract, synthetic_location_authority
+from stream_contract_fixtures import (
+    passing_canonical_report,
+    passing_rental_report,
+    synthetic_contract,
+    synthetic_location_authority,
+)
 from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
 from ql2_sixt_canada_analysis.job_linkage import JobLinkageBlocker
 from ql2_sixt_canada_analysis.stability import VehicleStabilityStatus, assess_vehicle_attribute_stability
@@ -118,7 +123,7 @@ def scheduled_frames():  # type: ignore[no-untyped-def]
 #: identity policies) produce; tests about other gates compare blockers without them (core_blockers).
 LOCATION_AUTHORITY_DETAIL = frozenset({B.COMPARISON_PAIRS_INVALID, B.BRANCH_ROLES_NOT_EXACT,
                                        B.COMPARISON_PAIR_IDENTITY_UNRESOLVED, B.CANONICAL_OFFER_COMBINATION_UNRESOLVED,
-                                       B.LOCATION_AUTHORITY_POLICY_MISMATCH})
+                                       B.LOCATION_AUTHORITY_POLICY_MISMATCH, B.CANONICAL_OFFER_POLICY_MISMATCH})
 
 
 def core_blockers(report):  # type: ignore[no-untyped-def]
@@ -169,11 +174,13 @@ GATES = dict(completeness=COMPLETE, key_contracts_valid=True, one_to_many_contra
              temporal_fields_trusted=True, vehicle_stability=STABLE, scheduled_coverage=SCHEDULED_OK,
              job_detail_join=JOIN_OK, job_linkage=LINKAGE_OK, expected_stream_contract=synthetic_contract(SYNTH_COV),
              location_authority=synthetic_location_authority(synthetic_contract(SYNTH_COV), SYNTH_ROLES, SYNTH_PAIRS),
-             rental_dates=passing_rental_report(*scheduled_frames()))
+             rental_dates=passing_rental_report(*scheduled_frames()),
+             canonical_offers=passing_canonical_report())
 FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE,
                                              "scheduled_coverage": None, "job_detail_join": None,
                                              "job_linkage": None, "expected_stream_contract": None,
-                                             "location_authority": None, "rental_dates": None}
+                                             "location_authority": None, "rental_dates": None,
+                                             "canonical_offers": None}
 
 
 def evidence(status: CS) -> LocationStreamComparisonReport:
@@ -197,6 +204,9 @@ def frame(labels: list[tuple[str, ...]]) -> pd.DataFrame:
 
 
 SCOPE_BLOCKERS = {B(d.value) for d in LocationPolicyScopeDefect}
+# Detailed canonical-offer blockers (a missing report reports only canonical_offer_assessment_missing).
+OFFER_DETAIL = {B.CANONICAL_OFFER_POLICY_UNAVAILABLE, B.CANONICAL_OFFERS_UNASSESSABLE,
+                B.CANONICAL_OFFER_POLICY_MISMATCH}
 # Detailed schedule/join blockers (a missing assessment reports only its own "missing" blocker).
 SCHEDULE_AND_JOIN_DETAIL = ({B(b.value) for b in ScheduledCoverageBlocker} | {B(b.value) for b in JobDetailJoinBlocker}
                             | {B(b.value) for b in ScheduleCoverageBlocker}
@@ -603,7 +613,7 @@ def test_all_failures_are_reported_together():
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(UNRESOLVED),
                                          **(FAILING | {"vehicle_stability": UNSTABLE_AND_PARTIAL,
                                                        "completeness": STREAMS_AND_SCOPE_INCOMPLETE}))
-    assert set(readiness.blocking_reasons) == set(B) - SCOPE_BLOCKERS - SCHEDULE_AND_JOIN_DETAIL - {
+    assert set(readiness.blocking_reasons) == set(B) - SCOPE_BLOCKERS - SCHEDULE_AND_JOIN_DETAIL - OFFER_DETAIL - {
                                                         B.ALIAS_CANONICALIZATION_NOT_APPLIED,
                                                         B.IDENTITY_EVIDENCE_CONFLICT,
                                                         B.VEHICLE_STABILITY_UNAVAILABLE,

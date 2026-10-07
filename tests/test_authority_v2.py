@@ -76,8 +76,8 @@ def test_v2_validates_under_schema_2_and_supersedes_v1() -> None:
     assert (record.schema_version, record.record_version, record.record_id) == (2, 2, "pricing-authorities-v2")
     assert record.supersedes == "pricing-authorities-v1" and record.created == dt.date(2026, 10, 6)
     assert re.fullmatch(r"[0-9a-f]{40}", record.source_commit)
-    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v7.toml"   # superseded by v3-v7
-    assert {1, 2, 3} == ad.SUPPORTED_SCHEMA_VERSIONS
+    assert CURRENT_RECORD_PATH.as_posix() == "docs/decisions/pricing_authorities/v8.toml"   # superseded by v3-v8
+    assert {1, 2, 3, 4} == ad.SUPPORTED_SCHEMA_VERSIONS
 
 
 def test_exactly_the_four_job_identifier_decisions_are_approved() -> None:
@@ -90,7 +90,7 @@ def test_exactly_the_four_job_identifier_decisions_are_approved() -> None:
             assert not decision.blocking_external_input and decision.resolution is not None
         else:
             assert decision.blocking_external_input and decision.resolution is None and not decision.authority
-    assert set(record.external_inputs) == set(DecisionId) - JOB and len(record.external_inputs) == 18
+    assert set(record.external_inputs) == set(ad.required_decisions(2)) - JOB and len(record.external_inputs) == 18
     raw = v2()
     assert raw["summary"] == {"proposed": 18, "approved": 4, "rejected": 0}
     assert not JOB & set(raw["external_inputs"])
@@ -236,7 +236,7 @@ def test_v2_produces_the_expected_typed_policy() -> None:
     assert [a.kind for a in policy.authority] == [AuthorityKind.COLLECTION_OWNER]
     assert policy.authority[0].reference == GOVERNANCE
     current = load_job_linkage_policy()                                         # the committed current record (v6)
-    assert current is not None and current.record_id == "pricing-authorities-v7"
+    assert current is not None and current.record_id == "pricing-authorities-v8"
     assert {f: getattr(current, f) for f in ("authority", "semantics", "legacy_decimal_zero_repair",
                                              "legacy_offer_position_repair")} == {
         f: getattr(policy, f) for f in ("authority", "semantics", "legacy_decimal_zero_repair",

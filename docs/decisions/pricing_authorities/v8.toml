@@ -1,0 +1,620 @@
+# Pricing-authority decision record, revision 8 (schema 4).
+# Validate: python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v8.toml
+# Supersedes revision 7 (kept unchanged). Keeps every earlier approval unchanged except SCHEDULE_EXCEPTIONS, whose
+# NO_EXCEPTIONS resolution is superseded by one listed INCOMPLETE_PARENT_CAPTURE exclusion (calgary, both streams,
+# one period; raw data preserved) from
+# docs/decisions/governance/calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md. APPROVED from
+# docs/decisions/governance/reporting-day-and-source-date-governance-v1-2026-10-06.md: REPORTING_DAY_SOURCE
+# (jobs.finished_at), REPORTING_DAY_TIMEZONE (PARENT_CITY map), SCRAPE_DATE_SEMANTICS (REPORTING_DAY) and
+# DATE_CLEAN_SEMANTICS (RETIRED_FROM_PRICING). New in schema 4 and APPROVED from
+# docs/decisions/governance/vancouver-canonical-offer-combination-governance-v1-2026-10-06.md:
+# CANONICAL_OFFER_COMBINATION (joint). No decision remains PROPOSED. Decisions come from the supplied written
+# decisions, not from observed data.
+
+schema_version = 4
+record_version = 8
+record_id = "pricing-authorities-v8"
+created = 2026-10-06
+scope = "Pricing-readiness prerequisites for the hourly Sixt Canada rate feed (job and detail extracts)."
+source_commit = "d687705bb49c9ec83203aa8741163a9621b52161"
+supersedes = "pricing-authorities-v7"
+
+external_inputs = []
+
+[summary]
+proposed = 0
+approved = 23
+rejected = 0
+
+[[decisions]]
+id = "JOB_ID_DECIMAL_ZERO_EQUIVALENCE"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Is a job identifier written with a trailing decimal-zero suffix the same identifier as the same digits written without it?"
+blocking_external_input = false
+downstream = ["key_contracts_invalid", "one_to_many_invalid", "declared_counts_not_reconciled", "orphan_details_present", "trusted_join_not_ready"]
+
+[[decisions.evidence]]
+kind = "RAW_DATA_OBSERVATION"
+summary = "In the local raw extract the detail-side job identifier is serialized with a decimal-zero suffix that the parent-side identifier lacks; removing that suffix in memory made counts reconcile. This is an observation of the extract, not a supplier or collection-owner rule."
+reference = "docs/investigations/pricing_readiness_baseline.md"
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: collection-governance meeting outcome supplied by the repository owner"
+reference = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
+note = "Recorded in the repository on 2026-10-06. Meeting date, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+equivalence = "LEGACY_DETAIL_EXPORT_REPAIR_ONLY"
+cause = "SPREADSHEET_SERIALIZATION_DEFECT"
+detail_field = "cars.job_id"
+parent_field = "jobs.job_id"
+pattern = "ASCII_DIGITS_THEN_SINGLE_DECIMAL_ZERO"
+match_order = "EXACT_FIRST"
+parent_match = "UNIQUE_REQUIRED"
+offer_position = "NONNEGATIVE_INTEGER_WITH_LEGACY_DECIMAL_ZERO"
+
+[[decisions]]
+id = "JOB_ID_LEADING_ZERO_SIGNIFICANCE"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Are leading zeros in a job identifier significant, so that identifiers differing only in leading zeros are different jobs?"
+blocking_external_input = false
+downstream = ["key_contracts_invalid", "one_to_many_invalid", "declared_counts_not_reconciled", "orphan_details_present", "trusted_join_not_ready"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: collection-governance meeting outcome supplied by the repository owner"
+reference = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
+note = "Recorded in the repository on 2026-10-06. Meeting date, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+leading_zeros_significant = true
+
+[[decisions]]
+id = "JOB_ID_INVALID_NUMERIC_REPRESENTATIONS"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Which textual representations of a job identifier are invalid: a non-zero fractional suffix, scientific notation, a sign, surrounding whitespace, padding, or other numeric forms?"
+blocking_external_input = false
+downstream = ["key_contracts_invalid", "one_to_many_invalid", "declared_counts_not_reconciled", "orphan_details_present", "trusted_join_not_ready"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: collection-governance meeting outcome supplied by the repository owner"
+reference = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
+note = "Recorded in the repository on 2026-10-06. Meeting date, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+semantics = "OPAQUE_TEXT"
+trim_whitespace = false
+case_fold = false
+numeric_parsing = false
+missing_invalid = true
+whitespace_only_invalid = true
+exact_nonblank_match_preserved = true
+unresolved_representations = "BLOCK_LINKAGE"
+
+[[decisions]]
+id = "JOB_ID_RAW_AND_LINKAGE_PRESERVATION"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Must the raw identifier text be preserved unchanged, with any normalized linkage key kept as a separate field?"
+blocking_external_input = false
+downstream = ["key_contracts_invalid", "one_to_many_invalid", "declared_counts_not_reconciled", "orphan_details_present", "trusted_join_not_ready"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: collection-governance meeting outcome supplied by the repository owner"
+reference = "docs/decisions/governance/job-identifier-governance-2026-10-06.md"
+note = "Recorded in the repository on 2026-10-06. Meeting date, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+preserve_raw_identifier = true
+separate_linkage_key = true
+
+[[decisions]]
+id = "EXPECTED_STREAM_UNIVERSE"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "Which [city, location] streams is the collection expected to return, and is that list exhaustive or a minimum?"
+blocking_external_input = false
+downstream = ["expected_stream_authority_unavailable", "expected_stream_universe_not_exhaustive", "expected_streams_not_proven", "data_incomplete"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/expected-stream-governance-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current analyzed dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/expected-stream-governance-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current analyzed dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent schedule versions until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+mode = "EXHAUSTIVE"
+streams = [
+  ["calgary", "Calgary Downtown"],
+  ["calgary", "Calgary Int Airport"],
+  ["toronto", "Toronto Downtown"],
+  ["toronto", "Toronto Int Airport"],
+  ["vancouver", "Vancouver Downtown"],
+  ["vancouver", "Vancouver Int Airport"],
+  ["vancouver", "Vancouver Thurlow"],
+]
+
+[[decisions]]
+id = "EXPECTED_STREAM_SOURCE_SPELLING"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What is the exact source spelling (case, spacing, punctuation) of each expected city and location value?"
+blocking_external_input = false
+downstream = ["expected_stream_authority_unavailable", "source_spelling_mismatch", "expected_streams_not_proven", "data_incomplete"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent schedule versions until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[[decisions.evidence]]
+kind = "ISSUE_OR_REVIEW_NOTE"
+summary = "Supersedes the display-style spellings recorded as exact source keys in revisions 3 and 4 (kept unchanged as history); the corrected exact raw keys were supplied in the collection-schedule governance decision."
+reference = "docs/decisions/governance/expected-stream-governance-2026-10-06.md"
+
+[decisions.resolution]
+streams = [
+  ["calgary", "Calgary Downtown"],
+  ["calgary", "Calgary Int Airport"],
+  ["toronto", "Toronto Downtown"],
+  ["toronto", "Toronto Int Airport"],
+  ["vancouver", "Vancouver Downtown"],
+  ["vancouver", "Vancouver Int Airport"],
+  ["vancouver", "Vancouver Thurlow"],
+]
+
+[[decisions]]
+id = "LOCATION_ROLE_ASSIGNMENTS"
+status = "APPROVED"
+responsible_authority = ["BUSINESS_OWNER"]
+joint = false
+question = "Which role (airport, downtown or other) does each expected location have for pricing analysis?"
+blocking_external_input = false
+downstream = ["branch_role_authority_unavailable", "branch_roles_not_exact"]
+
+[[decisions.evidence]]
+kind = "ISSUE_OR_REVIEW_NOTE"
+summary = "Keys respelled to the corrected exact raw source keys; the decision is otherwise unchanged in meaning (revision 4 keeps the superseded spelling as history)."
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/location-roles-and-identity-governance-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current analyzed dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+assignments = [
+  { stream = ["calgary", "Calgary Downtown"], role = "DOWNTOWN" },
+  { stream = ["calgary", "Calgary Int Airport"], role = "AIRPORT" },
+  { stream = ["toronto", "Toronto Downtown"], role = "DOWNTOWN" },
+  { stream = ["toronto", "Toronto Int Airport"], role = "AIRPORT" },
+  { stream = ["vancouver", "Vancouver Downtown"], role = "DOWNTOWN" },
+  { stream = ["vancouver", "Vancouver Int Airport"], role = "AIRPORT" },
+  { stream = ["vancouver", "Vancouver Thurlow"], role = "DOWNTOWN" },
+]
+
+[[decisions]]
+id = "VALID_LOCATION_COMPARISON_PAIRS"
+status = "APPROVED"
+responsible_authority = ["BUSINESS_OWNER"]
+joint = false
+question = "Which within-city airport and downtown location pairs are valid for price comparison?"
+blocking_external_input = false
+downstream = ["comparison_pair_authority_unavailable", "comparison_pairs_invalid"]
+
+[[decisions.evidence]]
+kind = "ISSUE_OR_REVIEW_NOTE"
+summary = "Keys respelled to the corrected exact raw source keys; the decision is otherwise unchanged in meaning (revision 4 keeps the superseded spelling as history)."
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/location-roles-and-identity-governance-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current analyzed dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+pairs = [
+  { airport = ["calgary", "Calgary Int Airport"], downtown = ["calgary", "Calgary Downtown"] },
+  { airport = ["toronto", "Toronto Int Airport"], downtown = ["toronto", "Toronto Downtown"] },
+  { airport = ["vancouver", "Vancouver Int Airport"], downtown = ["vancouver", "Vancouver Downtown"] },
+]
+
+[[decisions]]
+id = "VANCOUVER_LOCATION_IDENTITY"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Are the governed Vancouver Downtown and Vancouver Thurlow keys the same physical location under two names, or two distinct locations? If the same, which key is canonical?"
+blocking_external_input = false
+downstream = ["vancouver_policy_unresolved", "canonical_offer_combination_unresolved"]
+
+[[decisions.evidence]]
+kind = "ISSUE_OR_REVIEW_NOTE"
+summary = "Keys respelled to the corrected exact raw source keys; the decision is otherwise unchanged in meaning (revision 4 keeps the superseded spelling as history)."
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner (location-identity authority): direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/location-roles-and-identity-governance-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current analyzed dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+state = "CONFIRMED_ALIAS"
+governed_locations = [
+  ["vancouver", "Vancouver Downtown"],
+  ["vancouver", "Vancouver Thurlow"],
+]
+canonical_location = ["vancouver", "Vancouver Downtown"]
+
+[[decisions]]
+id = "SCHEDULE_CAPTURE_TIMESTAMP"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Which timestamp field marks the scheduled capture a row belongs to?"
+blocking_external_input = false
+downstream = ["collection_schedule_unavailable", "scheduled_coverage_incomplete"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent schedule versions until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+field = "jobs.finished_at"
+detail_copy = "cars.job_finished_at"
+detail_observation = "cars.scraped_at"
+
+[[decisions]]
+id = "SCHEDULE_EXPECTED_PERIODS"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What is the collection cadence and phase, and which local window (with explicit boundaries and zone) does each expected stream have?"
+blocking_external_input = false
+downstream = ["collection_schedule_unavailable", "scheduled_coverage_incomplete"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent schedule versions until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+schedule_version = "per_stream_hourly_v1"
+cadence = "PT1H"
+phase = "LOCAL_TOP_OF_HOUR"
+parent_jobs_per_city_period = 1
+streams = [
+  { stream = ["calgary", "Calgary Downtown"], local_start = "2026-08-27T22:00:00", local_end = "2026-08-31T15:00:00", end_inclusive = true },
+  { stream = ["calgary", "Calgary Int Airport"], local_start = "2026-08-27T22:00:00", local_end = "2026-08-31T15:00:00", end_inclusive = true },
+  { stream = ["toronto", "Toronto Downtown"], local_start = "2026-08-27T22:00:00", local_end = "2026-08-31T15:00:00", end_inclusive = true },
+  { stream = ["toronto", "Toronto Int Airport"], local_start = "2026-08-27T22:00:00", local_end = "2026-08-31T15:00:00", end_inclusive = true },
+  { stream = ["vancouver", "Vancouver Downtown"], local_start = "2026-08-27T22:00:00", local_end = "2026-08-31T15:00:00", end_inclusive = true },
+  { stream = ["vancouver", "Vancouver Int Airport"], local_start = "2026-08-27T22:00:00", local_end = "2026-08-31T15:00:00", end_inclusive = true },
+  { stream = ["vancouver", "Vancouver Thurlow"], local_start = "2026-08-27T22:00:00", local_end = "2026-08-31T15:00:00", end_inclusive = true },
+]
+
+[[decisions]]
+id = "SCHEDULE_SHARING_MODEL"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "Is one schedule shared by every stream, or does each stream have its own schedule?"
+blocking_external_input = false
+downstream = ["collection_schedule_unavailable", "scheduled_coverage_incomplete"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent schedule versions until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+mode = "PER_STREAM"
+
+[[decisions]]
+id = "SCHEDULE_EXCEPTIONS"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "Were any scheduled periods cancelled or exempted (for example outages or holidays), and under what documented authority?"
+blocking_external_input = false
+downstream = ["collection_schedule_unavailable", "scheduled_coverage_incomplete", "schedule_exclusion_unmatched", "data_incomplete", "expected_streams_not_proven"]
+
+[[decisions.evidence]]
+kind = "RAW_DATA_OBSERVATION"
+summary = "One Calgary parent capture returned Airport rows but no Downtown rows; the governed exclusion treats that whole capture as analytically null for pricing while every raw row is kept."
+reference = "docs/investigations/missing_expected_location_stream.md"
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+model = "LISTED_EXCEPTIONS"
+
+[[decisions.resolution.exceptions]]
+city = "calgary"
+streams = [["calgary", "Calgary Downtown"], ["calgary", "Calgary Int Airport"]]
+period_start_utc = "20260828T170000Z"
+failure = "INCOMPLETE_PARENT_CAPTURE"
+reason = "The parent capture of this Calgary period returned Airport rows but no Downtown rows; the whole capture is analytically null for pricing, both Calgary streams are excluded for this one period, and raw data is preserved."
+authority_kind = "COLLECTION_OWNER"
+reference = "docs/decisions/governance/calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md"
+schedule_version = "per_stream_hourly_v1"
+
+[[decisions]]
+id = "FINISHED_AT_TIMEZONE"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "In which timezone, per parent-job city, are job finish timestamps recorded?"
+blocking_external_input = false
+downstream = ["temporal_fields_untrusted", "collection_schedule_unavailable", "scheduled_coverage_incomplete"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent schedule versions until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+city_timezones = [
+  { city = "calgary", timezone = "America/Edmonton" },
+  { city = "toronto", timezone = "America/Toronto" },
+  { city = "vancouver", timezone = "America/Vancouver" },
+]
+
+[[decisions]]
+id = "SCRAPED_FINISHED_ORDERING"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What ordering must hold between the detail scrape timestamp and the job finish timestamp, and may they be equal?"
+blocking_external_input = false
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+earlier = "cars.scraped_at"
+later = "jobs.finished_at"
+equal_allowed = true
+
+[[decisions]]
+id = "SCRAPED_FINISHED_TOLERANCE"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "What tolerance, if any, is acceptable when comparing the detail scrape timestamp with the job finish timestamp?"
+blocking_external_input = false
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+tolerance = 0
+unit = "SECONDS"
+
+[[decisions]]
+id = "REPORTING_DAY_SOURCE"
+status = "APPROVED"
+responsible_authority = ["BUSINESS_OWNER"]
+joint = false
+question = "Which field defines the reporting day used for pricing analysis?"
+blocking_external_input = false
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/reporting-day-and-source-date-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+field = "jobs.finished_at"
+
+[[decisions]]
+id = "REPORTING_DAY_TIMEZONE"
+status = "APPROVED"
+responsible_authority = ["BUSINESS_OWNER"]
+joint = false
+question = "In which timezone is the reporting day evaluated?"
+blocking_external_input = false
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/reporting-day-and-source-date-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+mode = "PARENT_CITY"
+city_timezones = [
+  { city = "calgary", timezone = "America/Edmonton" },
+  { city = "toronto", timezone = "America/Toronto" },
+  { city = "vancouver", timezone = "America/Vancouver" },
+]
+
+[[decisions]]
+id = "SCRAPE_DATE_SEMANTICS"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What does the scrape date field mean, and is it derived from a timestamp or supplied as-is by the source?"
+blocking_external_input = false
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/reporting-day-and-source-date-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+meaning = "The parent reporting day: the local calendar date of the parent finish instant in the parent city zone, repeated on detail rows; parsed strictly as an ISO calendar date and never repaired."
+derivation = "REPORTING_DAY"
+
+[[decisions]]
+id = "DATE_CLEAN_SEMANTICS"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "What does the cleaned date field mean, and is it derived from a timestamp or supplied as-is by the source?"
+blocking_external_input = false
+downstream = ["temporal_fields_untrusted"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/reporting-day-and-source-date-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+meaning = "Retired from pricing: preserved and reported for presence and parse quality only; never a reporting day, grouping or trust input and never rewritten."
+derivation = "RETIRED_FROM_PRICING"
+
+[[decisions]]
+id = "RENTAL_DATE_VALIDITY"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "What makes a pickup and return date valid: format, ordering, whether they may be equal, and minimum and maximum rental duration?"
+blocking_external_input = false
+downstream = ["rental_date_rules_unavailable", "rental_date_required_value_missing", "rental_date_format_invalid", "rental_date_ordering_invalid", "rental_date_parent_detail_mismatch", "rental_date_agreement_unassessable"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/rental-date-validity-and-agreement-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/rental-date-validity-and-agreement-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+date_format = "ISO_8601_DATE"
+pickup_required = true
+return_required = true
+ordering = "RETURN_ON_OR_AFTER_PICKUP"
+equal_dates_allowed = true
+minimum_duration_days = 0
+maximum_duration_mode = "UNBOUNDED"
+
+[[decisions]]
+id = "RENTAL_DATE_PARENT_DETAIL_AGREEMENTS"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "SUPPLIER"]
+joint = false
+question = "For each of the detail fields job_pickup_date, job_return_date, pickup_date and return_date, which job-level date field (pickup_date or return_date) must it equal?"
+blocking_external_input = false
+downstream = ["rental_date_rules_unavailable", "rental_date_required_value_missing", "rental_date_format_invalid", "rental_date_ordering_invalid", "rental_date_parent_detail_mismatch", "rental_date_agreement_unassessable"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/rental-date-validity-and-agreement-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+agreements = [
+  { source = "jobs.pickup_date", target = "cars.job_pickup_date" },
+  { source = "jobs.return_date", target = "cars.job_return_date" },
+  { source = "jobs.pickup_date", target = "cars.pickup_date" },
+  { source = "jobs.return_date", target = "cars.return_date" },
+]
+
+[[decisions]]
+id = "CANONICAL_OFFER_COMBINATION"
+status = "APPROVED"
+responsible_authority = ["COLLECTION_OWNER", "BUSINESS_OWNER"]
+joint = true
+question = "How are offers of the two aliased Vancouver source streams combined into canonical offers, and which semantic identity defines an exact duplicate?"
+blocking_external_input = false
+downstream = ["canonical_offer_combination_unresolved"]
+
+[[decisions.authority]]
+kind = "COLLECTION_OWNER"
+source = "Collection owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/vancouver-canonical-offer-combination-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[[decisions.authority]]
+kind = "BUSINESS_OWNER"
+source = "Business owner: direct written governance decision supplied by the repository owner"
+reference = "docs/decisions/governance/vancouver-canonical-offer-combination-governance-v1-2026-10-06.md"
+note = "Direct written decision supplied by the repository owner and recorded on 2026-10-06; effective for the current dataset and subsequent collections until superseded. Personal names, participants, organizations and tickets were not supplied."
+
+[decisions.resolution]
+alias_policy = "SEPARATE_REQUIRED_SOURCE_STREAMS"
+source_streams = [["vancouver", "Vancouver Downtown"], ["vancouver", "Vancouver Thurlow"]]
+canonical_location = ["vancouver", "Vancouver Downtown"]
+validation = "ALL_FOUNDATIONAL_CONTROLS_BEFORE_COMBINATION"
+union = "ORDER_INDEPENDENT_NO_STREAM_PRIORITY"
+identity = ["canonical_location", "scheduled_capture_period", "pickup_date", "return_date", "approved_product_identity", "normalized_price", "price_basis", "currency"]
+exact_duplicates = "ONE_CANONICAL_ROW_WITH_PROVENANCE"
+price_variation = "RETAIN_SEPARATE_AND_FLAG"
+provenance = ["source_location_labels", "contributing_observation_count", "unique_or_deduplicated"]
+unassessable = "FAIL_CLOSED"
