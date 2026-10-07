@@ -12,7 +12,7 @@ import dataclasses
 import pandas as pd
 import pytest
 from test_comparison import CITY, COV, DEF, DK, IDDEF, ID_COL, J1, J2, _cars, _jobs, _with_ids, offer, same_both
-from test_completeness import SYNTH_COV, complete_inputs
+from test_completeness import SYNTH_COV, SYNTH_PAIRS, SYNTH_ROLES, complete_inputs
 from test_vehicle_stability import T, V1, V2, frame as stability_frame, obs, two
 
 import ql2_sixt_canada_analysis
@@ -26,6 +26,8 @@ from ql2_sixt_canada_analysis.comparison import (
     TemporalOverlap,
     compare_location_streams,
 )
+from ql2_sixt_canada_analysis.collection_schedule import ScheduleCoverageBlocker
+from ql2_sixt_canada_analysis.rental_dates import RentalDateBlocker
 from ql2_sixt_canada_analysis.readiness import (
     AnalyticalLocationKeys,
     LocationPolicyReport,
@@ -38,7 +40,15 @@ from ql2_sixt_canada_analysis.readiness import (
     assess_pricing_readiness,
     validate_pricing_readiness,
 )
-from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker, assess_job_detail_join_readiness
+from conftest import join_gates, linked_join
+from stream_contract_fixtures import (
+    passing_canonical_report,
+    passing_rental_report,
+    synthetic_contract,
+    synthetic_location_authority,
+)
+from ql2_sixt_canada_analysis.join_readiness import JobDetailJoinBlocker
+from ql2_sixt_canada_analysis.job_linkage import JobLinkageBlocker
 from ql2_sixt_canada_analysis.stability import VehicleStabilityStatus, assess_vehicle_attribute_stability
 from ql2_sixt_canada_analysis.streams import (
     ScheduledCoverageBlocker,
@@ -109,11 +119,46 @@ def scheduled_frames():  # type: ignore[no-untyped-def]
     return datasets.jobs, captured(datasets.cars)
 
 
+#: Location-authority blockers that synthetic contracts without an airport/downtown pair (or with test
+#: identity policies) produce; tests about other gates compare blockers without them (core_blockers).
+LOCATION_AUTHORITY_DETAIL = frozenset({B.COMPARISON_PAIRS_INVALID, B.BRANCH_ROLES_NOT_EXACT,
+                                       B.COMPARISON_PAIR_IDENTITY_UNRESOLVED, B.CANONICAL_OFFER_COMBINATION_UNRESOLVED,
+                                       B.LOCATION_AUTHORITY_POLICY_MISMATCH, B.CANONICAL_OFFER_POLICY_MISMATCH})
+
+
+def core_blockers(report):  # type: ignore[no-untyped-def]
+    """Blocking reasons without the location-authority detail of synthetic test worlds."""
+    return tuple(b for b in report.blocking_reasons if b not in LOCATION_AUTHORITY_DETAIL)
+
+
+def authority_for(coverage):  # type: ignore[no-untyped-def]
+    """Synthetic roles and pairs for ``coverage`` (test configuration only, never production logic).
+
+    Keys whose label names an airport are AIRPORT, all others DOWNTOWN; each
+    airport is paired with the first downtown key of its city that is
+    canonical under the project identity policy. A world without an airport
+    has no pair (the pair set is then invalid).
+    """
+    keys = list(coverage.expected_locations)
+    roles = {k: ("AIRPORT" if "Airport" in k[-1] else "DOWNTOWN") for k in keys}
+    aliased = {VANCOUVER_LOCATION_POLICY.first: VANCOUVER_LOCATION_POLICY.canonical_location,
+               VANCOUVER_LOCATION_POLICY.second: VANCOUVER_LOCATION_POLICY.canonical_location}
+    pairs = []
+    for airport in (k for k in keys if roles[k] == "AIRPORT"):
+        downtown = next((k for k in keys if roles[k] == "DOWNTOWN" and k[0] == airport[0]
+                         and aliased.get(k, k) == k), None)
+        if downtown is not None:
+            pairs.append((airport, downtown))
+    return synthetic_location_authority(synthetic_contract(coverage), roles, tuple(pairs))
+
+
 def gates_for(jobs: pd.DataFrame, cars: pd.DataFrame, coverage, completeness):  # type: ignore[no-untyped-def]
-    """GATES whose schedule coverage and trusted join are assessed for ``coverage`` on these frames."""
+    """GATES whose schedule coverage, trusted join and location authority are assessed for ``coverage``."""
     return GATES | {"completeness": completeness,
                     "scheduled_coverage": scheduled_coverage(frames=(jobs, captured(cars)), coverage=coverage),
-                    "job_detail_join": assess_job_detail_join_readiness(jobs, cars)}
+                    "expected_stream_contract": synthetic_contract(coverage),
+                    "location_authority": authority_for(coverage),
+                    **join_gates(jobs, cars)}
 
 
 def scheduled_coverage(schedule=SCHEDULE, frames=None, coverage=SYNTH_COV):  # type: ignore[no-untyped-def]
@@ -123,12 +168,19 @@ def scheduled_coverage(schedule=SCHEDULE, frames=None, coverage=SYNTH_COV):  # t
 
 
 SCHEDULED_OK = scheduled_coverage()
-JOIN_OK = assess_job_detail_join_readiness(*scheduled_frames())
+JOIN_OK = linked_join(*scheduled_frames())
+LINKAGE_OK = JOIN_OK.job_linkage_report
 GATES = dict(completeness=COMPLETE, key_contracts_valid=True, one_to_many_contract_valid=True,
              temporal_fields_trusted=True, vehicle_stability=STABLE, scheduled_coverage=SCHEDULED_OK,
-             job_detail_join=JOIN_OK)
+             job_detail_join=JOIN_OK, job_linkage=LINKAGE_OK, expected_stream_contract=synthetic_contract(SYNTH_COV),
+             location_authority=synthetic_location_authority(synthetic_contract(SYNTH_COV), SYNTH_ROLES, SYNTH_PAIRS),
+             rental_dates=passing_rental_report(*scheduled_frames()),
+             canonical_offers=passing_canonical_report())
 FAILING = {gate: False for gate in GATES} | {"vehicle_stability": UNSTABLE, "completeness": INCOMPLETE,
-                                             "scheduled_coverage": None, "job_detail_join": None}
+                                             "scheduled_coverage": None, "job_detail_join": None,
+                                             "job_linkage": None, "expected_stream_contract": None,
+                                             "location_authority": None, "rental_dates": None,
+                                             "canonical_offers": None}
 
 
 def evidence(status: CS) -> LocationStreamComparisonReport:
@@ -152,9 +204,16 @@ def frame(labels: list[tuple[str, ...]]) -> pd.DataFrame:
 
 
 SCOPE_BLOCKERS = {B(d.value) for d in LocationPolicyScopeDefect}
+# Detailed canonical-offer blockers (a missing report reports only canonical_offer_assessment_missing).
+OFFER_DETAIL = {B.CANONICAL_OFFER_POLICY_UNAVAILABLE, B.CANONICAL_OFFERS_UNASSESSABLE,
+                B.CANONICAL_OFFER_POLICY_MISMATCH}
 # Detailed schedule/join blockers (a missing assessment reports only its own "missing" blocker).
 SCHEDULE_AND_JOIN_DETAIL = ({B(b.value) for b in ScheduledCoverageBlocker} | {B(b.value) for b in JobDetailJoinBlocker}
-                            | {B.SCHEDULED_COVERAGE_CONTRACT_MISMATCH, B.TRUSTED_JOIN_NOT_READY})
+                            | {B(b.value) for b in ScheduleCoverageBlocker}
+                            | {B(b.value) for b in RentalDateBlocker}   # a missing rental assessment: its own value
+                            | {B.SCHEDULED_COVERAGE_CONTRACT_MISMATCH, B.TRUSTED_JOIN_NOT_READY}
+                            | {B(b.value) for b in JobLinkageBlocker}
+                            | {B.JOB_IDENTIFIER_NORMALIZATION_NOT_READY, B.JOB_LINKAGE_REPORT_MISMATCH})
 BEHAVIOURAL = [CS.LIKELY_DUPLICATE_STREAMS, CS.LIKELY_DISTINCT_STREAMS, CS.COMPARISON_INCONCLUSIVE,
                CS.COMPARISON_UNASSESSABLE,
                CS.INSUFFICIENT_COMPARABLE_CAPTURES, CS.ONE_STREAM_ABSENT, CS.BOTH_STREAMS_ABSENT]
@@ -163,17 +222,30 @@ BEHAVIOURAL = [CS.LIKELY_DUPLICATE_STREAMS, CS.LIKELY_DISTINCT_STREAMS, CS.COMPA
 # --------------------------------------------------------- default unresolved
 
 
-def test_project_vancouver_policy_defaults_to_unresolved_without_authority():
-    assert VANCOUVER_LOCATION_POLICY.state is PS.UNRESOLVED
-    assert VANCOUVER_LOCATION_POLICY.authority is None and VANCOUVER_LOCATION_POLICY.canonical_location is None
+def test_project_vancouver_policy_is_the_approved_alias_and_unresolved_without_authority():
+    from ql2_sixt_canada_analysis.authority_decisions import load_decision_record
+    from ql2_sixt_canada_analysis.location_authority import vancouver_policy_from_record
+
+    downtown, thurlow = COMPARED_LOCATION_STREAMS
+    assert VANCOUVER_LOCATION_POLICY.state is PS.CONFIRMED_ALIAS and VANCOUVER_LOCATION_POLICY.resolved
+    assert VANCOUVER_LOCATION_POLICY.canonical_location == downtown
+    assert dict(VANCOUVER_LOCATION_POLICY.alias_mapping) == {downtown: downtown, thurlow: downtown}
+    assert VANCOUVER_LOCATION_POLICY.authority.reference.startswith("docs/decisions/governance/")
     assert (VANCOUVER_LOCATION_POLICY.first, VANCOUVER_LOCATION_POLICY.second) == COMPARED_LOCATION_STREAMS
     assert (LOCATION_STREAM_COMPARISON.first, LOCATION_STREAM_COMPARISON.second) == COMPARED_LOCATION_STREAMS
     assert VANCOUVER_LOCATION_POLICY.coverage is EXPECTED_LOCATION_COVERAGE
-    assert not VANCOUVER_LOCATION_POLICY.resolved and dict(VANCOUVER_LOCATION_POLICY.alias_mapping) == {}
+    from ql2_sixt_canada_analysis.paths import PROJECT_ROOT
+
+    root = PROJECT_ROOT / "docs" / "decisions" / "pricing_authorities"
+    for version in (1, 2, 3):                       # no approved identity decision: UNRESOLVED, no authority
+        policy = vancouver_policy_from_record(load_decision_record(root / f"v{version}.toml"),
+                                              EXPECTED_LOCATION_COVERAGE)
+        assert policy.state is PS.UNRESOLVED and policy.authority is None and policy.canonical_location is None
+    assert vancouver_policy_from_record(None, EXPECTED_LOCATION_COVERAGE).state is PS.UNRESOLVED
 
 
 def test_unresolved_policy_grants_no_permission_and_blocks_pricing():
-    report = assess_location_policy()                      # project default
+    report = assess_location_policy(UNRESOLVED)
     assert report.state is PS.UNRESOLVED and report.authority is None
     assert report.location_policy_resolved is False
     assert report.location_policy_authority_sufficient is False
@@ -263,9 +335,13 @@ def test_confirmed_alias_requires_and_uses_canonical_grouping():
 
 def test_confirmed_alias_without_applied_canonicalization_blocks_pricing():
     report = assess_location_policy(ALIAS)
-    assert report.locations_are_aliases and not report.locations_comparable_independently
+    # Recorded, but not usable: neither the canonicalization nor both raw governed streams are proven.
+    assert report.location_policy_resolved and not report.locations_are_aliases
+    assert not report.locations_comparable_independently
     readiness = assess_pricing_readiness(location_policy=report, **GATES)
-    assert not readiness.ready and readiness.blocking_reasons == (B.ALIAS_CANONICALIZATION_NOT_APPLIED,)
+    # Without applied keys the canonicalization is missing and the governed raw streams are unproven.
+    assert not readiness.ready and readiness.blocking_reasons == (B.ALIAS_CANONICALIZATION_NOT_APPLIED,
+                                                                  B.GOVERNED_SOURCE_STREAM_MISSING)
 
 
 def test_keys_built_under_another_policy_do_not_count_as_canonicalised():
@@ -351,7 +427,9 @@ def assert_defect_blocks(report: LocationPolicyReport, policy: LocationIdentityP
     assert report.locations_comparable_independently is False
     assert report.canonicalization_applied is canonicalized
     expected = (B.IDENTITY_EVIDENCE_CONFLICT,) + (
-        (B.ALIAS_CANONICALIZATION_NOT_APPLIED,) if report.canonicalization_required and not canonicalized else ())
+        (B.ALIAS_CANONICALIZATION_NOT_APPLIED,) if report.canonicalization_required and not canonicalized else ()) + (
+        (B.GOVERNED_SOURCE_STREAM_MISSING,) if report.canonicalization_required
+        and report.governed_sources_present is not True else ())
     assert report.blocking_reasons == expected
     readiness = assess_pricing_readiness(location_policy=report, **GATES)      # every other gate passes
     assert readiness.ready is False and readiness.blocking_reasons == expected
@@ -390,10 +468,11 @@ def test_strict_validator_rejects_resolved_policy_under_mapping_defect(policy):
 def test_alias_mapping_defect_and_missing_canonicalization_are_both_reported():
     report = assess_location_policy(ALIAS, evidence(CS.LOCATION_MAPPING_DEFECT))     # no analytical keys
     assert_defect_blocks(report, ALIAS, canonicalized=False)
-    assert report.blocking_reasons == (B.IDENTITY_EVIDENCE_CONFLICT, B.ALIAS_CANONICALIZATION_NOT_APPLIED)
+    expected = (B.IDENTITY_EVIDENCE_CONFLICT, B.ALIAS_CANONICALIZATION_NOT_APPLIED, B.GOVERNED_SOURCE_STREAM_MISSING)
+    assert report.blocking_reasons == expected
     with pytest.raises(PricingNotReadyError) as info:
         validate_pricing_readiness(location_policy=report, **GATES)
-    assert info.value.blocking_reasons == (B.IDENTITY_EVIDENCE_CONFLICT, B.ALIAS_CANONICALIZATION_NOT_APPLIED)
+    assert info.value.blocking_reasons == expected
 
 
 @pytest.mark.parametrize("policy", RESOLVED)
@@ -510,18 +589,35 @@ def test_resolved_policy_does_not_override_other_gates():
 def test_each_foundational_gate_blocks_alone(gate):
     readiness = assess_pricing_readiness(location_policy=assess_location_policy(DISTINCT),
                                          **(GATES | {gate: FAILING[gate]}))
+    if gate == "expected_stream_contract":       # no contract: no authority, hence no exhaustive universe either
+        assert readiness.blocking_reasons == (B.EXPECTED_STREAM_AUTHORITY_UNAVAILABLE,
+                                              B.EXPECTED_STREAM_UNIVERSE_NOT_EXHAUSTIVE)
+        return
+    if gate == "location_authority":             # no report: neither roles nor pairs are available
+        assert readiness.blocking_reasons == (B.BRANCH_ROLE_AUTHORITY_UNAVAILABLE,
+                                              B.COMPARISON_PAIR_AUTHORITY_UNAVAILABLE)
+        return
     assert not readiness.ready and len(readiness.blocking_reasons) == 1
 
 
+#: Source-stream and location-authority blockers that need an applied contract, observed data or an
+#: actual roles/pairs report (not produced by missing reports).
+SOURCE_STREAM_DETAIL = {B.EXPECTED_STREAM_CONTRACT_MISMATCH, B.EXPECTED_SOURCE_STREAMS_MISSING,
+                        B.UNEXPECTED_SOURCE_STREAMS, B.SOURCE_SPELLING_MISMATCH,
+                        B.BRANCH_ROLES_NOT_EXACT, B.COMPARISON_PAIRS_INVALID, B.COMPARISON_PAIR_IDENTITY_UNRESOLVED,
+                        B.CANONICAL_OFFER_COMBINATION_UNRESOLVED, B.LOCATION_AUTHORITY_POLICY_MISMATCH,
+                        B.LOCATION_AUTHORITY_CONTRACT_MISMATCH, B.GOVERNED_SOURCE_STREAM_MISSING}
+
+
 def test_all_failures_are_reported_together():
-    readiness = assess_pricing_readiness(location_policy=assess_location_policy(),
+    readiness = assess_pricing_readiness(location_policy=assess_location_policy(UNRESOLVED),
                                          **(FAILING | {"vehicle_stability": UNSTABLE_AND_PARTIAL,
                                                        "completeness": STREAMS_AND_SCOPE_INCOMPLETE}))
-    assert set(readiness.blocking_reasons) == set(B) - SCOPE_BLOCKERS - SCHEDULE_AND_JOIN_DETAIL - {
+    assert set(readiness.blocking_reasons) == set(B) - SCOPE_BLOCKERS - SCHEDULE_AND_JOIN_DETAIL - OFFER_DETAIL - {
                                                         B.ALIAS_CANONICALIZATION_NOT_APPLIED,
                                                         B.IDENTITY_EVIDENCE_CONFLICT,
                                                         B.VEHICLE_STABILITY_UNAVAILABLE,
-                                                        B.COMPLETENESS_UNAVAILABLE}
+                                                        B.COMPLETENESS_UNAVAILABLE} - SOURCE_STREAM_DETAIL
     assert readiness.blocking_reasons[-1] is B.LOCATION_POLICY_UNRESOLVED
 
 

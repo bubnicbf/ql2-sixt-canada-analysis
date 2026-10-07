@@ -43,21 +43,45 @@ against the detail rows actually present, and
 :mod:`ql2_sixt_canada_analysis.relationships` validates the one-to-many
 cardinality (jobs = one side, cars = many side) before any join is trusted.
 
+Analysis-stage definitions and authority-backed job linkage
+------------------------------------------------------------
+:data:`DATASET_DEFINITIONS` and :data:`JOB_DETAIL_RELATIONSHIP` describe the
+**raw source files** and compare raw identifier text exactly as read; they are
+never rewritten. Analytical linkage uses the separate analysis-stage
+definitions (:data:`ANALYSIS_DATASET_DEFINITIONS`,
+:data:`ANALYSIS_JOB_DETAIL_RELATIONSHIP`), whose keys are the derived columns
+produced by :mod:`ql2_sixt_canada_analysis.job_linkage` under the approved
+pricing-authority decisions: :data:`JOB_LINKAGE_KEY_COLUMN` (nullable string)
+is the jobs unique key, the details' parent foreign key and the first
+component of the details' unique key, and :data:`OFFER_POSITION_KEY_COLUMN`
+(nullable integer) is the second. The raw ``job_id`` and ``row_index``
+columns stay unchanged next to them. All four are confidential technical
+fields (:data:`CONFIDENTIAL_TECHNICAL_COLUMNS`).
+
 Expected location coverage
 --------------------------
-:data:`EXPECTED_LOCATION_COVERAGE` is the single contract of which locations
-the collection is *supposed* to cover. Expected locations must come from an
-independent authority (a schedule, assignment or documented market scope),
-never from the extract being validated - a list derived from observed rows
-would always pass. Locations are branch-level pickup locations (e.g. an
+:data:`EXPECTED_LOCATION_COVERAGE` is the single contract of which source
+streams the collection is *supposed* to return. It is not written here: it is
+resolved once, on first access, from the latest valid approved authority
+record by :mod:`ql2_sixt_canada_analysis.expected_stream_contract`
+(``EXPECTED_STREAM_UNIVERSE`` and ``EXPECTED_STREAM_SOURCE_SPELLING``), on the
+structure of :data:`SOURCE_STREAM_COVERAGE_TEMPLATE`. With both decisions
+approved it is the exhaustive, exact-spelling universe; otherwise it is the
+unconfigured template and every assessment fails closed. Expected locations
+never come from the extract being validated - a list derived from observed
+rows would always pass. Locations are branch-level pickup locations (e.g. an
 airport or downtown branch of a city), which only the detail dataset carries;
 jobs are city-level collection runs. An unconfigured contract fails closed
 with :class:`LocationCoverageConfigurationError`.
 
-:data:`COLLECTION_SCHEDULE` is the authoritative collection cadence used to
-judge temporal completeness of a stream; it is ``None`` because no
-authoritative schedule exists, so temporal completeness is reported as not
-assessable rather than inferred from observed rows.
+:data:`COLLECTION_SCHEDULE` is the legacy *single shared* schedule definition
+read by the stream investigation's ``time_coverage``. It stays ``None``: the
+approved schedule (authority record v5) is **per stream**, not a global shared
+schedule or one list of UTC instants, and is implemented by
+:mod:`ql2_sixt_canada_analysis.collection_schedule`
+(``current_per_stream_schedule``, ``assess_per_stream_scheduled_coverage``),
+which pricing readiness consumes. No schedule is ever inferred from observed
+rows.
 """
 
 from __future__ import annotations
@@ -65,7 +89,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import datetime as dt
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from dataclasses import field as dataclass_field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from enum import StrEnum
@@ -75,6 +99,18 @@ from typing import Final
 import pandas as pd
 
 __all__ = [
+    "ANALYSIS_CARS_DEFINITION",
+    "ANALYSIS_DATASET_DEFINITIONS",
+    "ANALYSIS_JOBS_DEFINITION",
+    "ANALYSIS_JOB_DETAIL_RELATIONSHIP",
+    "ANALYSIS_LOCATION_STREAM_COMPARISON",
+    "ANALYSIS_TEMPORAL_RECONCILIATION",
+    "CONFIDENTIAL_TECHNICAL_COLUMNS",
+    "JOB_LINKAGE_KEY_COLUMN",
+    "OFFER_POSITION_KEY_COLUMN",
+    "OFFER_POSITION_KEY_DTYPE",
+    "SOURCE_JOB_IDENTIFIER_COLUMN",
+    "SOURCE_OFFER_POSITION_COLUMN",
     "MINIMUM_DUPLICATE_PAIRED_CAPTURES",
     "VANCOUVER_LOCATION_POLICY",
     "LocationIdentityPolicy",
@@ -100,8 +136,14 @@ __all__ = [
     "LocationStreamComparisonDefinition",
     "TEMPORAL_RECONCILIATION",
     "ReportingDateRule",
+    "ISO_8601_DATE_FORMAT",
     "TemporalAwareness",
     "TemporalConfigurationError",
+    "CityTimezoneMap",
+    "FINISHED_AT_TIMEZONE_SELECTOR",
+    "IANA_REGION_AREAS",
+    "classify_local_time",
+    "region_iana_zone",
     "TemporalDateCheck",
     "TemporalFieldDefinition",
     "TemporalKind",
@@ -110,6 +152,9 @@ __all__ = [
     "TimestampOrderingRule",
     "CollectionScheduleDefinition",
     "EXPECTED_LOCATION_COVERAGE",
+    "SOURCE_STREAM_COVERAGE_TEMPLATE",
+    "PROJECT_DEFAULT",
+    "project_default",
     "INVESTIGATED_LOCATION_STREAM",
     "KeyConfigurationError",
     "LocationCoverageConfigurationError",
@@ -127,6 +172,22 @@ __all__ = [
 #: nullable string dtype (``"string"``), whose missing value is ``pd.NA``.
 #: Shared logical identifiers therefore have identical types in both datasets.
 IDENTIFIER_DTYPE: Final[pd.StringDtype] = pd.StringDtype()
+
+#: Raw source column holding the scrape-job identifier (opaque text; both datasets).
+SOURCE_JOB_IDENTIFIER_COLUMN: Final = "job_id"
+#: Raw source column holding an offer's position within its job's result list.
+SOURCE_OFFER_POSITION_COLUMN: Final = "row_index"
+#: Derived analysis-stage job linkage key (never a rewrite of the raw identifier).
+JOB_LINKAGE_KEY_COLUMN: Final = "job_id_linkage_key"
+#: Derived analysis-stage integer offer position.
+OFFER_POSITION_KEY_COLUMN: Final = "row_index_key"
+#: Dtype of :data:`OFFER_POSITION_KEY_COLUMN` (pandas nullable integer, missing = ``pd.NA``).
+OFFER_POSITION_KEY_DTYPE: Final[pd.Int64Dtype] = pd.Int64Dtype()
+#: Confidential technical fields: excluded from product identity, duplicate-offer
+#: inference, vehicle stability and every user-visible output.
+CONFIDENTIAL_TECHNICAL_COLUMNS: Final[tuple[str, ...]] = (
+    SOURCE_JOB_IDENTIFIER_COLUMN, JOB_LINKAGE_KEY_COLUMN, SOURCE_OFFER_POSITION_COLUMN, OFFER_POSITION_KEY_COLUMN,
+)
 
 
 class KeyConfigurationError(ValueError):
@@ -319,10 +380,10 @@ CARS_DEFINITION: Final = DatasetDefinition(
     ),
     # Classification notes (structure only, no source values):
     # * job_id: the parent scrape job's identity, the logical link to jobs.
-    #   In this export it can be serialised upstream in a different textual
-    #   form than on the jobs side (e.g. a float-style suffix). Reading it as a
-    #   string preserves that text verbatim; reconciling the two forms is a
-    #   separate, explicit normalisation step, not part of typing.
+    #   Opaque text. The historical export serialises it with a legacy
+    #   decimal-zero suffix (a spreadsheet serialisation defect). Reading it as a
+    #   string preserves that text verbatim; the authority-backed linkage key is
+    #   derived separately by job_linkage, never by rewriting this column.
     # * row_index: deliberately NOT an identifier. It is the ordinal position
     #   of an offer within its job's result list, so it carries order/rank
     #   meaning for assortment analysis and keeps numeric inference.
@@ -353,6 +414,34 @@ DATASET_DEFINITIONS: Final[Mapping[DatasetKey, DatasetDefinition]] = MappingProx
 SHARED_IDENTIFIER_COLUMNS: Final[tuple[str, ...]] = tuple(
     column for column in JOBS_DEFINITION.identifier_columns
     if column in CARS_DEFINITION.identifier_columns
+)
+
+
+#: Analysis-stage jobs frame: the raw contract plus the derived linkage key.
+#: Grain unchanged (one row per scrape job); the analytical key is the derived
+#: linkage key, while the raw identifier is kept, unchanged, for lineage.
+ANALYSIS_JOBS_DEFINITION: Final = DatasetDefinition(
+    key=DatasetKey.JOBS,
+    filename_tokens=JOBS_DEFINITION.filename_tokens,
+    columns=(*JOBS_DEFINITION.columns, JOB_LINKAGE_KEY_COLUMN),
+    identifier_columns=(*JOBS_DEFINITION.identifier_columns, JOB_LINKAGE_KEY_COLUMN),
+    unique_key_columns=(JOB_LINKAGE_KEY_COLUMN,),
+)
+
+#: Analysis-stage cars frame: the raw contract plus the derived linkage key and
+#: integer offer position. Analytical key = (linkage key, offer position key);
+#: the offer position key is the documented non-identifier (integer) component.
+ANALYSIS_CARS_DEFINITION: Final = DatasetDefinition(
+    key=DatasetKey.CARS,
+    filename_tokens=CARS_DEFINITION.filename_tokens,
+    columns=(*CARS_DEFINITION.columns, JOB_LINKAGE_KEY_COLUMN, OFFER_POSITION_KEY_COLUMN),
+    identifier_columns=(*CARS_DEFINITION.identifier_columns, JOB_LINKAGE_KEY_COLUMN),
+    unique_key_columns=(JOB_LINKAGE_KEY_COLUMN, OFFER_POSITION_KEY_COLUMN),
+)
+
+#: Registry of the analysis-stage frames (never used to read or validate raw files).
+ANALYSIS_DATASET_DEFINITIONS: Final[Mapping[DatasetKey, DatasetDefinition]] = MappingProxyType(
+    {definition.key: definition for definition in (ANALYSIS_JOBS_DEFINITION, ANALYSIS_CARS_DEFINITION)}
 )
 
 
@@ -507,9 +596,10 @@ class JobDetailRelationshipDefinition:
 #: tally of detail rows written. Both declare the detail count, so each is
 #: reconciled independently against the observed rows and they must agree;
 #: neither can stand in for the other.
-#: Identifiers are compared verbatim, so the textual-form difference noted on
-#: the cars identifier above is reported as orphans/under-counts until an
-#: explicit normalisation step reconciles the two forms.
+#: This is the **raw-source** relationship: raw identifier text is compared
+#: exactly as read, so the legacy textual-form difference on the cars identifier
+#: appears as orphans/under-counts. Analytical linkage uses
+#: :data:`ANALYSIS_JOB_DETAIL_RELATIONSHIP` (the authority-backed derived keys).
 #: Scope: a cars row repeats its job's ``city``; a linked row whose city differs
 #: from its parent job's (or either is missing/blank) breaks city integrity.
 JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
@@ -520,6 +610,22 @@ JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
     expected_detail_count_column='record_count',
     additional_expected_count_columns=('actual_car_rows',),
     scope_agreement_columns=(('city', 'city'),),
+)
+
+#: The analytical jobs -> cars relationship: identical semantics, counts and
+#: scope invariant, but linked through the derived, authority-backed
+#: :data:`JOB_LINKAGE_KEY_COLUMN` on both sides (see
+#: :mod:`ql2_sixt_canada_analysis.job_linkage`). Joins, reconciliation,
+#: uniqueness and every downstream trust decision use this relationship.
+ANALYSIS_JOB_DETAIL_RELATIONSHIP: Final = JobDetailRelationshipDefinition(
+    parent=DatasetKey.JOBS,
+    detail=DatasetKey.CARS,
+    parent_key_columns=(JOB_LINKAGE_KEY_COLUMN,),
+    detail_key_columns=(JOB_LINKAGE_KEY_COLUMN,),
+    expected_detail_count_column=JOB_DETAIL_RELATIONSHIP.expected_detail_count_column,
+    additional_expected_count_columns=JOB_DETAIL_RELATIONSHIP.additional_expected_count_columns,
+    scope_agreement_columns=JOB_DETAIL_RELATIONSHIP.scope_agreement_columns,
+    definitions=ANALYSIS_DATASET_DEFINITIONS,
 )
 
 
@@ -669,40 +775,40 @@ class LocationCoverageDefinition:
         return self.definitions[self.dataset]
 
 
-#: An expected branch-level location stream, identified as expected by the
-#: project owner (the authority for this entry). Defined once here; code,
-#: notebooks and tests refer to this constant, never to the literal.
-INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('calgary', 'Calgary Downtown')
-
-#: Two expected branch-level streams the project owner asked to compare
-#: (authority for their expectation). Defined once; referenced by constant.
-COMPARED_LOCATION_STREAMS: Final[tuple[tuple[str, ...], tuple[str, ...]]] = (
-    ('vancouver', 'Vancouver Downtown'),
-    ('vancouver', 'Vancouver Thurlow'),
-)
-
-#: The expected-location contract. Keys are authoritative (city, location)
-#: pairs - the source ``city`` label and the branch ``location`` label - so a
-#: branch label observed under another city never satisfies coverage, and a
-#: label observed under several cities is a conflicting assignment. Source
-#: values are compared exactly and never rewritten. Locations are branch-level pickup
-#: locations, carried only by detail rows (``location``); jobs are city-level
-#: collection runs, so a jobs-level contract cannot represent a branch stream
-#: (an earlier jobs-``city`` structure would have reported a permanent false
-#: absence). Expected keys come only from an authority - here the project
-#: owner's statements for the streams above - so the set is a required
-#: MINIMUM, not an exhaustive universe. Add further locations only from an
-#: authoritative list, never from the observed extract. No aliases are
-#: authoritatively confirmed. ``city`` scopes a branch to its collection runs
-#: for stream-continuity investigation only.
-EXPECTED_LOCATION_COVERAGE: Final = LocationCoverageDefinition(
+#: Structure of the source-stream contract - dataset, exact (city, location)
+#: key columns, scope - with **no** expected keys (unconfigured). The expected
+#: keys and mode come only from the approved authority record
+#: (:mod:`ql2_sixt_canada_analysis.expected_stream_contract`), which fills
+#: this template to produce :data:`EXPECTED_LOCATION_COVERAGE`. Keys are
+#: (source ``city``, source ``location``) pairs compared exactly - a branch
+#: label observed under another city never satisfies coverage, and a label
+#: observed under several cities is a conflicting assignment. Source values
+#: are never rewritten. Locations are branch-level pickup locations carried
+#: only by detail rows; ``city`` scopes a branch to its collection runs for
+#: stream-continuity investigation only. No aliases are authoritatively
+#: confirmed.
+SOURCE_STREAM_COVERAGE_TEMPLATE: Final = LocationCoverageDefinition(
     dataset=DatasetKey.CARS,
     location_columns=('city', 'location'),
-    expected_locations=(INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS),
-    mode=LocationCoverageMode.MINIMUM_REQUIRED,
     stream_scope_columns=('city',),
     parent_scope_columns=('city',),
     label_column='location',
+)
+
+#: The approved source stream investigated in detail (the Calgary Downtown
+#: branch stream), as its exact raw ``(city, location)`` source key (authority
+#: record v5). A designation, not a contract: it must be a key of the approved
+#: universe (checked by the tests and by the baseline).
+INVESTIGATED_LOCATION_STREAM: Final[tuple[str, ...]] = ('calgary', 'Calgary Downtown')
+
+#: The two approved Vancouver source streams whose analytical identity is
+#: governed by ``VANCOUVER_LOCATION_IDENTITY`` (record v5: ``CONFIRMED_ALIAS``,
+#: canonical ``vancouver / Vancouver Downtown``), as exact raw source keys. They
+#: stay two separate expected source streams and two separate schedule streams;
+#: both must be keys of the approved universe.
+COMPARED_LOCATION_STREAMS: Final[tuple[tuple[str, ...], tuple[str, ...]]] = (
+    ('vancouver', 'Vancouver Downtown'),
+    ('vancouver', 'Vancouver Thurlow'),
 )
 
 
@@ -761,9 +867,11 @@ class CollectionScheduleDefinition:
         return pd.to_datetime(list(self.expected_periods), utc=True, format="ISO8601").floor(self.period)
 
 
-#: No authoritative collection schedule exists in the repository or project
-#: documentation, so temporal completeness cannot be proven. Do not infer one
-#: from observed rows.
+#: Legacy single shared schedule (one list of UTC instants for every stream). Not the
+#: approved model: record v5 approves a PER_STREAM schedule, built by
+#: :mod:`ql2_sixt_canada_analysis.collection_schedule`. It stays ``None`` so the
+#: stream report's shared-schedule time coverage remains ``NOT_ASSESSED`` and is never
+#: read as a pass. Do not infer one from observed rows.
 COLLECTION_SCHEDULE: Final[CollectionScheduleDefinition | None] = None
 
 
@@ -784,6 +892,95 @@ def get_dataset_definition(key: DatasetKey | str) -> DatasetDefinition:
 
 class TemporalConfigurationError(ValueError):
     """A temporal definition is invalid, incomplete or cannot be applied."""
+
+
+#: Top-level areas of region-style IANA zone names (``Area/Location``). Links such as
+#: ``US/Eastern`` or ``Canada/Mountain``, ``Etc/`` fixed offsets and abbreviations such
+#: as ``MST`` or ``EDT`` are not region zones and are refused.
+IANA_REGION_AREAS: Final = frozenset({"Africa", "America", "Antarctica", "Arctic", "Asia", "Atlantic",
+                                      "Australia", "Europe", "Indian", "Pacific"})
+
+
+def region_iana_zone(name: object) -> ZoneInfo:
+    """A region IANA zone from the installed database; anything else raises ``TemporalConfigurationError``.
+
+    Refused: non-strings, padded or blank names, abbreviations (``MST``,
+    ``EDT``), fixed offsets (``-07:00``, ``Etc/GMT+7``, ``UTC``), legacy
+    links outside the region areas (``US/Eastern``) and unknown names. The
+    machine's local zone is never a fallback.
+    """
+    if (not isinstance(name, str) or name != name.strip() or "/" not in name
+            or name.split("/", 1)[0] not in IANA_REGION_AREAS):
+        raise TemporalConfigurationError("timezone must be a region IANA zone name")
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise TemporalConfigurationError("timezone must be a region IANA zone name") from exc
+
+
+def classify_local_time(local: dt.datetime, zone: ZoneInfo) -> str:
+    """``"ok"``, ``"nonexistent"`` (spring-forward gap) or ``"ambiguous"`` (fall-back repeat) in ``zone``.
+
+    Decided by the installed IANA database for that date; nothing is shifted
+    and no occurrence of a repeated hour is chosen.
+    """
+    first, second = local.replace(tzinfo=zone, fold=0), local.replace(tzinfo=zone, fold=1)
+    if first.astimezone(dt.timezone.utc).astimezone(zone).replace(tzinfo=None) != local.replace(tzinfo=None):
+        return "nonexistent"
+    return "ambiguous" if first.utcoffset() != second.utcoffset() else "ok"
+
+
+@dataclass(frozen=True, slots=True)
+class CityTimezoneMap:
+    """Exhaustive, exact ``source city -> region IANA zone`` map (``FINISHED_AT_TIMEZONE``).
+
+    Shared by the per-stream schedule and the temporal contract (one
+    mechanism). Entries are kept sorted by city (deterministic). Cities are
+    matched exactly - no case folding or trimming; anything not in the map
+    fails closed.
+    """
+
+    entries: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entries, tuple) or not self.entries:
+            raise TemporalConfigurationError("the city timezone map must be a non-empty tuple")
+        cities = []
+        for item in self.entries:
+            if not (isinstance(item, tuple) and len(item) == 2):
+                raise TemporalConfigurationError("each entry must be (city, zone)")
+            city, zone = item
+            if not isinstance(city, str) or not city or city != city.strip():
+                raise TemporalConfigurationError("a city must be an exact non-blank value")
+            region_iana_zone(zone)
+            cities.append(city)
+        if len(set(cities)) != len(cities):
+            raise TemporalConfigurationError("duplicate city in the timezone map")
+        object.__setattr__(self, "entries", tuple(sorted(self.entries)))
+
+    @property
+    def cities(self) -> tuple[str, ...]:
+        return tuple(city for city, _ in self.entries)
+
+    def zone_name(self, city: object) -> str:
+        """The zone of an exact, approved city; anything else raises (fails closed)."""
+        for known, zone in self.entries:
+            if isinstance(city, str) and city == known:
+                return zone
+        raise TemporalConfigurationError("city is missing, blank or not in the approved timezone map")
+
+    def zone(self, city: object) -> ZoneInfo:
+        return ZoneInfo(self.zone_name(city))
+
+    def zone_or_none(self, city: object) -> str | None:
+        """The zone of an exact approved city, else ``None`` (never a default zone)."""
+        return dict(self.entries).get(city) if isinstance(city, str) else None
+
+
+#: The column whose exact value selects the zone of ``finished_at`` and of its
+#: detail copy ``job_finished_at``: the **parent** job's city (never the detail
+#: row's own city or location label).
+FINISHED_AT_TIMEZONE_SELECTOR: Final = (DatasetKey.JOBS, 'city')
 
 
 class TemporalKind(StrEnum):
@@ -810,6 +1007,11 @@ class TemporalAwareness(StrEnum):
     NOT_APPLICABLE = "not_applicable"
 
 
+#: Strict calendar-date format: exactly ``YYYY-MM-DD`` (ASCII digits) naming a real date;
+#: nothing is trimmed or coerced (``REPORTING_DAY`` scrape dates, ``RENTAL_DATE_VALIDITY``).
+ISO_8601_DATE_FORMAT: Final = "ISO_8601_DATE"
+
+
 @dataclass(frozen=True, slots=True)
 class TemporalFieldDefinition:
     """One source temporal field and how to parse it.
@@ -827,6 +1029,11 @@ class TemporalFieldDefinition:
             instant comparisons, never guessed).
         designator_offsets: For ``DESIGNATOR`` fields, the authoritative
             fixed UTC offset of each accepted abbreviation.
+        city_timezones: For ``NAIVE`` fields whose zone depends on the row,
+            the authoritative exhaustive :class:`CityTimezoneMap`; set together
+            with ``timezone_selector`` and never with ``source_timezone``.
+        timezone_selector: The parent-dataset city column whose exact value
+            selects the zone (detail rows use their linked parent's value).
     """
 
     dataset: DatasetKey
@@ -839,6 +1046,8 @@ class TemporalFieldDefinition:
     designator_offsets: Mapping[str, dt.timedelta] = dataclass_field(
         default_factory=lambda: MappingProxyType({})
     )
+    city_timezones: CityTimezoneMap | None = None
+    timezone_selector: tuple[DatasetKey, str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, TemporalKind) or not isinstance(self.awareness, TemporalAwareness):
@@ -847,12 +1056,27 @@ class TemporalFieldDefinition:
             raise TemporalConfigurationError("column must be a non-empty string")
         if not isinstance(self.source_format, str) or not self.source_format:
             raise TemporalConfigurationError("source_format must be a non-empty string")
+        if self.source_format == ISO_8601_DATE_FORMAT and self.kind is not TemporalKind.DATE:
+            raise TemporalConfigurationError("ISO_8601_DATE applies to calendar dates only")
         if (self.kind is TemporalKind.DATE) != (self.awareness is TemporalAwareness.NOT_APPLICABLE):
             raise TemporalConfigurationError("dates (and only dates) have no time-zone awareness")
         if self.source_timezone is not None:
             if self.awareness is not TemporalAwareness.NAIVE:
                 raise TemporalConfigurationError("source_timezone applies to naive timestamps only")
             _zone(self.source_timezone)
+        if (self.city_timezones is None) != (self.timezone_selector is None):
+            raise TemporalConfigurationError("city_timezones and timezone_selector are set together")
+        if self.city_timezones is not None:
+            if self.awareness is not TemporalAwareness.NAIVE or self.kind is not TemporalKind.TIMESTAMP:
+                raise TemporalConfigurationError("city time zones apply to naive timestamps only")
+            if self.source_timezone is not None:
+                raise TemporalConfigurationError("a field has one zone basis: a fixed zone or a city map")
+            if not isinstance(self.city_timezones, CityTimezoneMap):
+                raise TemporalConfigurationError("city_timezones must be a CityTimezoneMap")
+            selector = self.timezone_selector
+            if not (isinstance(selector, tuple) and len(selector) == 2 and isinstance(selector[0], DatasetKey)
+                    and isinstance(selector[1], str) and selector[1]):
+                raise TemporalConfigurationError("timezone_selector must be (dataset, column)")
         offsets = dict(self.designator_offsets)
         if (self.awareness is TemporalAwareness.DESIGNATOR) != bool(offsets):
             raise TemporalConfigurationError("designator offsets are required for (and only for) DESIGNATOR fields")
@@ -872,7 +1096,13 @@ class TemporalFieldDefinition:
         """True when values can become absolute instants without guessing."""
         if self.kind is not TemporalKind.TIMESTAMP:
             return False
-        return self.awareness is not TemporalAwareness.NAIVE or self.source_timezone is not None
+        return (self.awareness is not TemporalAwareness.NAIVE or self.source_timezone is not None
+                or self.city_timezones is not None)
+
+    @property
+    def zone_basis(self) -> tuple[object, ...]:
+        """What decides this field's zone (fixed zone, city map and selector) - equal bases compare as wall times."""
+        return (self.awareness, self.source_timezone, self.city_timezones, self.timezone_selector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -898,17 +1128,34 @@ class TimestampOrderingRule:
 
 @dataclass(frozen=True, slots=True)
 class ReportingDateRule:
-    """The date equals the calendar date of ``source`` in ``reporting_timezone``.
+    """The date equals the calendar date of ``source`` in its reporting zone.
 
-    The source instant is converted to the reporting zone *before* its date is
-    taken. Dates are compared semantically (parsed), not as strings.
+    The zone is either one fixed ``reporting_timezone`` or, per row, the zone
+    of the exact **parent** city selected by ``timezone_selector`` through the
+    approved ``city_timezones`` map (``REPORTING_DAY_TIMEZONE`` mode
+    ``PARENT_CITY``; detail rows use their trusted linked parent's city, never
+    their own). The source instant is converted to that zone *before* its date
+    is taken. Dates are compared semantically (parsed), not as strings.
     """
 
     source: tuple[DatasetKey, str]
-    reporting_timezone: str
+    reporting_timezone: str | None = None
+    city_timezones: CityTimezoneMap | None = None
+    timezone_selector: tuple[DatasetKey, str] | None = None
 
     def __post_init__(self) -> None:
-        _zone(self.reporting_timezone)
+        if (self.city_timezones is None) != (self.timezone_selector is None):
+            raise TemporalConfigurationError("city_timezones and timezone_selector are set together")
+        if (self.reporting_timezone is None) == (self.city_timezones is None):
+            raise TemporalConfigurationError("a reporting day has one zone basis: a fixed zone or a city map")
+        if self.reporting_timezone is not None:
+            _zone(self.reporting_timezone)
+        elif not isinstance(self.city_timezones, CityTimezoneMap):
+            raise TemporalConfigurationError("city_timezones must be a CityTimezoneMap")
+
+    @property
+    def city_local(self) -> bool:
+        return self.city_timezones is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -955,6 +1202,9 @@ class TemporalReconciliationDefinition:
     date_checks: tuple[TemporalDateCheck, ...]
     replications: tuple[TemporalReplicationRule, ...]
     relationship: JobDetailRelationshipDefinition
+    #: Date fields retired from pricing (``DATE_CLEAN_SEMANTICS = RETIRED_FROM_PRICING``): still
+    #: parsed and reported for presence and parse quality, never checked, never blocking.
+    retired_fields: tuple[tuple[DatasetKey, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.fields, tuple) or not self.fields:
@@ -971,6 +1221,11 @@ class TemporalReconciliationDefinition:
                     f"a '{field.dataset}' temporal column is not in its contract"
                 )
         _zone(self.canonical_timezone)
+        for field in self.fields:
+            if field.timezone_selector is not None:
+                dataset, column = field.timezone_selector
+                if dataset is not self.relationship.parent or column not in registry[dataset].columns:
+                    raise TemporalConfigurationError("the timezone selector must be a parent contract column")
         if self.ordering is not None:
             for ref in (self.ordering.earlier, self.ordering.later):
                 if self.field(ref).kind is not TemporalKind.TIMESTAMP:
@@ -983,6 +1238,18 @@ class TemporalReconciliationDefinition:
                 raise TemporalConfigurationError("date checks target date fields")
             if check.rule is not None and self.field(check.rule.source).kind is not TemporalKind.TIMESTAMP:
                 raise TemporalConfigurationError("reporting dates derive from timestamp fields")
+            if check.rule is not None and check.rule.timezone_selector is not None:
+                dataset, column = check.rule.timezone_selector
+                if dataset is not self.relationship.parent or column not in registry[dataset].columns:
+                    raise TemporalConfigurationError("the reporting-day selector must be a parent contract column")
+        retired = [tuple(r) for r in self.retired_fields]
+        if len(set(retired)) != len(retired):
+            raise TemporalConfigurationError("each retired field may be listed once")
+        for ref in retired:
+            if self.field(ref).kind is not TemporalKind.DATE:
+                raise TemporalConfigurationError("only date fields are retired from pricing")
+            if ref in targets or any(c.rule is not None and c.rule.source == ref for c in self.date_checks):
+                raise TemporalConfigurationError("a retired field is never checked or used as a source")
         for rule in self.replications:
             source, replica = self.field(rule.source), self.field(rule.replica)
             if (source.dataset, replica.dataset) != (self.relationship.parent, self.relationship.detail):
@@ -1013,29 +1280,34 @@ def _zone(name: str) -> ZoneInfo:
 
 _ISO_DATE: Final = "%Y-%m-%d"
 
-#: The temporal contract. Established facts (source formats and provenance):
+#: The authority-free *template* of the temporal contract. Established facts
+#: (source formats and provenance):
 #:
 #: * ``finished_at`` (jobs) - when the collection job finished; a *naive*
-#:   timestamp. No authoritative time zone is documented, so it is NOT
-#:   resolved to an instant (never assumed UTC or machine-local).
+#:   local wall-clock timestamp. Its zone is approved per **parent-job city**
+#:   (``FINISHED_AT_TIMEZONE``, record v5, confirmed in v6); the template has
+#:   no zone, and the authority-backed contract
+#:   (:func:`~ql2_sixt_canada_analysis.temporal_authority.current_temporal_reconciliation`)
+#:   adds the exhaustive :class:`CityTimezoneMap` with the selector
+#:   :data:`FINISHED_AT_TIMEZONE_SELECTOR`. Never assumed UTC or machine-local.
 #: * ``job_finished_at`` (cars) - the parent job's ``finished_at`` repeated on
 #:   each detail row (``job_*`` columns repeat parent-job attributes), so it
-#:   must equal its parent's value (replication rule).
+#:   must equal its parent's value (replication rule); it resolves with the
+#:   parent's city zone.
 #: * ``scraped_at`` (cars) - when each detail row was scraped; every value
 #:   ends with the designator ``MST``. Per the IANA/POSIX definition ``MST``
 #:   is fixed UTC-07:00 (no daylight time). It labels the collector's clock -
 #:   it appears year-round and for markets in other zones - so it is *not* a
-#:   market-local time. If the source meant daylight-adjusted Mountain time,
-#:   this mapping must be corrected by the data owner.
+#:   market-local time. The policy stays unless superseded by authority.
 #: * ``scrape_date`` (jobs and cars) and ``date_clean`` (cars) - ISO calendar
 #:   dates supplied by the source (not generated by repository code).
 #:
-#: Not established (no repository documentation or source authority), hence
-#: unavailable and failing closed: the ordering between ``finished_at`` and
-#: ``scraped_at`` (and a time zone for ``finished_at``), which timestamp and
-#: reporting time zone define ``scrape_date``, and which define ``date_clean``.
-#: The markets span several time zones and no authoritative location-to-zone
-#: mapping exists. No tolerance is authorised.
+#: The template leaves the ordering unset; the authority-backed contract adds
+#: the approved ordering (record v6: ``scraped_at <= finished_at`` on UTC
+#: instants, equality allowed, zero tolerance). Not established (no approved
+#: authority decision), hence unavailable and failing closed in both: which
+#: timestamp and reporting time zone define ``scrape_date``, and which define
+#: ``date_clean`` (never a pricing date while unresolved).
 TEMPORAL_RECONCILIATION: Final = TemporalReconciliationDefinition(
     fields=(
         TemporalFieldDefinition(DatasetKey.JOBS, 'finished_at', TemporalKind.TIMESTAMP, True,
@@ -1064,6 +1336,11 @@ TEMPORAL_RECONCILIATION: Final = TemporalReconciliationDefinition(
     ),
     relationship=JOB_DETAIL_RELATIONSHIP,
 )
+
+#: The same temporal contract applied to the analysis-stage frames (linked
+#: through :data:`ANALYSIS_JOB_DETAIL_RELATIONSHIP`).
+ANALYSIS_TEMPORAL_RECONCILIATION: Final = dataclass_replace(
+    TEMPORAL_RECONCILIATION, relationship=ANALYSIS_JOB_DETAIL_RELATIONSHIP)
 
 
 # ---------------------------------------------------- location-stream comparison
@@ -1206,18 +1483,30 @@ class LocationStreamComparisonDefinition:
 #: threshold, so the floor is two: a single shared capture is never enough.
 MINIMUM_DUPLICATE_PAIRED_CAPTURES: Final = 2
 
-LOCATION_STREAM_COMPARISON: Final = LocationStreamComparisonDefinition(
-    first=COMPARED_LOCATION_STREAMS[0],
-    second=COMPARED_LOCATION_STREAMS[1],
-    coverage=EXPECTED_LOCATION_COVERAGE,
-    relationship=JOB_DETAIL_RELATIONSHIP,
-    temporal=TEMPORAL_RECONCILIATION,
-    pairing=CapturePairing.SHARED_COLLECTION_EVENT,
-    product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
-    price_columns=('price_per_day', 'price_num'),
-    minimum_paired_captures=MINIMUM_DUPLICATE_PAIRED_CAPTURES,
-    numeric_columns=('price_num',),
-)
+_COMPARISON_PRICE_COLUMNS: Final = ('price_per_day', 'price_num')
+
+
+def _location_stream_comparison(coverage: LocationCoverageDefinition) -> LocationStreamComparisonDefinition:
+    """The project comparison of :data:`COMPARED_LOCATION_STREAMS` under ``coverage``."""
+    return LocationStreamComparisonDefinition(
+        first=COMPARED_LOCATION_STREAMS[0],
+        second=COMPARED_LOCATION_STREAMS[1],
+        coverage=coverage,
+        relationship=JOB_DETAIL_RELATIONSHIP,
+        temporal=TEMPORAL_RECONCILIATION,
+        pairing=CapturePairing.SHARED_COLLECTION_EVENT,
+        product_columns=('car_name', 'car_type', 'transmission', 'seats', 'bags', 'pickup_date', 'return_date'),
+        price_columns=_COMPARISON_PRICE_COLUMNS,
+        minimum_paired_captures=MINIMUM_DUPLICATE_PAIRED_CAPTURES,
+        numeric_columns=('price_num',),
+    )
+
+
+#: ``LOCATION_STREAM_COMPARISON`` (raw relationship) and
+#: ``ANALYSIS_LOCATION_STREAM_COMPARISON`` (the same comparison on the
+#: analysis-stage frames: capture events are derived linkage keys, never raw
+#: identifier text) are resolved lazily with :data:`EXPECTED_LOCATION_COVERAGE`
+#: (see :func:`__getattr__`).
 
 
 # --------------------------------------------------- location identity policy
@@ -1486,21 +1775,18 @@ def assess_location_policy_scope(policy: object) -> LocationPolicyScope:
         defects=tuple(d for d in D if d in defects))
 
 
-#: Identity policy for the Vancouver pair in ``COMPARED_LOCATION_STREAMS``.
-#: UNRESOLVED: no authoritative decision exists in the repository or project
-#: documentation. Behavioural comparison (``LOCATION_STREAM_COMPARISON``) is
-#: diagnostic evidence only. Set CONFIRMED_ALIAS (with a canonical location)
-#: or CONFIRMED_DISTINCT only with ``LocationPolicyAuthority`` naming the
-#: supplier / collection-owner / business decision. Its governed scope is the
+#: ``VANCOUVER_LOCATION_POLICY`` (resolved lazily, see :func:`__getattr__`):
+#: identity policy for the Vancouver pair in ``COMPARED_LOCATION_STREAMS``,
+#: built only from the APPROVED ``VANCOUVER_LOCATION_IDENTITY`` decision of the
+#: current authority record
+#: (:func:`~ql2_sixt_canada_analysis.location_authority.vancouver_policy_from_record`):
+#: in record v5, ``CONFIRMED_ALIAS`` with canonical key ``vancouver / Vancouver Downtown``
+#: and ``LocationPolicyAuthority`` naming the collection-owner decision and its
+#: governance reference. Without a valid approved decision it is UNRESOLVED.
+#: Behavioural comparison (``LOCATION_STREAM_COMPARISON``) is diagnostic
+#: evidence only and never sets or changes the state. Its governed scope is the
 #: one city both keys share; a confirmed alias may canonicalise only to one of
 #: the two governed keys, never to another city or configured stream.
-VANCOUVER_LOCATION_POLICY: Final = LocationIdentityPolicy(
-    first=COMPARED_LOCATION_STREAMS[0],
-    second=COMPARED_LOCATION_STREAMS[1],
-    coverage=EXPECTED_LOCATION_COVERAGE,
-    state=LocationPolicyState.UNRESOLVED,
-)
-
 
 # ----------------------------------------------------- vehicle-attribute stability
 
@@ -1730,10 +2016,73 @@ VEHICLE_ATTRIBUTE_STABILITY: Final = VehicleStabilityDefinition(
         'job_return_date', 'row_index', 'pickup_date', 'return_date', 'price_per_day', 'scraped_at',
         'price_num', 'city_clean', 'date_clean',
     ),
-    price_columns=LOCATION_STREAM_COMPARISON.price_columns,
+    price_columns=_COMPARISON_PRICE_COLUMNS,
     temporal=TEMPORAL_RECONCILIATION,
     observation_time_field=(DatasetKey.CARS, 'scraped_at'),
     minimum_observations=2,
     same_capture_conflicts_reported=True,
     canonical_location_grouping=False,
 )
+
+
+# ------------------------------------------- authority-resolved contract (lazy)
+
+_LAZY_CONTRACT_NAMES = frozenset({"EXPECTED_LOCATION_COVERAGE", "LOCATION_STREAM_COMPARISON",
+                                  "ANALYSIS_LOCATION_STREAM_COMPARISON", "VANCOUVER_LOCATION_POLICY"})
+
+
+def _governed_pair_coverage() -> LocationCoverageDefinition:
+    """Scaffold for the Vancouver comparison/policy when no approved contract contains the pair.
+
+    It holds only the two governed keys (minimum mode) so the policy stays
+    representable; it is never a coverage contract: completeness and readiness
+    use :data:`EXPECTED_LOCATION_COVERAGE` and block without an approved universe.
+    """
+    return dataclass_replace(SOURCE_STREAM_COVERAGE_TEMPLATE, expected_locations=COMPARED_LOCATION_STREAMS,
+                             mode=LocationCoverageMode.MINIMUM_REQUIRED)
+
+
+class _ProjectDefault:
+    """Default-argument marker: "the project's authority-resolved definition", looked up at call time."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "PROJECT_DEFAULT"
+
+
+#: Default-argument marker for the lazily resolved definitions above, so that
+#: importing a module never reads the authority record (see :func:`project_default`).
+PROJECT_DEFAULT: Final = _ProjectDefault()
+
+
+def project_default(value: object, name: str) -> object:
+    """``value``, or the lazily resolved module attribute ``name`` when ``value`` is :data:`PROJECT_DEFAULT`."""
+    if value is PROJECT_DEFAULT:
+        if name not in _LAZY_CONTRACT_NAMES:
+            raise AttributeError(name)
+        return __getattr__(name)
+    return value
+
+
+def __getattr__(name: str):  # PEP 562: resolve the authority-backed contract on first access
+    if name not in _LAZY_CONTRACT_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from ql2_sixt_canada_analysis.authority_decisions import load_current_decision_record
+    from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
+    from ql2_sixt_canada_analysis.location_authority import vancouver_policy_from_record
+
+    coverage = current_expected_stream_contract().coverage
+    governed = coverage if coverage.is_configured and set(COMPARED_LOCATION_STREAMS) <= set(
+        coverage.expected_locations) else _governed_pair_coverage()
+    comparison = _location_stream_comparison(governed)
+    values = {
+        "EXPECTED_LOCATION_COVERAGE": coverage,
+        "LOCATION_STREAM_COMPARISON": comparison,
+        "ANALYSIS_LOCATION_STREAM_COMPARISON": dataclass_replace(
+            comparison, relationship=ANALYSIS_JOB_DETAIL_RELATIONSHIP, temporal=ANALYSIS_TEMPORAL_RECONCILIATION),
+        # The authority-backed identity decision (UNRESOLVED unless the current record approves one).
+        "VANCOUVER_LOCATION_POLICY": vancouver_policy_from_record(load_current_decision_record(), governed),
+    }
+    globals().update(values)
+    return globals()[name]

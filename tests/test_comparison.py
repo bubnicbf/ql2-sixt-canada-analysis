@@ -121,8 +121,9 @@ def test_project_definition_is_immutable_and_has_no_alias_or_identity():
 
 def test_target_literals_appear_only_in_schemas():
     root = Path(__file__).resolve().parents[1]
-    # Branch labels identify the streams; the city component is a common word (e.g. in names).
-    names = [key[-1] for key in COMPARED_LOCATION_STREAMS]
+    # The compared keys are written once, as key literals, in schemas; the universe itself is never
+    # written in code (it comes from the authority record).
+    names = [repr(key) for key in COMPARED_LOCATION_STREAMS]
     hits = {p.relative_to(root).as_posix() for p in (root / "src").rglob("*.py")
             if any(n in p.read_text(encoding="utf-8") for n in names)}
     assert hits == {"src/ql2_sixt_canada_analysis/schemas.py"}
@@ -633,9 +634,13 @@ def test_complete_affirmative_evidence_allows_likely_duplicate_but_never_authori
         validate_confirmed_location_alias(_jobs(), cars, DEF)
     from ql2_sixt_canada_analysis.readiness import assess_location_policy
     from ql2_sixt_canada_analysis.schemas import VANCOUVER_LOCATION_POLICY, LocationPolicyState
-    policy = assess_location_policy(VANCOUVER_LOCATION_POLICY, r)
+    undecided = dataclasses.replace(VANCOUVER_LOCATION_POLICY, state=LocationPolicyState.UNRESOLVED, authority=None,
+                                    canonical_location=None)
+    policy = assess_location_policy(undecided, r)                    # behaviour never resolves identity
     assert policy.state is LocationPolicyState.UNRESOLVED and not policy.locations_are_aliases
     assert not policy.location_policy_resolved
+    approved = assess_location_policy(VANCOUVER_LOCATION_POLICY, r)  # nor alters the approved decision
+    assert approved.state is VANCOUVER_LOCATION_POLICY.state
 
 
 def test_one_contradictory_pair_blocks_duplicate_and_is_retained():

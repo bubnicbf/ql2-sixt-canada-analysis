@@ -11,7 +11,7 @@ src/ql2_sixt_canada_analysis/   Reusable Python source package
 tests/             Automated validation (pytest)
 reports/           Generated analytical reports (ignored by default)
 reports/figures/   Generated charts and figures (ignored by default)
-docs/              Supporting documentation
+docs/              Supporting documentation (investigations, decision records)
 ```
 
 - `data/raw/` is immutable input data: never edit, rename, or overwrite it.
@@ -150,9 +150,10 @@ not repeated here.
 - **Missing stays missing.** Empty identifier fields are `pd.NA`, never the
   text `"nan"`, `"None"` or `"<NA>"`, so completely blank rows are still
   detected and removed by the blank-row step.
-- **No normalisation.** Only the type changes. Identifier text is not
-  stripped, re-cased, padded, parsed or validated against any business
-  format; reconciling different textual forms is a separate, later step.
+- **No rewriting of raw values.** Only the type changes. Raw identifier text
+  is never stripped, re-cased, padded, parsed or rewritten. Linking the
+  historical export's different textual forms is done by the separate,
+  authority-backed linkage step below, which derives *new* key columns.
 - **Other columns** keep normal pandas inference unless a caller configures
   them.
 - **Caller options.** `read_csv_options` may add `dtype` rules for other
@@ -228,6 +229,90 @@ classification alone.
   locations). Automated tests (`tests/test_quality.py`) use only synthetic
   DataFrames and synthetic temporary CSVs.
 
+## Authority-backed job linkage
+
+`ql2_sixt_canada_analysis.job_linkage` makes parent/detail linkage
+trustworthy without modifying raw source values. It implements the
+collection-owner decisions recorded in
+[`docs/decisions/governance/job-identifier-governance-2026-10-06.md`](docs/decisions/governance/job-identifier-governance-2026-10-06.md)
+and approved in pricing-authority record `v2` (four job-identifier decisions,
+schema 2).
+
+```python
+from ql2_sixt_canada_analysis import assess_job_linkage, load_job_linkage_policy
+
+policy = load_job_linkage_policy()          # None unless all four decisions are APPROVED and consistent
+linkage = assess_job_linkage(jobs_df, cars_df, policy)   # after blank-row removal + dtype validation
+linkage.report                              # counts and statuses only; linkage.report.is_valid
+analysis = linkage.datasets(cleaned)        # analysis-stage frames (raw columns + derived keys)
+```
+
+- **Raw `job_id` is opaque text and immutable.** It is never trimmed,
+  case-folded, padded or parsed through an integer or float, and the raw CSV
+  files are never edited. Numeric parsing is forbidden because it drops
+  leading zeros, rounds long values, accepts signs, exponents and
+  whitespace, and silently merges distinct identifiers; matching is string
+  comparison only, so `"007"` and `"7"` stay different jobs.
+- **Separate derived keys.** New columns `job_id_linkage_key` (nullable
+  string; `JOB_LINKAGE_KEY_COLUMN`) and, for details, `row_index_key`
+  (nullable `Int64`; `OFFER_POSITION_KEY_COLUMN`) are appended; `job_id` and
+  `row_index` stay unchanged next to them. The jobs linkage key is the raw
+  value; missing and whitespace-only values are invalid.
+- **Exact match first, one narrow legacy fallback.** A detail value that
+  exactly equals a job's identifier links to it. Only when the approved
+  policy enables the legacy repair, a detail value consisting entirely of
+  ASCII digits followed by exactly `.0` also yields the candidate without that
+  final `.0` - every preceding character, including leading zeros, is kept
+  (`"00042.0"` -> `"00042"`). Alphanumeric or arbitrary text ending in `.0`
+  is never rewritten.
+- **Ambiguity and collisions block.** Exact and repaired candidates naming
+  different jobs, a match to a duplicated job key, no match, or two raw
+  representations resolving to one job leave the derived key `<NA>` and add
+  a typed blocker (`detail_job_reference_ambiguous`,
+  `parent_linkage_key_not_unique`, `detail_job_reference_unmatched`,
+  `job_linkage_collision`, `detail_job_reference_missing`,
+  `parent_linkage_key_invalid`). The code never guesses.
+- **Offer positions.** `row_index` is a non-negative integer: integer values,
+  ASCII-digit text, legacy `N.0` text (without float coercion) and numbers
+  pandas already inferred (finite, non-negative, exactly integral, not
+  boolean) are accepted; missing values, fractions, negatives, signs,
+  exponents, whitespace, non-finite values and arbitrary text block
+  (`offer_position_missing`, `offer_position_invalid`). Duplicate derived
+  positions are a key-contract failure downstream.
+- **No permissive default.** `assess_job_linkage` requires a policy argument;
+  with `None` (no approved policy) the report is `unavailable`
+  (`job_linkage_policy_unavailable`) and every derived key is `<NA>`, so all
+  downstream contracts fail closed. `require_job_linkage` raises
+  `JobLinkageNotReadyError` unless the report is valid. Applying the step
+  again is deterministic and idempotent; inputs are never mutated.
+- **Analysis-stage contracts.** `DATASET_DEFINITIONS` and
+  `JOB_DETAIL_RELATIONSHIP` remain the raw-source contracts (raw text compared
+  exactly as read). `ANALYSIS_DATASET_DEFINITIONS`,
+  `ANALYSIS_JOB_DETAIL_RELATIONSHIP`, `ANALYSIS_TEMPORAL_RECONCILIATION` and
+  `ANALYSIS_LOCATION_STREAM_COMPARISON` use the derived keys: the linkage key
+  is the jobs unique key, the details' parent foreign key and the first
+  component of the details' unique key (with `row_index_key` second).
+- **Pipeline order.** Load -> validate source columns -> remove blank rows ->
+  validate identifier dtypes -> **job linkage** -> analytical unique keys,
+  coverage, reconciliation, one-to-many relationship, city integrity, trusted
+  join, streams, temporal, comparison, stability, completeness, pricing.
+- **Prerequisite of trust.** The trusted join requires a valid linkage report
+  for the same frames (`job_linkage_report_unavailable`,
+  `job_linkage_not_valid`, `job_linkage_key_not_applied` - the latter also
+  when the raw-source relationship is used). Pricing readiness requires it
+  separately (`job_linkage` argument; `job_key_normalization_missing`,
+  `job_key_normalization_not_ready` plus every linkage blocker by value, and
+  `job_linkage_report_mismatch` if the join was assessed with another report).
+  Valid linkage never bypasses any other gate.
+- **Confidentiality.** `job_id`, `job_id_linkage_key`, `row_index` and
+  `row_index_key` are confidential technical fields
+  (`CONFIDENTIAL_TECHNICAL_COLUMNS`), excluded from product identity,
+  duplicate-offer inference, vehicle stability and every user-visible output.
+  Reports and errors carry counts and categories only.
+- **Upstream fix.** Future exports should serialize `job_id` as text and
+  `row_index` as an integer; until then the pipeline keeps this controlled,
+  authority-backed compatibility with the historical export.
+
 ## Unique keys
 
 Each logical dataset's business key is defined once, with its row grain, in
@@ -254,8 +339,11 @@ validate_raw_dataset_unique_keys(cleaned)               # raises on violations
 - **Missing keys:** a row with any missing component (pandas `NA`/`NaN`) is a
   missing-key row. Missing-key rows are counted on their own and never form
   duplicate groups. Non-empty text such as `"0"`, `"False"`, `"N/A"` or
-  `"null"` is a value, and keys are compared verbatim (never stripped or
-  normalised); validating identifier *content* is a separate control.
+  `"null"` is a value, and key values are compared exactly as given (never
+  stripped or normalised here). For the raw-source contracts that is the raw
+  text; analytically the keys are the authority-backed derived columns
+  (`ANALYSIS_DATASET_DEFINITIONS`, pass them as
+  `assess_raw_dataset_unique_keys(analysis, ANALYSIS_DATASET_DEFINITIONS)`).
 - **Duplicate keys:** evaluated only among complete rows, with all
   components compared as a tuple (`DataFrame.duplicated(keep=False)`), never
   as concatenated strings, so delimiter-like characters cannot collide. Every
@@ -288,13 +376,91 @@ tuple of expected location keys (one component per column), a mode, optional
 authoritative aliases and the scope columns used by stream investigation.
 Locations are **branch-level** pickup locations, which only the detail
 (`cars`) rows carry; jobs are city-level collection runs, so a jobs-level
-contract cannot represent a branch stream. Expected locations must come from
-an **independent authority** and are never derived from the extract being
-validated. The current contract holds three authority-identified streams:
-`INVESTIGATED_LOCATION_STREAM` and the two streams in
-`COMPARED_LOCATION_STREAMS`. The authority defines a required minimum rather
-than an exhaustive universe, so the mode is `MINIMUM_REQUIRED`; add further
-locations only from an authoritative list.
+contract cannot represent a branch stream. Expected locations come only from
+an **authority decision** and are never derived from the extract being
+validated.
+
+**The approved source-stream contract.** The expected streams are not written
+in code. `ql2_sixt_canada_analysis.expected_stream_contract` resolves them
+once from the current authority record
+([`v6.toml`](docs/decisions/pricing_authorities/v6.toml), unchanged since
+[`v5.toml`](docs/decisions/pricing_authorities/v5.toml):
+`EXPECTED_STREAM_UNIVERSE` approved jointly by the collection owner and the
+business owner in revision 3, reference
+[`expected-stream-governance-2026-10-06.md`](docs/decisions/governance/expected-stream-governance-2026-10-06.md);
+`EXPECTED_STREAM_SOURCE_SPELLING` corrected by the collection owner in
+revision 5, reference
+[`collection-schedule-governance-v1-2026-10-06.md`](docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md))
+into an `ExpectedStreamContract`, whose `coverage` *is*
+`EXPECTED_LOCATION_COVERAGE` (structure from `SOURCE_STREAM_COVERAGE_TEMPLATE`,
+keys and mode from the record). Ingestion checks, coverage, stream
+continuity, completeness, pricing readiness, the baseline and the notebook
+all use this one resolution; there is no second stream list. The contract is
+**`EXHAUSTIVE`** and holds exactly seven (city, location) source keys:
+
+| City (exact) | Location (exact) |
+| --- | --- |
+| `calgary` | `Calgary Downtown` |
+| `calgary` | `Calgary Int Airport` |
+| `toronto` | `Toronto Downtown` |
+| `toronto` | `Toronto Int Airport` |
+| `vancouver` | `Vancouver Downtown` |
+| `vancouver` | `Vancouver Int Airport` |
+| `vancouver` | `Vancouver Thurlow` |
+
+These are the exact raw source keys approved in revision 5. They
+**supersede** the display-style spellings (`Calgary / Downtown`,
+`Calgary / Int Airport`, ...) that revisions 3 and 4 recorded as exact keys;
+those revisions stay unchanged as history, and a display-style spelling never
+establishes coverage or schedule identity.
+
+- **Exact source-key matching:** a source stream matches only when city and
+  location both equal an approved pair. Case, spacing and punctuation are
+  significant (`calgary` is not `Calgary` or `calgary `, `Calgary Int Airport`
+  is not `Calgary Int  Airport` or `Calgary Int. Airport`); nothing is lowercased, uppercased,
+  trimmed, whitespace-collapsed or punctuation-rewritten before coverage is
+  decided.
+- **Four separate things:** the *raw source value* (preserved unchanged), the
+  *approved source key* (the exact spelling above), an *analytical display
+  label* and a *governed canonical alias*. Display labels and normalised
+  values never establish source coverage; an alias exists only through an
+  approved location-identity policy (the Vancouver alias below) and is never
+  hidden in general string normalization.
+- **Fail closed:** a missing approved stream (`expected_pairs_missing`) and an
+  observed stream outside the contract (`unexpected_pairs`) both fail
+  completeness and pricing readiness - an unexpected stream is reported
+  pending contract review, never dropped, grouped, relabelled or added to the
+  universe. An unexpected stream that is a case/space/punctuation variant of
+  an approved key is also reported as `source_spelling_mismatch` (detected by
+  diagnostic folding only - the variant never covers the key). Without a valid
+  record, or with an approved universe but unapproved spellings, the coverage
+  stays unconfigured and pricing is blocked by
+  `expected_stream_authority_unavailable`; a non-exhaustive universe by
+  `expected_stream_universe_not_exhaustive`.
+- **Change control:** the contract applies to the current analyzed dataset and
+  subsequent collections until superseded. Any addition, removal, rename or
+  spelling change of a stream needs a new authority-record version (a new
+  `v<N>.toml` with its governance reference); committed versions are never
+  edited.
+- **Source identity is not analytical identity:** `vancouver / Vancouver Downtown`
+  and `vancouver / Vancouver Thurlow` are two separate expected *source*
+  streams, each still required exactly (and each with its own schedule). That
+  they are one analytical location is the separate, approved
+  `VANCOUVER_LOCATION_IDENTITY` decision (`CONFIRMED_ALIAS`, canonical
+  `vancouver / Vancouver Downtown`; see "Location roles, comparison pairs and the
+  Vancouver alias"), applied only through `VANCOUVER_LOCATION_POLICY`, after
+  and separately from source-key validation.
+
+`INVESTIGATED_LOCATION_STREAM` (`calgary / Calgary Downtown`) and
+`COMPARED_LOCATION_STREAMS` (the two Vancouver streams) are designations of
+approved keys for the detailed investigation and the identity comparison, not
+contracts; tests check that they are members of the approved universe.
+**Real data:** the current extracts carry all seven corrected keys exactly and
+no other stream, so the source-spelling blockers (`expected_pairs_missing`,
+`unexpected_pairs`, `source_spelling_mismatch`) and
+`governed_source_stream_missing` are cleared by revision 5. (Under the
+superseded display-style spellings all seven were reported as missing and
+unexpected.)
 An unconfigured contract fails closed with `LocationCoverageConfigurationError`.
 
 ```python
@@ -311,9 +477,11 @@ validate_expected_location_coverage(cleaned.cars)      # raises LocationCoverage
 - **Separate signals:** missing expected locations, unexpected observed
   locations and rows with a missing / empty / whitespace-only location
   component are counted separately; unassigned rows create no observed key.
-- **Modes:** `EXHAUSTIVE` fails on any unexpected location;
-  `MINIMUM_REQUIRED` only reports them. Both fail on missing expected
-  locations and on unassigned rows. The mode must be stated by the authority.
+- **Modes:** `EXHAUSTIVE` (the approved project mode) fails on any
+  unexpected location; `MINIMUM_REQUIRED` only reports them (and pricing then
+  blocks as `expected_stream_universe_not_exhaustive`). Both fail on missing
+  expected locations, spelling variants and unassigned rows. The mode must be
+  stated by the authority.
 - **Exact comparison:** case-sensitive, no stripping, punctuation,
   abbreviation or fuzzy handling; composite keys are compared as tuples.
   Aliases count only when declared in the contract's `aliases` (none are
@@ -405,11 +573,14 @@ present and healthy.
 - A case/space/punctuation/order variant is reported as `UNVERIFIED_ALIAS`
   and never applied; only aliases declared in the contract are matched.
 - Continuity compares the collection events that actually occurred for the
-  target's scope; it does not infer a cadence. Temporal completeness needs an
-  authoritative `COLLECTION_SCHEDULE`; none exists, so it is reported as
-  `NOT_ASSESSED` - which **blocks pricing** (see *Scheduled coverage and the
-  trusted join* below), it is never a neutral or passing state.
-- When a schedule is configured, its timestamp must be a timestamp field of
+  target's scope; it does not infer a cadence. The stream report's own
+  `time_coverage` reads only the legacy single-schedule definition
+  `COLLECTION_SCHEDULE`, which stays `None` because the approved schedule is
+  **per stream**, not a global shared schedule; it is therefore reported as
+  `NOT_ASSESSED` and never used as a pass. Scheduled coverage for pricing is
+  assessed per stream by `collection_schedule` (see *Collection schedule (per
+  stream)* below).
+- If a legacy shared schedule were ever configured, its timestamp must be a timestamp field of
   `TEMPORAL_RECONCILIATION`, and observed times are resolved only through
   that contract (e.g. the `MST` designator as fixed UTC-07:00). Scheduled
   instants must state an explicit offset. No scheduled period observed
@@ -445,7 +616,10 @@ The jobs-to-cars relationship is defined once in
 `ql2_sixt_canada_analysis.schemas` (`JOB_DETAIL_RELATIONSHIP`: parent key =
 the jobs unique key, the matching detail foreign key, and the jobs column that
 declares how many detail rows each job should have). Field names live in the
-source code only.
+source code only. `JOB_DETAIL_RELATIONSHIP` compares the raw identifier text;
+the pipeline reconciles, validates and joins through
+`ANALYSIS_JOB_DETAIL_RELATIONSHIP`, the same relationship on the derived
+linkage key (see *Authority-backed job linkage*).
 
 ```python
 from ql2_sixt_canada_analysis import assess_job_detail_reconciliation, validate_job_detail_reconciliation
@@ -511,10 +685,8 @@ a separate key-integrity failure; nothing is deduplicated.
 
 ### All expected streams
 
-The expected-location contract currently holds **three** authority-identified
-(city, branch) pairs (`INVESTIGATED_LOCATION_STREAM` followed by
-`COMPARED_LOCATION_STREAMS`) in `MINIMUM_REQUIRED` mode: a required minimum,
-not an exhaustive list of every branch or every scheduled city.
+The expected-location contract holds the **seven** approved (city, location)
+source streams in `EXHAUSTIVE` mode (see above).
 `assess_expected_location_streams(jobs_df, cars_df)` investigates **every**
 configured pair exactly once, in contract order, and returns an
 `ExpectedLocationStreamsReport` that pairs each report with its configured
@@ -626,15 +798,18 @@ non-`None` DataFrame is never proof of analytical validity.
 ```python
 from ql2_sixt_canada_analysis import assess_job_detail_join_readiness, require_trusted_job_detail_join
 
-join = assess_job_detail_join_readiness(jobs_df, cars_df)
+join = assess_job_detail_join_readiness(analysis.jobs, analysis.cars, job_linkage=linkage.report)
 join.join_ready, join.blocking_reasons
 join.trusted_jobs_with_details        # DataFrame only when join_ready, else None
 join.diagnostic_jobs_with_details     # UNTRUSTED investigation frame, or None
-require_trusted_job_detail_join(jobs_df, cars_df)   # trusted frame or UntrustedJoinError
+require_trusted_job_detail_join(analysis.jobs, analysis.cars, job_linkage=linkage.report)  # or UntrustedJoinError
 ```
 
 - **Prerequisites (all must explicitly pass, on the same frames that are
-  joined, in one call):** the jobs business-key contract
+  joined, in one call):** a valid authority-backed linkage report for these
+  frames, with the join keyed on the derived linkage key (the default
+  `ANALYSIS_JOB_DETAIL_RELATIONSHIP`; the raw `job_id` is never the trusted
+  join key), the jobs business-key contract
   (`jobs_key_contract_valid`), the detail business-key contract
   (`details_key_contract_valid`; together `all_key_contracts_valid`),
   declared-count reconciliation (`declared_counts_reconciled`) and the
@@ -647,7 +822,10 @@ require_trusted_job_detail_join(jobs_df, cars_df)   # trusted frame or Untrusted
   (`jobs_key_contract_failed`, `details_key_contract_failed`,
   `declared_counts_not_reconciled`, `relationship_contract_failed`,
   `orphan_details_present`, `missing_link_details_present`,
-  `join_construction_failed`). Every applicable reason is reported.
+  `join_construction_failed`, `job_linkage_report_unavailable`,
+  `job_linkage_not_valid`, `job_linkage_key_not_applied`). Every applicable
+  reason is reported; the linkage report's own blockers are kept on
+  `job_linkage_reasons`.
 - **Trusted vs diagnostic:** `trusted_jobs_with_details` is the only frame
   downstream analysis may use. `diagnostic_jobs_with_details` is the
   relationship-checked join kept for investigation when the relationship
@@ -665,57 +843,129 @@ require_trusted_job_detail_join(jobs_df, cars_df)   # trusted frame or Untrusted
 
 ## Temporal reconciliation
 
-`ql2_sixt_canada_analysis.schemas.TEMPORAL_RECONCILIATION` is the single
-temporal contract for `finished_at`, `scraped_at`, `scrape_date` and
-`date_clean` (plus the detail rows' copy of the parent job's finish time).
-Each field states its dataset, whether it is a **timestamp** or a
+`ql2_sixt_canada_analysis.schemas.TEMPORAL_RECONCILIATION` (and its
+analysis-stage twin `ANALYSIS_TEMPORAL_RECONCILIATION`) is the
+authority-free *template* of the temporal contract for `finished_at`,
+`scraped_at`, `scrape_date` and `date_clean` (plus the detail rows' copy of
+the parent job's finish time). The **authority-backed** contract is
+`current_temporal_reconciliation()` (`temporal_authority.py`, from the current
+record `v8.toml`; `current_temporal_authority()` carries it with the decision
+statuses). Each field states its dataset, whether it is a **timestamp** or a
 **calendar date**, its format and its time-zone policy.
 
-| Field | Dataset | Kind | Established time-zone basis |
+| Field | Dataset | Kind | Time-zone basis (authority record v8) |
 | --- | --- | --- | --- |
-| `finished_at` | jobs (copy on detail rows) | timestamp | naive; **no authoritative zone**, so not resolved to an instant |
-| `scraped_at` | cars, per detail row | timestamp | source designator mapped explicitly (`MST` = fixed UTC-07:00, the collector's clock label, not market-local time) |
-| `scrape_date` | jobs and cars | calendar date | source-supplied |
-| `date_clean` | cars | calendar date | source-supplied (not generated by repository code) |
+| `finished_at` | jobs (copy `job_finished_at` on detail rows) | timestamp | naive local wall clock in the IANA zone of the **parent job** city (`jobs.city`, exact) |
+| `scraped_at` | cars, per detail row | timestamp | source designator mapped explicitly (`MST` = fixed UTC-07:00, the collector's clock label, never market-local time) |
+| `scrape_date` | jobs and cars | calendar date | strict `ISO_8601_DATE`; must equal the parent's **reporting day** (record v8) |
+| `date_clean` | cars | calendar date | source-supplied; **retired from pricing** (record v8): preserved and reported for parse quality only |
+
+**City-local finish times** (`FINISHED_AT_TIMEZONE`, record v5, confirmed in
+v6 with reference
+[`finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md`](docs/decisions/governance/finished-at-timezone-and-scrape-ordering-governance-v1-2026-10-06.md)):
+`calgary` - `America/Edmonton`, `toronto` - `America/Toronto`, `vancouver` -
+`America/Vancouver` (exhaustive; the lowercase spellings are exact). The map
+is the one `CityTimezoneMap` shared with the per-stream schedule. The exact
+**parent job** `jobs.city` selects the zone for `jobs.finished_at` and for the
+linked `cars.job_finished_at`; a detail row's own city must equal its
+parent's first, and neither the detail city nor the location label ever
+selects a zone. Missing, blank, unknown or case/whitespace-variant cities
+fail closed (*unknown city*); detail rows without a linked parent are
+*context unavailable*. Only region IANA zones and the installed IANA database
+are used - never fixed offsets, abbreviations (EST, EDT, MST, MDT, PST, PDT),
+the machine's zone or one global zone - so daylight-saving rules apply for the
+date being interpreted. A naive value in a repeated fall-back hour is
+**ambiguous** and one in a spring-forward gap is **nonexistent**: both fail
+closed, no occurrence is chosen and nothing is shifted.
+
+**Normalization and precision.** Raw columns are never modified. Each value
+is parsed with the approved source format, resolved to an absolute instant
+and converted to a timezone-aware **UTC** value that keeps the **full
+precision** of the source (fractional seconds included); replication and
+ordering use those full-precision instants. `YYYYMMDDTHHMMSSZ`
+(`canonical_utc_text`) is only the serialized presentation form - whole
+seconds, never the identity: two different sub-second instants stay
+different even when their strings match. `derive_utc_timestamps(jobs, cars,
+definition)` returns separate frames with `finished_at_utc`,
+`job_finished_at_utc`, `scraped_at_utc` and the matching `*_canonical`
+columns; derived values are never written into the source frames or the
+sanitized baseline.
+
+**Replication and ordering** (`SCRAPED_FINISHED_ORDERING`,
+`SCRAPED_FINISHED_TOLERANCE`, record v6):
+
+- `cars.job_finished_at` must repeat its parent's `jobs.finished_at`: the same
+  wall-clock value, resolved in the parent city's zone, and the same
+  full-precision UTC instant. A matching canonical second is not enough, and a
+  mismatch is never repaired by copying the parent value.
+- For every trusted linked detail row `cars.scraped_at` must be **earlier
+  than or equal to** `jobs.finished_at` (UTC instants; **equality allowed**),
+  with **zero** tolerance: a scrape later by any positive amount - one
+  microsecond included - fails. A trusted row is linked, has the same city
+  as its parent and a replicated finish time; other rows are counted as
+  unassessable. Raw strings, canonical strings and naive wall clocks from
+  different zones are never compared.
 
 ```python
-from ql2_sixt_canada_analysis import assess_temporal_reconciliation, validate_temporal_reconciliation
+from ql2_sixt_canada_analysis import (
+    assess_temporal_reconciliation, current_temporal_authority, current_temporal_reconciliation)
 
-report = assess_temporal_reconciliation(jobs_df, cars_df)   # aggregate report, in memory
+report = assess_temporal_reconciliation(jobs_df, cars_df, current_temporal_reconciliation())
 report.is_valid, report.violations, report.unavailable_rules
-validate_temporal_reconciliation(jobs_df, cars_df)          # raises TemporalParseError / TemporalReconciliationError
+current_temporal_authority().blocking_reasons     # e.g. reporting_day_unresolved
 ```
 
-- **Parsing:** missing (pandas missing, empty or whitespace-only),
-  invalid (unparsable, impossible dates, unsupported types, a time on a date
-  field) and *unresolved* (no authoritative zone, ambiguous or nonexistent
-  local times, unknown designators, mixed offset awareness) are counted
-  separately. Naive values are **never** given the machine's zone or UTC.
-- **Canonical comparison:** instants are compared in **UTC**. A reporting
-  date is derived only *after* converting the source instant to the rule's
-  reporting zone; rows whose reporting date differs from the UTC date but
-  match are counted as legitimate boundary crossings.
-- **Rules:** ordering (direction, inclusive/exclusive, explicit non-negative
-  tolerance), reporting-date derivation and replication (detail-row copies
-  equal their parent) are assessed independently, per linked detail row via
-  the central relationship; missing and orphan links are unassessable, never
-  dropped.
-- **Established rule:** the detail rows' parent finish-time copy must equal
-  the parent job's `finished_at` (wall times; both share the same naive
-  basis).
-- **Unavailable (fail closed until an authority defines them):** the
-  ordering between `finished_at` and `scraped_at`, a time zone for
-  `finished_at`, and the source timestamp and reporting zone behind
-  `scrape_date` and `date_clean`. Markets span several zones and no
-  authoritative location-to-zone mapping exists. **No tolerance is
-  authorised.** Strict validation fails while any of these is unavailable.
-- **Empty data:** empty frames have no contradictions (presence is a
-  separate control), but configuration must be valid and unavailable rules
-  still fail closed.
+- **Parsing:** missing (pandas missing, empty or whitespace-only), invalid
+  (unparsable, impossible dates, unsupported types, a time on a date field)
+  and *unresolved* (unknown city, no parent context, ambiguous or nonexistent
+  local time, unknown designator, mixed offset awareness) are counted
+  separately per field; nothing is dropped before validity is decided.
+- **Fail closed:** temporal trust (`report.is_valid`) requires every field to
+  parse, every resolvable value to resolve, no unlinked or city-mismatched
+  detail row, replication and ordering to hold for every row, and every date
+  rule to be available and to hold. Until record v8 the reporting-day and
+  date-semantics decisions were `PROPOSED`, so the date-derivation rules were
+  unavailable and pricing kept `temporal_fields_untrusted`.
+- **Reporting day** (record v8,
+  [`reporting-day-and-source-date-governance-v1-2026-10-06.md`](docs/decisions/governance/reporting-day-and-source-date-governance-v1-2026-10-06.md)):
+  `REPORTING_DAY_SOURCE` = `jobs.finished_at` and `REPORTING_DAY_TIMEZONE` =
+  `PARENT_CITY` (business owner) - the reporting day is the **local calendar
+  date of the parent finish instant in the parent city's zone** (`calgary`
+  `America/Edmonton`, `toronto` `America/Toronto`, `vancouver`
+  `America/Vancouver`). Detail rows receive it only through their trusted
+  linked parent (exact city integrity), never from `cars.scraped_at`. An
+  unknown city has no reporting day; no default zone is assumed.
+  `SCRAPE_DATE_SEMANTICS` = `REPORTING_DAY` (collection owner): both
+  `jobs.scrape_date` and `cars.scrape_date` are parsed strictly as
+  `ISO_8601_DATE` (exact `YYYY-MM-DD`, a real date, nothing trimmed) and must
+  equal that reporting day as parsed dates. Raw values are preserved and
+  nothing is repaired: missing, invalid, mismatched, unlinked, untrusted and
+  unresolvable rows fail closed. `derive_reporting_days(jobs, cars,
+  definition)` returns the derived structure in separate frames (raw finish
+  value, full-precision UTC instant, zone, reporting day, raw and parsed
+  scrape date, agreement status, provenance); nothing is overwritten.
+- **`date_clean` retired** (`DATE_CLEAN_SEMANTICS` = `RETIRED_FROM_PRICING`,
+  collection owner): `date_clean` is ingested, preserved raw and parsed for
+  presence and parse quality only. It is never a reporting day, never
+  overrides `scrape_date`, is never used for grouping, is not required to
+  agree with anything, never creates trust and is never rewritten; it has no
+  date rule, so the contract no longer reports
+  `date_derivation:cars.date_clean` as unavailable and its parse quality never
+  blocks. `TemporalAuthority.pricing_date_fields` names only the approved
+  source (`jobs.finished_at`).
+- **Real data (counts only):** 270 parent and 11,940 detail finish times all
+  resolve (no missing, invalid, unknown-city, ambiguous or nonexistent value),
+  all 11,940 copies replicate, no detail city disagrees with its parent and
+  all 11,940 scrape times are earlier than or equal to their parent's finish
+  time. Both scrape-date fields agree with the reporting day (270 of 270 parent
+  and 11,940 of 11,940 detail values; 57 parent and 2,636 detail values sit on
+  a local-date boundary where the UTC date differs), and all 11,940
+  `date_clean` values are present and parse. Temporal fields are trusted
+  (`temporal_fields_untrusted` is cleared by record v8).
 - Assessment returns a frozen report of counts and booleans only; strict
-  validation raises a typed exception listing categories only. Source values
-  are never rewritten, filled or dropped. Tests use fabricated timestamps and
-  dates; real temporal diagnostics must not be committed.
+  validation raises a typed exception listing categories only. Tests use
+  fabricated timestamps and dates; real temporal diagnostics must not be
+  committed.
 
 ## Related location stream comparison
 
@@ -850,6 +1100,194 @@ validate_confirmed_location_alias(jobs_df, cars_df)   # raises LocationAliasNotC
   paired-capture and price comparison exports are ignored by Git and must
   not be committed.
 
+## Collection schedule (per stream)
+
+Authority record v5 (schema 3) approves the collection schedule
+([governance reference](docs/decisions/governance/collection-schedule-governance-v1-2026-10-06.md),
+schedule version `per_stream_hourly_v1`, effective for the current dataset and
+subsequent schedule versions until superseded).
+`ql2_sixt_canada_analysis.collection_schedule` builds it from the APPROVED
+decisions only (`current_per_stream_schedule()`, `schedule_from_record`); no
+period is ever inferred from observed jobs.
+
+- **Capture timestamp** (`SCHEDULE_CAPTURE_TIMESTAMP`, collection owner): the
+  parent job's `jobs.finished_at` marks the scheduled execution.
+  `cars.job_finished_at` is its replicated copy and must agree with the linked
+  parent (`scheduled_detail_copy_mismatch` otherwise). `cars.scraped_at` is
+  detail observation time only: it is never a schedule key, and no first,
+  last, minimum, maximum or average of it places a job in a period. Every
+  expected stream of the parent's city is evaluated against the parent's
+  period.
+- **City time zones** (`FINISHED_AT_TIMEZONE`, collection owner; an exhaustive
+  map selected by the exact parent `jobs.city`): `calgary` -
+  `America/Edmonton`, `toronto` - `America/Toronto`, `vancouver` -
+  `America/Vancouver`. A missing, blank, unknown or misspelled city fails
+  closed. The raw value is preserved, parsed as a naive local value,
+  localized with the IANA zone, converted to an aware UTC instant and
+  serialized as `YYYYMMDDTHHMMSSZ` - a `Z` is never simply appended. The same
+  map drives the temporal contract (see *Temporal reconciliation*).
+- **Expected periods** (`SCHEDULE_EXPECTED_PERIODS`, collection owner): cadence
+  `PT1H`, phased at the top of every local clock hour, exactly one parent job
+  per city per local hour; every stream's window is local
+  `2026-08-27T22:00:00` to `2026-08-31T15:00:00`, end inclusive, in its
+  city's zone. The periods are materialized from these definitions with the
+  IANA database: a nonexistent spring-forward hour is skipped, a repeated
+  fall-back hour yields two periods with distinct offsets (never
+  deduplicated), nothing is shifted and no fixed offset is used; each period
+  exposes its local start, UTC offset, fold and UTC text. The current window
+  contains no transition. (With the installed tz database, `America/Vancouver`
+  and `America/Edmonton` define no fall-back transition in November 2026; the
+  model simply follows the database, and the tests compare it with an
+  independent IANA oracle instead of assumed offsets.)
+- **Sharing model** (`SCHEDULE_SHARING_MODEL`): `PER_STREAM`. Each of the seven
+  streams has its own typed `StreamSchedule` and expected-period set - not a
+  global shared schedule or one global list of UTC instants. One stream's
+  missing coverage never makes another unhealthy, one stream's presence never
+  satisfies another (`calgary / Calgary Int Airport` never satisfies
+  `calgary / Calgary Downtown`), and a future version may change one stream
+  without silently changing the others.
+- **Counts** (computed from the definitions): 90 periods per stream, 630
+  stream-periods in total - Calgary 180, Toronto 180, Vancouver 270.
+- **Exceptions** (`SCHEDULE_EXCEPTIONS`, collection owner and business owner,
+  joint): records v5 to v7 approved `NO_EXCEPTIONS`, an explicit model rather
+  than an empty list. Record v8 supersedes it with `LISTED_EXCEPTIONS` holding
+  exactly one `INCOMPLETE_PARENT_CAPTURE` exclusion
+  ([`calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md`](docs/decisions/governance/calgary-incomplete-parent-capture-exclusion-governance-v1-2026-10-06.md)):
+  schedule version `per_stream_hourly_v1`, city `calgary`, both streams
+  (`calgary / Calgary Downtown` and `calgary / Calgary Int Airport`), period
+  `20260828T170000Z`. The one Calgary parent capture of that period returned
+  Airport rows but no Downtown rows; the whole capture is **analytically
+  null** and both Calgary streams are excluded for that one period. The
+  exclusion is keyed by schedule version, city, period and streams - never by
+  a job identifier - and must match exactly one valid parent capture: zero
+  or several matches fail closed (`schedule_exclusion_unmatched`). It is not
+  a stream excuse (`STREAM_ABSENT_FROM_CAPTURE` is not used for the Airport
+  stream), there is no general rule that drops incomplete captures, and any
+  future exclusion or exception needs a new versioned decision; an exception
+  never applies across streams, periods, failure kinds or versions.
+  **Nothing is deleted**: the raw parent job, its raw status and every raw
+  detail row stay in the source files and in ingestion, linkage,
+  reconciliation, audit and exception reporting, and no Downtown row is
+  fabricated.
+
+`assess_per_stream_scheduled_coverage(jobs, cars, schedule=..., contract=..., relationship=...)`
+validates each parent job's exact city, parses `finished_at` as naive local
+time, applies the city zone, converts to UTC, takes the local top-of-hour
+period and matches it to the expected periods. It fails closed - counted per
+`JobAssignmentFailure` and blocking with `scheduled_job_assignment_failed` -
+on a missing or invalid `finished_at`, a missing, blank or unknown city, an
+ambiguous or nonexistent observed local time, a job outside the window or
+matching no expected period, and several jobs in one city-period; a detail
+copy that disagrees with its parent also blocks. An expected city-period with
+no job leaves every stream of that city missing for that period. Per
+stream-period coverage uses the exact raw key only (no alias, case or
+whitespace matching and no cross-stream substitution), and missing
+stream-periods are always reported (`PerStreamScheduledCoverageReport.streams`,
+one entry per schedule). Any unexcused missing stream-period blocks pricing
+with `scheduled_coverage_incomplete`; an unavailable schedule (a schedule
+decision not approved or no valid record) is `collection_schedule_unavailable`
+and a contradictory one `collection_schedule_invalid`.
+
+Excluded stream-periods are neither covered nor missing: `StreamPeriodCoverage`
+keeps `expected` (nominal), `excluded` and `required` (nominal minus excluded),
+and `PerStreamScheduledCoverageReport` reports `nominal_periods`,
+`excluded_periods`, `required_periods`, `covered_periods`,
+`excluded_parent_captures` and `unmatched_exclusions`. The resolved captures
+(`capture_exclusions`, a `CaptureExclusionSet`, in memory only) feed the
+stream investigation (`capture_exclusions=`: governed jobs are counted
+separately as `governed_excluded_jobs`, neither present nor a gap) and the
+pricing-eligible population; `capture_periods` gives every validly assigned
+parent capture its scheduled period.
+
+**Real data (counts only):** all 270 parent jobs are assigned to exactly one
+expected city-period with no assignment failure and no disagreeing detail
+copy. Of 630 nominal stream-periods, 2 are excluded by the governed Calgary
+exclusion (one per Calgary stream), 628 are required and all 628 are covered:
+`calgary / Calgary Downtown` and `calgary / Calgary Int Airport` 89 covered
+plus 1 excluded each, every other stream 90 covered; 0 unexcused missing.
+Before record v8 the same Calgary Downtown gap was an unexcused missing
+stream-period that blocked pricing (`scheduled_coverage_incomplete`).
+
+## Location roles, comparison pairs and the Vancouver alias
+
+Authority record v4 approved three business and identity decisions
+([governance reference](docs/decisions/governance/location-roles-and-identity-governance-2026-10-06.md));
+record v5 carries them unchanged in meaning with the corrected exact source
+keys;
+`ql2_sixt_canada_analysis.location_authority` reads them from the current
+record (no hard-coded table) and validates them against the exhaustive
+source contract and the identity policy, fail closed:
+
+| Approved source stream | Role |
+| --- | --- |
+| `calgary / Calgary Downtown` | DOWNTOWN |
+| `calgary / Calgary Int Airport` | AIRPORT |
+| `toronto / Toronto Downtown` | DOWNTOWN |
+| `toronto / Toronto Int Airport` | AIRPORT |
+| `vancouver / Vancouver Downtown` | DOWNTOWN |
+| `vancouver / Vancouver Int Airport` | AIRPORT |
+| `vancouver / Vancouver Thurlow` | DOWNTOWN |
+
+Approved comparison pairs (airport versus downtown, on canonical keys):
+`calgary / Calgary Int Airport` versus `calgary / Calgary Downtown`,
+`toronto / Toronto Int Airport` versus `toronto / Toronto Downtown`, and
+`vancouver / Vancouver Int Airport` versus the canonical
+`vancouver / Vancouver Downtown`.
+
+- **Roles** (`role_map_from_record`): exactly one of AIRPORT, DOWNTOWN or
+  OTHER for every approved source key, compared exactly (no case, whitespace
+  or punctuation folding); a missing, extra, duplicated, invalid or
+  contradictory assignment (aliases with different roles) blocks
+  (`branch_roles_not_exact`); no approved map is
+  `branch_role_authority_unavailable`.
+- **Comparison pairs** (`comparison_pairs_from_record`): each pair stays
+  within one city, compares one AIRPORT with one DOWNTOWN key of the source
+  contract, uses canonical keys only and resolves to two different canonical
+  locations; cross-city, airport-to-airport, downtown-to-downtown, OTHER,
+  self, duplicated or reversed pairs, unknown keys, a second pair through
+  `vancouver / Vancouver Thurlow` and Vancouver Downtown versus Thurlow are all
+  rejected (`comparison_pairs_invalid`); no approved set is
+  `comparison_pair_authority_unavailable`; a pair touching the governed
+  Vancouver keys without a resolved identity is
+  `comparison_pair_identity_unresolved`. Pairs are never generated from rows
+  or names. The project comparison definitions are these three, so
+  `vancouver / Vancouver Thurlow` never yields an independent comparison.
+- **Vancouver alias** (`vancouver_policy_from_record` builds the existing
+  `LocationIdentityPolicy` - one alias mechanism): `CONFIRMED_ALIAS`,
+  governed keys `vancouver / Vancouver Downtown` and
+  `vancouver / Vancouver Thurlow` (named explicitly in the schema-3
+  resolution), canonical key `vancouver / Vancouver Downtown`, with the
+  collection-owner authority and its governance reference. `apply_location_policy` keeps the **raw source key**
+  of every row (`source_keys`, used for coverage and audit) and exposes a
+  separate **canonical analytical key** (`analytical_keys`, used for
+  analytical grouping); both Vancouver source keys map to
+  `vancouver / Vancouver Downtown`, nothing else changes, and no row is dropped.
+  Independent comparison of the two aliases is never permitted.
+- **Source coverage stays separate:** both raw Vancouver streams remain
+  required by the exhaustive source contract; one never covers the other. A
+  confirmed alias whose two raw streams are not both present exactly blocks
+  pricing (`governed_source_stream_missing`), so canonicalization cannot hide
+  a missing stream. A canonical key outside the governed keys (another city,
+  `vancouver / Vancouver Int Airport`) is rejected by the record validator and refused
+  by the scope rule; a mapping defect or contradicting authoritative identity
+  metadata still blocks (`identity_evidence_conflicts_with_policy`).
+- **Behaviour is not identity:** duplicate-looking or distinct-looking offer
+  behaviour is diagnostic only and never sets, changes or overrides the
+  approved state.
+- **Analytical population:** merging the two aliased raw streams into one
+  canonical location raises the question how their offers combine. The
+  location authority keeps raising `canonical_offer_combination_unresolved`
+  for that merge; pricing readiness resolves it only with a ready,
+  authority-backed canonical-offer assessment (`CANONICAL_OFFER_COMBINATION`,
+  record v8, see *Pricing-eligible population and canonical offers*).
+  Valid-offer and semantic-duplicate controls are unchanged.
+
+`assess_pricing_readiness` takes the `LocationAuthorityReport`
+(`location_authority`, from `current_location_authority()` or
+`location_authority_from_record`) as a required argument and re-validates its
+roles and pairs under the gate's own identity policy and source contract
+(`roles_pairs_policy_mismatch`, `roles_pairs_contract_mismatch` otherwise).
+
 ## Vancouver location policy and pricing readiness
 
 **Behavioural evidence is not identity authority.** Identical offers, full
@@ -857,11 +1295,14 @@ temporal overlap, similar names or a `LIKELY_DUPLICATE_STREAMS` /
 `LIKELY_DISTINCT_STREAMS` comparison can justify an investigation, but never
 decide whether the two Vancouver labels are one analytical location.
 That decision is the authority-backed `VANCOUVER_LOCATION_POLICY`
-(`LocationIdentityPolicy` in `schemas.py`), with three states:
+(`LocationIdentityPolicy` in `schemas.py`), built only from the approved
+`VANCOUVER_LOCATION_IDENTITY` decision of the current authority record - in
+record v5 `CONFIRMED_ALIAS` with canonical `vancouver / Vancouver Downtown` - with three
+states:
 
 | State | Meaning | Analysis allowed |
 | --- | --- | --- |
-| `UNRESOLVED` (**default**) | No sufficient authoritative decision exists. | Neither independent comparison nor merging. Pricing is blocked. |
+| `UNRESOLVED` (without an approved decision) | No sufficient authoritative decision exists. | Neither independent comparison nor merging. Pricing is blocked. |
 | `CONFIRMED_ALIAS` | An authority established both labels are one analytical location. | Only through the approved `canonical_location`; never as two separate locations. |
 | `CONFIRMED_DISTINCT` | An authority established they are distinct analytical locations. | Independent comparison, subject to every other gate. |
 
@@ -904,7 +1345,7 @@ were bypassed - and refuses an invalid alias as a whole
 (`canonicalization_refused`, `scope_defects`): every analytical key then
 equals its source key, so no row is moved into another city or stream and
 nothing is partially rewritten. Coverage, stream continuity, the
-three-stream completeness contract and comparisons use source labels (branch
+source-stream completeness contract and comparisons use source labels (branch
 coverage from the detail rows) and are never computed from canonical keys,
 so a rejected alias neither removes the Vancouver streams nor adds rows to
 Calgary; pricing readiness stays blocked until the policy is corrected.
@@ -979,8 +1420,8 @@ it; `None` blocks as `completeness_unavailable`, a failure as
 `data_incomplete`, plus `expected_streams_not_proven` for stream failures
 and `scope_integrity_not_proven` for city scope integrity failures)
 and every other foundational gate (key contracts, one-to-many relationship,
-temporal trust, vehicle stability, passed as the full-population
-`VehicleStabilityReport`) must pass, and the location policy must add no blocker. Each failure is a `PricingBlocker` (for example
+temporal trust, vehicle stability, passed as the `VehicleStabilityReport` of
+the pricing-eligible population) must pass, and the location policy must add no blocker. Each failure is a `PricingBlocker` (for example
 `vancouver_policy_unresolved`, `alias_canonicalization_not_applied`,
 `temporal_fields_untrusted`); `validate_pricing_readiness` raises
 `PricingNotReadyError`. A resolved policy never overrides another gate.
@@ -991,25 +1432,24 @@ Two further prerequisites are required, keyword-only arguments of
 `assess_pricing_readiness` with no defaults - a caller cannot omit them and
 receive `ready=True`; `None` is accepted only to be reported as a blocker:
 
-- `scheduled_coverage` - `assess_scheduled_time_coverage(assess_collection_schedule(COLLECTION_SCHEDULE), expected_streams_report)`.
-  `CollectionScheduleAssessment` is `available` (configured and valid against
-  the relationship and temporal contracts), `unavailable` (none configured -
-  never read as "no scheduled times were required") or `invalid`. The
-  `ScheduledCoverageReport` is complete only when the schedule is available,
-  the all-expected-stream aggregate holds **exactly one** report per
-  configured expected stream (all three; duplicates or unexpected reports
-  never replace a missing one), every report was assessed against that same
-  schedule, and every stream's time coverage is `COMPLETE` - an allowlist:
-  `NOT_ASSESSED`, `NEVER_PRESENT`, `PARTIAL`, `UNASSESSABLE`, a missing
-  report or any other value fails. Stream health, completeness and temporal
-  field trust are separate gates and never substitute for it; a complete
-  Calgary stream cannot mask a Vancouver stream. Blockers:
+- `scheduled_coverage` - the `PerStreamScheduledCoverageReport` of
+  `assess_per_stream_scheduled_coverage(jobs, cars, schedule=current_per_stream_schedule(), contract=..., relationship=...)`
+  (see *Collection schedule (per stream)*). It is complete only when the
+  authority-backed schedule is available, it holds exactly one schedule per
+  approved stream (unknown, duplicate and missing streams are refused), every
+  parent job is assigned to exactly one expected city-period, every detail
+  copy agrees with its parent, and every stream-period of every stream is
+  covered by its own exact key or excused by a governed exception. Stream
+  health, completeness and temporal field trust are separate gates and never
+  substitute for it; a complete stream never masks another. Blockers:
   `scheduled_coverage_assessment_missing`, `collection_schedule_unavailable`,
-  `collection_schedule_invalid`, `scheduled_coverage_streams_unavailable`,
-  `scheduled_coverage_streams_not_exact`,
-  `scheduled_coverage_schedule_not_applied`, `scheduled_coverage_incomplete`,
-  `scheduled_coverage_contract_mismatch` (a different contract than
-  completeness).
+  `collection_schedule_invalid`, `scheduled_coverage_streams_not_exact`,
+  `scheduled_job_assignment_failed`, `scheduled_detail_copy_mismatch`,
+  `scheduled_coverage_incomplete` and `scheduled_coverage_contract_mismatch`
+  (a different contract than completeness). The legacy single-schedule
+  `ScheduledCoverageReport` (`assess_scheduled_time_coverage`) is still
+  accepted and fails while its shared `COLLECTION_SCHEDULE` stays `None`
+  (`collection_schedule_unavailable` and its other values).
 - `job_detail_join` - the `JobDetailJoinReadiness` from
   `assess_job_detail_join_readiness`. Unless it is join-ready, pricing gets
   `trusted_join_not_ready` plus each join blocker with the same value
@@ -1020,33 +1460,292 @@ receive `ready=True`; `None` is accepted only to be reported as a blocker:
   `job_scope_unassignable`, `parent_detail_scope_mismatch`); a missing
   assessment is `trusted_join_assessment_missing`. A non-`None` joined frame
   (including the untrusted diagnostic join) is never evidence of readiness.
+- `job_linkage` - the `JobLinkageReport` of `assess_job_linkage`, the same
+  object the trusted join was assessed with. `None` is
+  `job_key_normalization_missing`; any other non-valid report adds
+  `job_key_normalization_not_ready` plus each linkage blocker by value, and a
+  different report object than the join's adds `job_linkage_report_mismatch`.
+  Completeness, keys and reconciliation computed on frames that were not
+  linked under the approved policy are therefore never sufficient.
+- `expected_stream_contract` - the `ExpectedStreamContract` from
+  `current_expected_stream_contract()` (the same resolution that produced the
+  completeness contract). `None` or an unapproved universe/spelling is
+  `expected_stream_authority_unavailable` (plus
+  `expected_stream_universe_not_exhaustive`); an approved but
+  `MINIMUM_REQUIRED` universe is `expected_stream_universe_not_exhaustive`;
+  completeness assessed against another contract is
+  `expected_stream_contract_mismatch`. Missing, unexpected and misspelled
+  source streams found by completeness are repeated with their own values
+  (`expected_pairs_missing`, `unexpected_pairs`, `source_spelling_mismatch`),
+  and pricing never reuses one stream's result for the whole contract.
+- `canonical_offers` - the `CanonicalOfferReport` of
+  `assess_canonical_offers` on the pricing-eligible population. `None` is
+  `canonical_offer_assessment_missing`; an unassessable in-scope row is
+  `canonical_offers_unassessable`. While the approved alias merges two source
+  streams, `canonical_offer_combination_unresolved` is cleared only when the
+  report holds the approved `CANONICAL_OFFER_COMBINATION` policy for exactly
+  the alias of the location policy (`canonical_offer_policy_mismatch`
+  otherwise, `canonical_offer_policy_unavailable` without an approved policy)
+  and has no unassessable row.
 
 Blockers accumulate in a fixed order (completeness, foundational gates,
 stability, scheduled coverage, trusted join, location policy) and nothing
 short-circuits. `PricingReadinessReport` keeps both inputs for audit
 (`schedule_available`, `scheduled_coverage_complete`, `trusted_join_ready`,
-`scheduled_coverage.stream_coverage`). Because `COLLECTION_SCHEDULE` is
-`None`, the truthful committed result is `ready=False` with
-`collection_schedule_unavailable`; no schedule is inferred from observed
-rows. Timestamp authority (ordering, reporting-day derivation and the zone of
-naive `finished_at` values) remains unresolved and is not established here.
+`scheduled_coverage.streams`). With the approved per-stream schedule,
+`collection_schedule_unavailable` is cleared; with the governed Calgary
+exclusion (record v8) every required stream-period is covered. No schedule
+is inferred from observed rows. The per-city zone of naive `finished_at`
+values (record v5), the zero-tolerance scrape/finish ordering (record v6) and
+the reporting day with its scrape-date and cleaned-date semantics (record v8)
+are approved and implemented.
 
-**Definition of done for pricing readiness:** complete data (every expected
-stream exactly once, coverage, counts, city integrity), valid key contracts,
-a valid one-to-many relationship, trusted temporal fields, a stable,
-fully assessed vehicle population, an available and valid authoritative
-collection schedule with `COMPLETE` time coverage for every configured
-expected stream, a validated trusted job-detail join (no
-`join_construction_failed` or other join blocker) and an authority-sufficient
-location policy - and nothing else blocking.
+### Rental dates (validity, parent/detail agreement, pricing eligibility)
 
-**Still required:** an authoritative statement - from the supplier, the
-collection owner or the business - of whether the two Vancouver labels are
-the same pickup location (with the approved canonical key - one of the two
-governed Vancouver keys) or distinct
-locations, recorded as `LocationPolicyAuthority`. Until then no Vancouver
-pricing conclusion or airport-versus-downtown comparison involving these
-labels may proceed.
+Authority record v7 approves `RENTAL_DATE_VALIDITY` (collection owner and
+business owner, joint) and `RENTAL_DATE_PARENT_DETAIL_AGREEMENTS` (collection
+owner), reference
+[`rental-date-validity-and-agreement-governance-v1-2026-10-06.md`](docs/decisions/governance/rental-date-validity-and-agreement-governance-v1-2026-10-06.md).
+`ql2_sixt_canada_analysis.rental_dates` builds the typed `RentalDatePolicy`
+from those APPROVED decisions only (`current_rental_date_policy()`), and
+`assess_rental_dates(jobs, cars, policy=..., job_linkage=...)` returns the
+aggregate `RentalDateReport` that pricing readiness, the baseline and the
+notebook all consume.
+
+- **Governed fields:** `jobs.pickup_date`, `jobs.return_date`,
+  `cars.job_pickup_date`, `cars.job_return_date`, `cars.pickup_date`,
+  `cars.return_date`.
+- **Format `ISO_8601_DATE`:** exactly `YYYY-MM-DD` text naming a real calendar
+  date. Dates are calendar dates - never timestamps, never midnight instants,
+  never given UTC or a city zone. Nothing is trimmed or coerced: a time, an
+  offset, slashes, month names, extra text, surrounding whitespace, numbers or
+  spreadsheet serials and other objects are *invalid*; nulls, empty and
+  whitespace-only text are *missing*. Raw values are preserved.
+- **Validity:** pickup and return are both required for pricing eligibility;
+  the return date must be on or after the pickup date (duration = return minus
+  pickup in calendar days, minimum zero), so **same-day rentals are valid**.
+  There is **no maximum** duration (`maximum_duration_mode = UNBOUNDED`): a
+  long, correctly ordered rental is valid data, and no threshold is ever
+  derived from observed values.
+- **Agreement:** each detail date repeats the parent job's search date -
+  `cars.job_pickup_date` and `cars.pickup_date` equal `jobs.pickup_date`;
+  `cars.job_return_date` and `cars.return_date` equal `jobs.return_date` -
+  compared as **parsed** calendar dates on rows linked through the valid
+  linkage report of the same frames (raw text alone never decides, and a
+  non-ISO value never agrees). Each mapping counts matches, mismatches,
+  parent/detail/both missing, parent/detail invalid, orphan details and
+  untrusted linkage separately. One-sided missing values fail, and both
+  missing is never a pass. Disagreements are **never repaired** (no side is
+  preferred) and no source value is overwritten.
+- **Validity versus analysis eligibility:** the report decides data validity
+  and *pricing eligibility* (valid, agreeing dates on a trusted row) and counts
+  every row - nothing is excluded to make the rest look valid. A study that
+  wants a duration cohort (same-day, weekly, ...) applies
+  `analysis_duration_cohort(derived, minimum_days=..., maximum_days=...)` to
+  `derive_rental_periods(...)` afterwards; it never changes validity and never
+  re-admits an ineligible row, and such a study population needs its own
+  approved analysis policy.
+- **Fail closed:** pricing readiness takes the report as the required
+  `rental_dates` argument. No report is `rental_date_assessment_missing`; an
+  unapproved, invalid or unavailable policy is `rental_date_rules_unavailable`;
+  violations are `rental_date_required_value_missing`,
+  `rental_date_format_invalid`, `rental_date_ordering_invalid`,
+  `rental_date_parent_detail_mismatch` and `rental_date_agreement_unassessable`
+  (missing, invalid or orphan rows, or untrusted, unavailable or stale
+  linkage). Same-day and long valid rentals never block.
+- **Real data (counts only):** 270 parent rows and 11,940 detail rows; all six
+  fields are present and valid ISO dates (0 missing, 0 invalid), no return
+  precedes its pickup, no same-day rental and no period of 30 days or more
+  (an informational band only), and all four mappings match on every detail
+  row (0 mismatches, 0 unassessable). Every row is pricing eligible under the
+  rental-date rules, which add no blocker.
+
+### Pricing-eligible population and canonical offers
+
+`build_pricing_population(jobs, cars, scheduled=..., reporting_days=..., rental_periods=...)`
+(`pricing_population.py`) classifies every parent capture and detail row
+after temporal validation and before any cohort: rows of the governed
+excluded capture are `governed_exclusion`; the others are `eligible` only when
+their scrape date agrees with the reporting day (which requires linkage and
+city integrity), their rental dates are eligible and their capture has an
+assigned scheduled period (otherwise `reporting_day_failed`,
+`rental_dates_failed` or `capture_period_unassigned`). Excluded and
+ineligible rows stay in the frames for ingestion, linkage, reconciliation,
+audit and exception reporting; they never enter price summaries, comparisons,
+product populations, the vehicle stability used for pricing, duplicate
+calculations, offer counts or reporting-day cohorts. The `PricingPopulation`
+reports aggregate counts (nominal, excluded, failing and eligible parent
+captures and detail rows) and is bound to the exact frames it was built from
+(row counts and a content digest): any other or modified frame is refused
+(`PricingPopulationError`).
+
+`CANONICAL_OFFER_COMBINATION` (record v8, collection owner and business owner,
+joint; the roles were not named with the decision and are recorded by the
+repository,
+[`vancouver-canonical-offer-combination-governance-v1-2026-10-06.md`](docs/decisions/governance/vancouver-canonical-offer-combination-governance-v1-2026-10-06.md))
+keeps `vancouver / Vancouver Downtown` and `vancouver / Vancouver Thurlow` as
+separately required source streams that canonicalize to
+`vancouver / Vancouver Downtown`. `assess_canonical_offers(jobs, cars,
+population=..., scheduled=..., policy=current_canonical_offer_policy())`
+(`canonical_offers.py`) combines only pricing-eligible offers, as an
+order-independent union with no stream priority and without `row_index`. The
+exact semantic identity is: canonical location, scheduled capture period,
+parsed pickup and return dates, the approved product identity (the
+established comparison product definition: `car_name`, `car_type`,
+`transmission`, `seats`, `bags`), normalized price (exact cents of
+`price_num`), price basis and currency marker - both parsed strictly from
+`price_per_day`, whose amount must equal `price_num`; currencies are never
+assumed equivalent. Exact duplicates become one deterministic canonical offer
+with provenance (raw source location labels, contributing observation count,
+unique or deduplicated); different prices stay separate offers flagged as
+price variation (no averaging, no minimum or maximum, nothing discarded); an
+in-scope row with a missing or unparsable identity component, or failing a
+foundational control, is unassessable - counted by reason, never dropped, and
+missing values never compare equal. The `CanonicalOfferReport` holds
+duplicate, variation and unassessable group counts, source and canonical
+counts, the policy (authority metadata) and blockers; the offers themselves
+stay in memory, bound to their frames (`offers_for`), and are never printed.
+
+**Real data (counts only):** 270 parent captures - 1 governed exclusion, 269
+eligible; 11,940 detail rows - 16 governed exclusion (the excluded capture's
+Airport rows, kept in the frames), 0 failing another control, 11,924
+eligible. The canonical-offer assessment combines 11,924 observations into
+10,167 canonical offers (8,410 unique, 1,757 deduplicated; 1,757 duplicate
+groups), with 0 price-variation groups and 0 unassessable rows; the Vancouver
+source streams contribute 1,757 observations each and yield 1,757 canonical
+offers at the canonical key, every one observed in both aliased streams.
+
+**Definition of done for pricing readiness:** an approved, `EXHAUSTIVE`
+source-stream contract from the current authority record, complete data
+(every approved stream exactly once and healthy, no missing, unexpected or
+misspelled stream, counts, city integrity), valid key contracts,
+a valid one-to-many relationship, trusted temporal fields, valid and agreeing rental dates under the
+approved rental-date policy, a stable,
+fully assessed vehicle population, the available authority-backed
+per-stream collection schedule with every expected stream-period covered by
+its own stream (or excused by a governed, versioned exception), a validated trusted job-detail join (no
+`join_construction_failed` or other join blocker), an approved exact role map
+and valid comparison pairs, an authority-sufficient location policy (with both
+governed raw streams present), the approved reporting day with agreeing scrape
+dates, and a ready canonical-offer assessment under the approved rule for
+combining aliased streams' offers - and nothing else blocking.
+
+**Current real-data baseline:** no central blocker and no plan gap remains;
+`assess_pricing_readiness` returns `ready=True` on the real data. Record v8
+cleared the last three issues through governed decisions, not by deleting or
+weakening anything: the governed `INCOMPLETE_PARENT_CAPTURE` exclusion of the
+one incomplete Calgary capture cleared `scheduled_coverage_incomplete` and the
+partial stream continuity behind `data_incomplete` and
+`expected_streams_not_proven` (raw rows kept; 2 of 630 stream-periods excluded,
+628 of 628 required covered); the approved reporting day, scrape-date
+semantics and retired `date_clean` cleared `temporal_fields_untrusted`; and
+the approved offer combination with a ready canonical-offer assessment
+(0 unassessable rows) cleared `canonical_offer_combination_unresolved`.
+`expected_stream_authority_unavailable` and
+`expected_stream_universe_not_exhaustive` are cleared by revision 3;
+`branch_role_authority_unavailable`, `comparison_pair_authority_unavailable`
+and `vancouver_policy_unresolved` by revision 4; the source-spelling blockers
+(`expected_pairs_missing`, `unexpected_pairs`, `source_spelling_mismatch`),
+`governed_source_stream_missing` and `collection_schedule_unavailable` by
+revision 5; the unavailable `timestamp_ordering` rule by revision 6; the
+rental-date plan gap (`rental_period_date_rules_unavailable`, now the central
+`rental_date_rules_unavailable`) by revision 7, whose rules the real data
+satisfies. The dataset is **pricing ready** under the current authority record
+(record v8) - for the stated scope only: the extract as collected, the
+approved streams, schedule and exclusion, and the pricing-eligible population.
+Any later run that fails a control is again not pricing ready.
+
+### Sanitized pricing-readiness baseline
+
+`python -m ql2_sixt_canada_analysis.pricing_baseline --commit <sha> --date <YYYY-MM-DD>`
+runs the same assessments as the ingestion notebook on the real files and
+prints a sanitized Markdown baseline (`pricing_baseline.py`: a reporting
+layer only - it never re-decides readiness). It separates **active
+blockers** (the exact typed values the existing reports emitted) from
+**plan-level gaps** (`PlanReadinessGap`: reported only while no rental-date
+assessment ran under an approved policy - not a `PricingBlocker`; the
+rental-date rules themselves, the expected-stream universe, the role map and the
+comparison pairs are central blockers, not gaps), reports the location
+authority in aggregate (role-map and pair statuses, streams per role, the
+approved pairs on canonical keys, the Vancouver policy state and canonical
+key), reports the approved contract
+(authority status, `EXHAUSTIVE` mode, record version and the seven approved
+keys) and the observed population separately - the observed population as
+counts only (exact matches, unexpected streams, spelling variants, approved
+keys never observed exactly), naming only observed keys that equal approved
+keys - and reports per-stream health: the typed status, continuity and time
+coverage of every approved stream, and anonymous (numbered) exact job-based
+continuity of every observed stream, so a partial observed stream stays
+visible without printing its source value. The investigated approved
+stream's continuity is reported in aggregate only. Serialization
+is fail closed: only counts, booleans, snake-case codes and digit-free
+location labels are accepted. The rental-date section reports the policy
+status, field, period and agreement counts, eligible rows and blockers (no
+dates). The schedule section reports nominal, excluded, required and covered
+stream-periods and the governed excluded parent captures; further sections
+report the pricing-eligible population (nominal, excluded, failing and
+eligible parent captures and detail rows), the reporting day (status, source,
+zone mode, scrape-date agreement counts, `date_clean` status and parse
+quality), the canonical offers (policy status, source, out-of-scope, combined
+and unassessable rows, canonical, unique and deduplicated offers, duplicate,
+price-variation and unassessable groups, Vancouver source and canonical
+counts) and the status of every authority decision. It never prints
+identifiers, timestamps, dates, prices, vehicle names, rows or offer-level
+provenance. The current baseline is
+`docs/investigations/pricing_readiness_baseline.md`.
+
+### Pricing-authority decision record
+
+The external decisions these gaps and blockers wait for are recorded, one
+atomic decision per `DecisionId`, in the versioned record
+[`docs/decisions/pricing_authorities/`](docs/decisions/pricing_authorities/README.md)
+(`authority_decisions.py`). Revision 1 (`v1.toml`, schema 1, kept unchanged
+as history) marked all 22 decisions `PROPOSED`. Revision 2 (`v2.toml`,
+schema 2, unchanged) approved the four job-identifier decisions on
+collection-owner authority. Revision 3 (`v3.toml`, schema 2, unchanged) keeps
+those four and approves the exhaustive seven-stream universe and its source
+spellings (collection owner and business owner; collection owner). Revision 4
+(`v4.toml`, schema 2, unchanged) additionally approves the location roles and
+comparison pairs (business owner) and the Vancouver `CONFIRMED_ALIAS`
+(collection owner). Revision 5 (`v5.toml`, schema 3, unchanged) supersedes the display-style spellings with the exact
+raw source keys (roles, pairs and alias unchanged in meaning) and approves
+`SCHEDULE_CAPTURE_TIMESTAMP`, `SCHEDULE_EXPECTED_PERIODS`,
+`SCHEDULE_SHARING_MODEL` (`PER_STREAM`), `SCHEDULE_EXCEPTIONS`
+(`NO_EXCEPTIONS`, joint) and the per-city `FINISHED_AT_TIMEZONE`. Revision 6
+(`v6.toml`, schema 3, unchanged) keeps all of these and approves
+`SCRAPED_FINISHED_ORDERING` (`cars.scraped_at` earlier than or equal to
+`jobs.finished_at`) and `SCRAPED_FINISHED_TOLERANCE` (zero seconds; joint).
+Revision 7 (`v7.toml`, schema 3, unchanged) approves `RENTAL_DATE_VALIDITY`
+(`ISO_8601_DATE`, both dates required, return on or after pickup, minimum
+zero days, `UNBOUNDED` maximum; joint) and
+`RENTAL_DATE_PARENT_DETAIL_AGREEMENTS` (the four mappings above). The current
+revision 8 (`v8.toml`, **schema 4**, `CURRENT_RECORD_PATH`) keeps every
+earlier approval, supersedes the `NO_EXCEPTIONS` resolution of
+`SCHEDULE_EXCEPTIONS` with the one governed `INCOMPLETE_PARENT_CAPTURE`
+exclusion, approves `REPORTING_DAY_SOURCE`, `REPORTING_DAY_TIMEZONE`,
+`SCRAPE_DATE_SEMANTICS` and `DATE_CLEAN_SEMANTICS` (`RETIRED_FROM_PRICING`,
+new in schema 4) and the new schema-4 decision `CANONICAL_OFFER_COMBINATION`
+(joint), so no decision remains `PROPOSED`; raw-data observations,
+behavioural analyses, repository notes and review notes remain
+non-authoritative evidence only. Schema 1 to 3 records stay valid without the
+schema-4 decision. The regenerated request checklist is in
+[`authority_request_checklist.md`](docs/decisions/pricing_authorities/authority_request_checklist.md).
+Validate a revision with
+`python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v8.toml`
+(sanitized summary; non-zero exit when invalid). `baseline_authority_inputs(record)`
+passes on typed APPROVED rental agreements only, so a PROPOSED record clears
+nothing.
+Approved decisions are implemented in separate, tested changes: the
+job-identifier approvals by `job_linkage` (`job_linkage_policy_from_record`
+builds its policy only when all four are approved and consistent), the
+expected-stream approvals by `expected_stream_contract`, the location roles,
+pairs and Vancouver alias by `location_authority`, the schedule decisions
+by `collection_schedule`, the finish-time zones, replication and ordering
+by `temporal_authority` and `temporal`, the rental-date validity and
+agreements by `rental_dates`, the reporting day and source-date semantics by
+`temporal_authority` and `temporal`, and the governed exclusion and offer
+combination by `collection_schedule`, `pricing_population` and
+`canonical_offers`.
 
 ## Vehicle-attribute stability
 
@@ -1155,13 +1854,16 @@ python -m pytest tests/test_notebooks.py
 ## Data trust
 
 - All scheduled cities represented
-- Authoritative collection schedule available, with `COMPLETE` time coverage for every expected stream
+- Authority-backed per-stream collection schedule available, with every expected stream-period covered by its own exact stream key (or excused by a governed, versioned exception)
+- Authority-backed job linkage valid (derived keys; raw identifiers unchanged)
 - Trusted job-detail join validated (no `join_construction_failed`)
-- All authoritative expected (city, branch) pairs present in detail (`cars`) rows
+- Approved exhaustive source-stream contract (seven exact (city, location) keys) from the current authority record
+- Every approved (city, location) pair present in detail (`cars`) rows with its exact source spelling, and no unexpected stream
 - Job level counts = detail row counts
 - Valid offers duplicated
-- Job timestamps consistent
-- Date field that defines reporting day
+- Job timestamps consistent: finish times resolved in the parent city's IANA zone, every detail copy replicating its parent exactly, every scrape time earlier than or equal to its parent's finish time (zero tolerance)
+- Rental dates valid (exact ISO dates, return on or after pickup, no maximum) and agreeing with their parent job
+- Reporting day: the parent finish instant's local date in the parent city's zone (`jobs.finished_at`, record v8); both scrape dates agree; `date_clean` is retired from pricing
 - Location/Product attributes stability
 
 ## Airport matched premium

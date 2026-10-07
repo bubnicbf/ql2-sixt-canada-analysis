@@ -532,3 +532,27 @@ def test_package_exposes_unique_key_api() -> None:
                  "validate_raw_dataset_unique_keys", "UniqueKeyReport", "RawDatasetUniqueKeyReports",
                  "UniqueKeyViolationError", "KeyConfigurationError"):
         assert name in ql2_sixt_canada_analysis.__all__ and hasattr(ql2_sixt_canada_analysis, name)
+
+
+def test_analysis_definitions_key_on_the_derived_columns() -> None:
+    from conftest import link
+
+    from ql2_sixt_canada_analysis.ingestion import RawDatasets
+    from ql2_sixt_canada_analysis.schemas import (
+        ANALYSIS_DATASET_DEFINITIONS, CARS_DEFINITION, JOB_LINKAGE_KEY_COLUMN, JOBS_DEFINITION,
+        OFFER_POSITION_KEY_COLUMN,
+    )
+    from ql2_sixt_canada_analysis.unique_keys import assess_raw_dataset_unique_keys
+
+    jobs = pd.DataFrame([{c: ("0007" if c == "job_id" else "SYNTH") for c in JOBS_DEFINITION.columns}]).astype(
+        dict(JOBS_DEFINITION.identifier_dtypes))
+    cars = pd.DataFrame([{c: ("0007.0" if c == "job_id" else p if c == "row_index" else "SYNTH")
+                          for c in CARS_DEFINITION.columns} for p in ("0.0", "0")]).astype(
+        dict(CARS_DEFINITION.identifier_dtypes))
+    raw = assess_raw_dataset_unique_keys(RawDatasets(jobs=jobs, cars=cars))
+    assert raw.cars.is_valid                             # raw text: "0.0" and "0" differ, yet ...
+    result = link(jobs, cars)
+    analysis = assess_raw_dataset_unique_keys(result.datasets(), ANALYSIS_DATASET_DEFINITIONS)
+    assert analysis.jobs.is_valid and not analysis.cars.is_valid    # ... the derived positions collide
+    assert ANALYSIS_DATASET_DEFINITIONS[DatasetKey.CARS].unique_key_columns == (JOB_LINKAGE_KEY_COLUMN,
+                                                                                OFFER_POSITION_KEY_COLUMN)

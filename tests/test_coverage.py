@@ -29,6 +29,7 @@ from ql2_sixt_canada_analysis.ingestion import load_raw_datasets
 from ql2_sixt_canada_analysis.quality import remove_blank_rows_from_raw_datasets
 from ql2_sixt_canada_analysis.reconciliation import assess_job_detail_reconciliation
 from ql2_sixt_canada_analysis.relationships import assess_one_to_many_join
+from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
 from ql2_sixt_canada_analysis.schemas import (
     COMPARED_LOCATION_STREAMS,
     DATASET_DEFINITIONS,
@@ -105,7 +106,7 @@ def _assess(jobs: pd.DataFrame, coverage: LocationCoverageDefinition) -> Locatio
 # ------------------------------------------------------------- configuration
 
 
-def test_real_contract_is_branch_level_minimum_with_all_authoritative_streams() -> None:
+def test_real_contract_is_the_approved_exhaustive_branch_level_universe() -> None:
     cov = EXPECTED_LOCATION_COVERAGE
     # Keys are (city, branch label) pairs; branch labels exist only in the detail dataset.
     assert cov.dataset == CARS and isinstance(cov.location_columns, tuple) and len(cov.location_columns) == 2
@@ -114,8 +115,11 @@ def test_real_contract_is_branch_level_minimum_with_all_authoritative_streams() 
     assert cov.label_column not in DATASET_DEFINITIONS[JOBS].columns
     assert cov.location_columns[:-1] == cov.stream_scope_columns     # the city component is the scope
     assert set(cov.parent_scope_columns) <= set(DATASET_DEFINITIONS[JOBS].columns)
-    assert cov.is_configured and cov.mode is MIN          # authority covers a minimum, not a universe
-    assert cov.expected_locations == (INVESTIGATED_LOCATION_STREAM, *COMPARED_LOCATION_STREAMS)
+    assert cov.is_configured and cov.mode is EXH          # the approved universe is exhaustive
+    assert cov.expected_locations == current_expected_stream_contract().expected_keys   # one resolution
+    assert len(cov.expected_locations) == len(set(cov.expected_locations)) == 7
+    assert INVESTIGATED_LOCATION_STREAM in cov.expected_locations
+    assert set(COMPARED_LOCATION_STREAMS) <= set(cov.expected_locations)
     assert len(INVESTIGATED_LOCATION_STREAM) == len(cov.location_columns)
     assert dict(cov.aliases) == {}                        # no alias is authoritatively confirmed
     assert set(cov.stream_scope_columns) <= set(DATASET_DEFINITIONS[CARS].columns)
@@ -126,11 +130,12 @@ def test_readme_describes_the_expected_location_contract_consistently() -> None:
     coverage_section = readme.split("## Expected location coverage", 1)[1].split("\n## ", 1)[0]
     trust_section = readme.split("## Data trust", 1)[1].split("\n## ", 1)[0]
 
-    assert "three authority-identified streams" in coverage_section
+    assert "three authority-identified streams" not in coverage_section      # the former minimum is gone
+    assert "exactly seven (city, location) source keys" in coverage_section and "**`EXHAUSTIVE`**" in coverage_section
     assert "`INVESTIGATED_LOCATION_STREAM`" in coverage_section
     assert "`COMPARED_LOCATION_STREAMS`" in coverage_section
     assert "All expected locations present in jobs" not in trust_section
-    assert "All authoritative expected (city, branch) pairs present in detail (`cars`) rows" in trust_section
+    assert "Every approved (city, location) pair present in detail (`cars`) rows" in trust_section
 
 
 def test_unconfigured_contract_fails_closed() -> None:

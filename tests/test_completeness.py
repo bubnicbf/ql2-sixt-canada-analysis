@@ -34,6 +34,8 @@ from ql2_sixt_canada_analysis.reconciliation import (
     job_detail_count_results,
 )
 from ql2_sixt_canada_analysis.schemas import (
+    COMPARED_LOCATION_STREAMS,
+    INVESTIGATED_LOCATION_STREAM,
     DATASET_DEFINITIONS,
     EXPECTED_LOCATION_COVERAGE,
     JOB_DETAIL_RELATIONSHIP,
@@ -60,7 +62,14 @@ PARENT_CITY, = COV.parent_scope_columns
 J1, J2, J3, ORPHAN = "SYNTH-JOB-001", "SYNTH-JOB-002", "SYNTH-JOB-003", "SYNTH-JOB-999"
 CITY, OTHER_CITY = "SYNTH-CITY-1", "SYNTH-CITY-2"
 A, B = "SYNTH-BRANCH-A", "SYNTH-BRANCH-B"
-SYNTH_COV = dataclasses.replace(COV, expected_locations=((CITY, A),), mode=LocationCoverageMode.MINIMUM_REQUIRED)
+#: The synthetic healthy world: one airport (E) and one downtown (F) branch in CITY, exhaustive.
+#: Its keys are never governed by the synthetic identity policies of the readiness tests (A and B).
+E, F = "SYNTH-BRANCH-E", "SYNTH-BRANCH-F"
+SYNTH_COV = dataclasses.replace(COV, expected_locations=((CITY, E), (CITY, F)), mode=LocationCoverageMode.EXHAUSTIVE)
+#: Synthetic roles and the single comparison pair of that world (test configuration only).
+SYNTH_ROLES = {(CITY, E): "AIRPORT", (CITY, F): "DOWNTOWN"}
+SYNTH_PAIRS = (((CITY, E), (CITY, F)),)
+A_COV = dataclasses.replace(COV, expected_locations=((CITY, A),), mode=LocationCoverageMode.EXHAUSTIVE)
 
 
 def frame(key: DatasetKey, rows: list[dict]) -> pd.DataFrame:
@@ -163,23 +172,27 @@ def test_correct_city_branch_pairs_cover_the_contract():
 
 def test_vancouver_labels_under_another_city_do_not_cover_vancouver():
     # Regression: labels were the whole key, so any city satisfied coverage.
-    calgary = COV.expected_locations[0][0]
-    misassigned = [EXPECTED[0]] + [(calgary, label) for _, label in EXPECTED[1:]]
+    calgary = INVESTIGATED_LOCATION_STREAM[0]
+    vancouver = [k for k in EXPECTED if k in COMPARED_LOCATION_STREAMS]
+    moved = [(calgary, label) for _, label in vancouver]           # Vancouver labels under Calgary
+    misassigned = [k for k in EXPECTED if k not in vancouver] + moved
     df = project_pairs_frame(misassigned)
     r = assess_expected_location_coverage(df, COV)
     assert not r.is_valid and "missing_expected_location" in r.violations
-    assert r.missing_expected_locations == tuple(EXPECTED[1:])
-    assert (r.covered_expected_location_count, r.unexpected_location_count) == (1, 2)
+    assert r.missing_expected_locations == tuple(vancouver)
+    unexpected_keys = [k for k in moved if k not in EXPECTED]
+    assert (r.covered_expected_location_count, r.unexpected_location_count) == (
+        len(EXPECTED) - len(vancouver), len(unexpected_keys))
     evidence = location_pair_evidence(df, COV)
     unexpected = evidence.loc[~evidence["expected"], [CITY_COL, LABEL_COL]]
-    assert sorted(map(tuple, unexpected.itertuples(index=False))) == sorted(misassigned[1:])
-    assert df[CITY_COL].tolist() == [calgary] * 3                  # source values untouched
+    assert sorted(map(tuple, unexpected.itertuples(index=False))) == sorted(unexpected_keys)
+    assert df[CITY_COL].tolist() == [k[0] for k in misassigned]    # source values untouched
 
 
 def test_one_misassigned_pair_leaves_the_others_covered():
     pairs = [EXPECTED[0], EXPECTED[1], ("SYNTH-OTHER-CITY", EXPECTED[2][1])]
     r = assess_expected_location_coverage(project_pairs_frame(pairs), COV)
-    assert r.covered_expected_location_count == 2 and r.missing_expected_locations == (EXPECTED[2],)
+    assert r.covered_expected_location_count == 2 and r.missing_expected_locations == tuple(EXPECTED[2:])
     assert not r.is_valid
 
 
@@ -205,7 +218,7 @@ def test_coverage_evidence_is_deterministic():
 
 
 def stream(j: pd.DataFrame, c: pd.DataFrame):  # type: ignore[no-untyped-def]
-    return investigate_location_stream(j, c, (CITY, A), coverage=SYNTH_COV)
+    return investigate_location_stream(j, c, (CITY, A), coverage=A_COV)
 
 
 def test_zero_detail_job_stays_in_the_continuity_denominator():
@@ -369,7 +382,7 @@ def test_per_job_results_are_a_fresh_sorted_frame():
 
 
 def complete_inputs():  # type: ignore[no-untyped-def]
-    j, c = jobs((J1, 1, 1), (J2, 1, 1)), cars((J1, A), (J2, A))
+    j, c = jobs((J1, 2, 2), (J2, 2, 2)), cars((J1, E), (J1, F), (J2, E), (J2, F))
     datasets = RawDatasets(jobs=j, cars=c, complete_source=True)
     return dict(datasets=datasets, coverage=assess_expected_location_coverage(c, SYNTH_COV),
                 streams=assess_expected_location_streams(j, c, coverage=SYNTH_COV), reconciliation=reconcile(j, c),
@@ -383,7 +396,7 @@ def test_completeness_passes_only_when_every_control_passes():
 
 def test_completeness_blocks_on_each_failure():
     base = complete_inputs()
-    j_bad, c = jobs((J1, 1, 1), (J2, 0, 0)), cars((J1, A))        # zero-detail job
+    j_bad, c = jobs((J1, 2, 2), (J2, 0, 0)), cars((J1, E), (J1, F))   # zero-detail job
     cases = {
         CB.SOURCE_NOT_COMPLETE: {"datasets": dataclasses.replace(base["datasets"], complete_source=False)},
         CB.COVERAGE_UNAVAILABLE: {"coverage": None},

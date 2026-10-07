@@ -34,7 +34,12 @@ the policy authority-insufficient, withdraws every permission, is never
 applied to data and blocks pricing with a typed scope blocker.
 
 :func:`assess_pricing_readiness` combines the policy with every existing
-foundational gate. Pricing is ready only when *all* pass; each failure is
+foundational gate, including authority-backed job linkage
+(:mod:`~ql2_sixt_canada_analysis.job_linkage`): a missing linkage report, a
+report that is not valid or one that differs from the report the trusted join
+was assessed with blocks pricing (``job_key_normalization_not_ready``
+plus the linkage blockers by the same value). Valid linkage never bypasses
+another gate. Pricing is ready only when *all* pass; each failure is
 reported as a :class:`PricingBlocker`. The location gate never overrides
 another gate.
 
@@ -49,6 +54,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -65,8 +71,8 @@ from ql2_sixt_canada_analysis.streams import (
     ScheduledCoverageReport,
 )
 from ql2_sixt_canada_analysis.schemas import (
-    EXPECTED_LOCATION_COVERAGE,
-    VANCOUVER_LOCATION_POLICY,
+    PROJECT_DEFAULT,
+    project_default,
     LocationCoverageConfigurationError,
     LocationCoverageDefinition,
     LocationIdentityPolicy,
@@ -77,6 +83,13 @@ from ql2_sixt_canada_analysis.schemas import (
     LocationPolicyState,
     assess_location_policy_scope,
 )
+
+if TYPE_CHECKING:  # imported lazily at run time
+    from ql2_sixt_canada_analysis.expected_stream_contract import ExpectedStreamContract
+    from ql2_sixt_canada_analysis.location_authority import LocationAuthorityReport
+    from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
+    from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
+    from ql2_sixt_canada_analysis.rental_dates import RentalDateReport
 
 __all__ = [
     "CompletenessBlocker",
@@ -100,6 +113,31 @@ class PricingBlocker(StrEnum):
     COMPLETENESS_UNAVAILABLE = "completeness_unavailable"
     DATA_INCOMPLETE = "data_incomplete"
     EXPECTED_STREAMS_NOT_PROVEN = "expected_streams_not_proven"
+    # Authority-backed exhaustive source-stream contract (values equal
+    # ExpectedStreamContractBlocker / CompletenessBlocker values).
+    EXPECTED_STREAM_AUTHORITY_UNAVAILABLE = "expected_stream_authority_unavailable"
+    EXPECTED_STREAM_UNIVERSE_NOT_EXHAUSTIVE = "expected_stream_universe_not_exhaustive"
+    EXPECTED_STREAM_CONTRACT_MISMATCH = "expected_stream_contract_mismatch"
+    EXPECTED_SOURCE_STREAMS_MISSING = "expected_pairs_missing"
+    UNEXPECTED_SOURCE_STREAMS = "unexpected_pairs"
+    SOURCE_SPELLING_MISMATCH = "source_spelling_mismatch"
+    # Authority-backed location roles and comparison pairs (values equal
+    # LocationAuthorityBlocker values) and their consistency with the policy and contract.
+    BRANCH_ROLE_AUTHORITY_UNAVAILABLE = "branch_role_authority_unavailable"
+    BRANCH_ROLES_NOT_EXACT = "branch_roles_not_exact"
+    COMPARISON_PAIR_AUTHORITY_UNAVAILABLE = "comparison_pair_authority_unavailable"
+    COMPARISON_PAIRS_INVALID = "comparison_pairs_invalid"
+    COMPARISON_PAIR_IDENTITY_UNRESOLVED = "comparison_pair_identity_unresolved"
+    CANONICAL_OFFER_COMBINATION_UNRESOLVED = "canonical_offer_combination_unresolved"
+    # Authority-backed canonical offer combination (values equal CanonicalOfferBlocker values).
+    CANONICAL_OFFER_ASSESSMENT_MISSING = "canonical_offer_assessment_missing"
+    CANONICAL_OFFER_POLICY_UNAVAILABLE = "canonical_offer_policy_unavailable"
+    CANONICAL_OFFERS_UNASSESSABLE = "canonical_offers_unassessable"
+    CANONICAL_OFFER_POLICY_MISMATCH = "canonical_offer_policy_mismatch"
+    LOCATION_AUTHORITY_POLICY_MISMATCH = "roles_pairs_policy_mismatch"
+    LOCATION_AUTHORITY_CONTRACT_MISMATCH = "roles_pairs_contract_mismatch"
+    # A confirmed alias whose governed raw source streams are not both present exactly.
+    GOVERNED_SOURCE_STREAM_MISSING = "governed_source_stream_missing"
     SCOPE_INTEGRITY_NOT_PROVEN = "scope_integrity_not_proven"
     KEY_CONTRACTS_INVALID = "key_contracts_invalid"
     ONE_TO_MANY_INVALID = "one_to_many_invalid"
@@ -128,6 +166,19 @@ class PricingBlocker(StrEnum):
     SCHEDULED_COVERAGE_SCHEDULE_NOT_APPLIED = "scheduled_coverage_schedule_not_applied"
     SCHEDULED_COVERAGE_INCOMPLETE = "scheduled_coverage_incomplete"
     SCHEDULED_COVERAGE_CONTRACT_MISMATCH = "scheduled_coverage_contract_mismatch"
+    # Per-stream schedule (values equal ScheduleCoverageBlocker values).
+    SCHEDULED_JOB_ASSIGNMENT_FAILED = "scheduled_job_assignment_failed"
+    SCHEDULED_DETAIL_COPY_MISMATCH = "scheduled_detail_copy_mismatch"
+    SCHEDULE_EXCLUSION_UNMATCHED = "schedule_exclusion_unmatched"
+    # Rental dates (values equal RentalDateBlocker values; a missing assessment has its own value).
+    RENTAL_DATE_ASSESSMENT_MISSING = "rental_date_assessment_missing"
+    RENTAL_DATE_RULES_UNAVAILABLE = "rental_date_rules_unavailable"
+    RENTAL_DATE_REQUIRED_VALUE_MISSING = "rental_date_required_value_missing"
+    RENTAL_DATE_FORMAT_INVALID = "rental_date_format_invalid"
+    RENTAL_DATE_ORDERING_INVALID = "rental_date_ordering_invalid"
+    RENTAL_DATE_DURATION_ABOVE_MAXIMUM = "rental_date_duration_above_maximum"
+    RENTAL_DATE_PARENT_DETAIL_MISMATCH = "rental_date_parent_detail_mismatch"
+    RENTAL_DATE_AGREEMENT_UNASSESSABLE = "rental_date_agreement_unassessable"
     # Trusted job-detail join (JOIN_* values equal JobDetailJoinBlocker values).
     TRUSTED_JOIN_ASSESSMENT_MISSING = "trusted_join_assessment_missing"
     TRUSTED_JOIN_NOT_READY = "trusted_join_not_ready"
@@ -141,6 +192,22 @@ class PricingBlocker(StrEnum):
     JOIN_CONSTRUCTION_FAILED = "join_construction_failed"
     JOIN_CITY_SCOPE_UNASSIGNABLE = "job_scope_unassignable"
     JOIN_PARENT_DETAIL_CITY_MISMATCH = "parent_detail_scope_mismatch"
+    JOIN_LINKAGE_REPORT_UNAVAILABLE = "job_linkage_report_unavailable"
+    JOIN_LINKAGE_NOT_VALID = "job_linkage_not_valid"
+    JOIN_LINKAGE_KEY_NOT_APPLIED = "job_linkage_key_not_applied"
+    # Authority-backed job linkage (job_linkage), a prerequisite of its own.
+    JOB_IDENTIFIER_NORMALIZATION_MISSING = "job_key_normalization_missing"
+    JOB_IDENTIFIER_NORMALIZATION_NOT_READY = "job_key_normalization_not_ready"
+    JOB_LINKAGE_REPORT_MISMATCH = "job_linkage_report_mismatch"
+    LINKAGE_POLICY_UNAVAILABLE = "job_linkage_policy_unavailable"
+    LINKAGE_PARENT_KEY_INVALID = "parent_linkage_key_invalid"
+    LINKAGE_PARENT_KEY_NOT_UNIQUE = "parent_linkage_key_not_unique"
+    LINKAGE_DETAIL_REFERENCE_MISSING = "detail_job_reference_missing"
+    LINKAGE_DETAIL_REFERENCE_UNMATCHED = "detail_job_reference_unmatched"
+    LINKAGE_DETAIL_REFERENCE_AMBIGUOUS = "detail_job_reference_ambiguous"
+    LINKAGE_COLLISION = "job_linkage_collision"
+    LINKAGE_OFFER_POSITION_MISSING = "offer_position_missing"
+    LINKAGE_OFFER_POSITION_INVALID = "offer_position_invalid"
 
 
 #: Authoritative identity evidence that contradicts *every* resolved policy.
@@ -213,6 +280,12 @@ class AnalyticalLocationKeys:
         """Keys to group analysis by (canonical for a confirmed alias); a copy."""
         return self._analytical.copy()
 
+    @property
+    def governed_sources_present(self) -> bool:
+        """Both governed raw source keys occur exactly (source keys; canonicalization never counts)."""
+        present = set(self._source.tolist())
+        return self.policy.first in present and self.policy.second in present
+
 
 @dataclass(frozen=True, slots=True)
 class LocationPolicyReport:
@@ -232,6 +305,11 @@ class LocationPolicyReport:
     canonicalization_applied: bool
     #: Governed-scope validation of the policy (``None`` = not assessed, which blocks).
     scope: LocationPolicyScope | None = None
+    #: Both governed raw source streams were present exactly in the keys the policy was
+    #: applied to (``None`` = not assessed). A confirmed alias needs ``True``.
+    governed_sources_present: bool | None = None
+    #: The policy this report was assessed from (``None`` for a hand-built report).
+    policy: LocationIdentityPolicy | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, LocationPolicyState):
@@ -247,6 +325,12 @@ class LocationPolicyReport:
             raise TypeError("scope must be a LocationPolicyScope or None")
         if self.canonicalization_applied and not self.scope_valid:
             raise ValueError("canonicalization cannot be applied under an invalid governed scope")
+        if self.governed_sources_present is not None and not isinstance(self.governed_sources_present, bool):
+            raise TypeError("governed_sources_present must be a bool or None")
+        if self.policy is not None and (not isinstance(self.policy, LocationIdentityPolicy)
+                                        or self.policy.state is not self.state
+                                        or self.policy.authority != self.authority):
+            raise ValueError("policy must be the LocationIdentityPolicy this report was assessed from")
 
     @property
     def scope_valid(self) -> bool:
@@ -281,7 +365,8 @@ class LocationPolicyReport:
         configured alias or distinct decision stays recorded (resolved) but is
         not sufficient for analysis while the defect exists.
         """
-        return self.location_policy_resolved and not self.identity_evidence_conflict and self.scope_valid
+        return (self.location_policy_resolved and not self.identity_evidence_conflict and self.scope_valid
+                and (self.state is not LocationPolicyState.CONFIRMED_ALIAS or self.governed_sources_present is True))
 
     @property
     def locations_are_aliases(self) -> bool:
@@ -312,6 +397,8 @@ class LocationPolicyReport:
         reasons.extend(PricingBlocker(d.value) for d in self.scope_defects)
         if self.canonicalization_required and not self.canonicalization_applied:
             reasons.append(PricingBlocker.ALIAS_CANONICALIZATION_NOT_APPLIED)
+        if self.canonicalization_required and self.governed_sources_present is not True:
+            reasons.append(PricingBlocker.GOVERNED_SOURCE_STREAM_MISSING)
         return tuple(reasons)
 
 
@@ -323,10 +410,30 @@ class PricingReadinessReport:
     location_policy: LocationPolicyReport
     #: The completeness decision this readiness rests on (kept for audit).
     completeness: CompletenessReport | None = None
-    #: The schedule / all-stream scheduled-coverage assessment (kept for audit; ``None`` = missing).
-    scheduled_coverage: ScheduledCoverageReport | None = None
+    #: The schedule / all-stream scheduled-coverage assessment (kept for audit; ``None`` = missing):
+    #: the authority-backed per-stream report, or the legacy single-schedule report (which never passes
+    #: while no shared schedule is configured).
+    scheduled_coverage: PerStreamScheduledCoverageReport | ScheduledCoverageReport | None = None
     #: The trusted-join gate (kept for audit; ``None`` = missing).
     job_detail_join: JobDetailJoinReadiness | None = None
+    #: The authority-backed job-linkage report (kept for audit; ``None`` = missing).
+    job_linkage: JobLinkageReport | None = None
+    #: The authority-backed source-stream contract (kept for audit; ``None`` = missing).
+    expected_stream_contract: ExpectedStreamContract | None = None
+    #: Authority-backed roles and comparison pairs (kept for audit; ``None`` = missing).
+    location_authority: LocationAuthorityReport | None = None
+    #: Rental-date validity and parent/detail agreement (kept for audit; ``None`` = missing).
+    rental_dates: RentalDateReport | None = None
+    #: Authority-backed canonical offer combination (kept for audit; ``None`` = missing).
+    canonical_offers: object = None
+
+    @property
+    def rental_date_rules_available(self) -> bool:
+        return self.rental_dates is not None and self.rental_dates.policy.available
+
+    @property
+    def rental_dates_valid(self) -> bool:
+        return self.rental_dates is not None and self.rental_dates.is_valid
 
     @property
     def ready(self) -> bool:
@@ -339,6 +446,21 @@ class PricingReadinessReport:
     @property
     def scheduled_coverage_complete(self) -> bool:
         return self.scheduled_coverage is not None and self.scheduled_coverage.all_streams_complete
+
+    @property
+    def job_identifier_normalization_ready(self) -> bool:
+        return self.job_linkage is not None and self.job_linkage.is_valid
+
+    @property
+    def location_roles_and_pairs_ready(self) -> bool:
+        """Approved, exact roles and valid comparison pairs were supplied (not that pricing is ready)."""
+        return (self.location_authority is not None and self.location_authority.roles_exact
+                and self.location_authority.pairs_valid)
+
+    @property
+    def expected_stream_contract_usable(self) -> bool:
+        """An approved, exhaustive source-stream contract was supplied (not that the streams are healthy)."""
+        return self.expected_stream_contract is not None and self.expected_stream_contract.usable
 
     @property
     def trusted_join_ready(self) -> bool:
@@ -360,7 +482,7 @@ class PricingNotReadyError(Exception):
 
 
 def apply_location_policy(
-    frame: pd.DataFrame, policy: LocationIdentityPolicy = VANCOUVER_LOCATION_POLICY,
+    frame: pd.DataFrame, policy: LocationIdentityPolicy = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> AnalyticalLocationKeys:
     """Analytical location keys for ``frame`` under ``policy`` (frame untouched).
 
@@ -375,6 +497,7 @@ def apply_location_policy(
     analytical key equals its source key. The mapping is built here from the
     validated fields, never taken from the policy object.
     """
+    policy = project_default(policy, "VANCOUVER_LOCATION_POLICY")
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("frame must be a pandas DataFrame")
     if not isinstance(policy, LocationIdentityPolicy):
@@ -399,7 +522,7 @@ def apply_location_policy(
 
 
 def assess_location_policy(
-    policy: LocationIdentityPolicy = VANCOUVER_LOCATION_POLICY,
+    policy: LocationIdentityPolicy = PROJECT_DEFAULT,  # type: ignore[assignment]
     comparison: LocationStreamComparisonReport | None = None,
     analytical_keys: AnalyticalLocationKeys | None = None,
 ) -> LocationPolicyReport:
@@ -426,6 +549,7 @@ def assess_location_policy(
     makes the policy authority-insufficient and is a pricing blocker of the
     same name, alongside every other applicable blocker.
     """
+    policy = project_default(policy, "VANCOUVER_LOCATION_POLICY")
     if not isinstance(policy, LocationIdentityPolicy):
         raise TypeError("policy must be a LocationIdentityPolicy")
     if comparison is not None and not isinstance(comparison, LocationStreamComparisonReport):
@@ -437,8 +561,11 @@ def assess_location_policy(
     scope = assess_location_policy_scope(policy)
     applied = (scope.is_valid and analytical_keys is not None and analytical_keys.policy == policy
                and analytical_keys.alias_mapping_applied)
+    present = (analytical_keys.governed_sources_present
+               if analytical_keys is not None and analytical_keys.policy == policy else None)
     return LocationPolicyReport(state=policy.state, authority=policy.authority, behavioral_evidence=evidence,
-                                identity_evidence_conflict=conflict, canonicalization_applied=applied, scope=scope)
+                                identity_evidence_conflict=conflict, canonicalization_applied=applied, scope=scope,
+                                governed_sources_present=present, policy=policy)
 
 
 def assess_pricing_readiness(
@@ -449,8 +576,13 @@ def assess_pricing_readiness(
     one_to_many_contract_valid: bool,
     temporal_fields_trusted: bool,
     vehicle_stability: VehicleStabilityReport | None,
-    scheduled_coverage: ScheduledCoverageReport | None,
+    scheduled_coverage: PerStreamScheduledCoverageReport | ScheduledCoverageReport | None,
     job_detail_join: JobDetailJoinReadiness | None,
+    job_linkage: JobLinkageReport | None,
+    expected_stream_contract: ExpectedStreamContract | None,
+    location_authority: LocationAuthorityReport | None,
+    rental_dates: RentalDateReport | None,
+    canonical_offers: object,
 ) -> PricingReadinessReport:
     """Combine every foundational gate with the location policy (all must pass).
 
@@ -458,17 +590,59 @@ def assess_pricing_readiness(
     omit a prerequisite and receive ``ready=True``; ``None`` is accepted only
     to be reported as a blocker.
 
-    ``scheduled_coverage`` (:func:`~ql2_sixt_canada_analysis.streams.assess_scheduled_time_coverage`)
-    must prove an available, valid authoritative schedule and ``COMPLETE``
-    time coverage for exactly the configured expected streams, all assessed
-    against that schedule and the same contract as ``completeness``.
-    ``NOT_ASSESSED`` (for example ``COLLECTION_SCHEDULE is None``) fails: no
+    ``scheduled_coverage``
+    (:func:`~ql2_sixt_canada_analysis.collection_schedule.assess_per_stream_scheduled_coverage`)
+    must prove the available authority-backed per-stream schedule, exactly one
+    schedule per configured expected stream, every parent job assigned to one
+    expected city-period, every detail copy agreeing with its parent and every
+    stream-period of every stream covered by its own exact key or excused by a
+    governed exception, assessed against the same contract as
+    ``completeness``. One stream's presence never satisfies another. The
+    legacy single-schedule report
+    (:func:`~ql2_sixt_canada_analysis.streams.assess_scheduled_time_coverage`)
+    is still accepted and fails while no shared schedule is configured: no
     schedule is not "no schedule required". Stream health and temporal field
     trust are separate gates and never substitute for it.
     ``job_detail_join`` (:func:`~ql2_sixt_canada_analysis.join_readiness.assess_job_detail_join_readiness`)
     must be join-ready; every join blocker (including
     ``join_construction_failed``) is propagated with the same value, plus
     ``trusted_join_not_ready``. A non-``None`` joined frame is never evidence.
+    ``job_linkage`` (:func:`~ql2_sixt_canada_analysis.job_linkage.assess_job_linkage`)
+    must be a valid report - the same one the trusted join was assessed with;
+    otherwise it blocks: ``job_key_normalization_missing`` for ``None``, else
+    ``job_key_normalization_not_ready`` plus every linkage blocker by the same
+    value and ``job_linkage_report_mismatch`` when the trusted join was
+    assessed with a different report object.
+    ``rental_dates`` (:func:`~ql2_sixt_canada_analysis.rental_dates.assess_rental_dates`)
+    must hold an available authority-backed rental-date policy with every
+    governed date present, valid (exact ISO calendar date), ordered (return on
+    or after pickup; no maximum unless an approved bounded policy sets one) and
+    agreeing with its parent on trusted linked rows: ``None`` is
+    ``rental_date_assessment_missing``, an unavailable policy
+    ``rental_date_rules_unavailable``, and each violation keeps its own value.
+    Excluding invalid rows never satisfies it; same-day and long valid rentals
+    never block.
+    ``canonical_offers`` (:func:`~ql2_sixt_canada_analysis.canonical_offers.assess_canonical_offers`)
+    is the offer-level assessment of the pricing-eligible population:
+    ``None`` is ``canonical_offer_assessment_missing`` and any unassessable
+    in-scope row is ``canonical_offers_unassessable``. While an approved alias
+    merges two source streams (``canonical_offer_combination_unresolved``) the
+    blocker is resolved only when the report holds the approved
+    ``CANONICAL_OFFER_COMBINATION`` policy for exactly the alias of the
+    location policy and has no unassessable row; otherwise the blocker stays
+    and the report's blockers are added by value
+    (``canonical_offer_policy_mismatch`` when the policy names other streams
+    or another canonical location).
+    ``expected_stream_contract``
+    (:func:`~ql2_sixt_canada_analysis.expected_stream_contract.current_expected_stream_contract`)
+    must be approved and ``EXHAUSTIVE`` (``expected_stream_authority_unavailable``
+    for ``None`` or an unapproved universe/spelling,
+    ``expected_stream_universe_not_exhaustive`` otherwise), and completeness
+    must have assessed exactly that contract (``expected_stream_contract_mismatch``).
+    Missing expected streams, unexpected source streams and source spelling
+    mismatches found by completeness are repeated here by the same values, so
+    an unexpected stream fails pricing pending contract review. Completeness and keys computed on frames that
+    were not linked under the approved policy are therefore never sufficient.
 
     Gate values must be real booleans; anything else is a ``TypeError`` so a
     missing result can never be read as a pass. ``completeness`` is the
@@ -486,10 +660,27 @@ def assess_pricing_readiness(
         raise TypeError("vehicle_stability must be a VehicleStabilityReport or None")
     if completeness is not None and not isinstance(completeness, CompletenessReport):
         raise TypeError("completeness must be a CompletenessReport or None")
-    if scheduled_coverage is not None and not isinstance(scheduled_coverage, ScheduledCoverageReport):
-        raise TypeError("scheduled_coverage must be a ScheduledCoverageReport or None")
+    from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
+
+    if scheduled_coverage is not None and not isinstance(
+            scheduled_coverage, (PerStreamScheduledCoverageReport, ScheduledCoverageReport)):
+        raise TypeError("scheduled_coverage must be a PerStreamScheduledCoverageReport, a ScheduledCoverageReport "
+                        "or None")
     if job_detail_join is not None and not isinstance(job_detail_join, JobDetailJoinReadiness):
         raise TypeError("job_detail_join must be a JobDetailJoinReadiness or None")
+    from ql2_sixt_canada_analysis.job_linkage import JobLinkageReport
+    from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
+
+    if job_linkage is not None and not isinstance(job_linkage, JobLinkageReport):
+        raise TypeError("job_linkage must be a JobLinkageReport or None")
+    from ql2_sixt_canada_analysis.expected_stream_contract import ExpectedStreamContract
+
+    if expected_stream_contract is not None and not isinstance(expected_stream_contract, ExpectedStreamContract):
+        raise TypeError("expected_stream_contract must be an ExpectedStreamContract or None")
+    from ql2_sixt_canada_analysis.location_authority import LocationAuthorityReport
+
+    if location_authority is not None and not isinstance(location_authority, LocationAuthorityReport):
+        raise TypeError("location_authority must be a LocationAuthorityReport or None")
     gates = (
         (key_contracts_valid, PricingBlocker.KEY_CONTRACTS_INVALID),
         (one_to_many_contract_valid, PricingBlocker.ONE_TO_MANY_INVALID),
@@ -498,25 +689,122 @@ def assess_pricing_readiness(
     if not all(isinstance(value, bool) for value, _ in gates):
         raise TypeError("every readiness gate must be a bool")
     reasons = list(_completeness_blockers(completeness))
+    reasons.extend(_expected_stream_contract_blockers(expected_stream_contract, completeness))
     reasons.extend(blocker for value, blocker in gates if not value)
     reasons.extend(_stability_blockers(vehicle_stability))
     reasons.extend(_scheduled_coverage_blockers(scheduled_coverage, completeness))
     reasons.extend(_join_blockers(job_detail_join))
+    reasons.extend(_linkage_blockers(job_linkage, job_detail_join))
+    reasons.extend(_location_authority_blockers(location_authority, location_policy, expected_stream_contract))
+    from ql2_sixt_canada_analysis.rental_dates import RentalDateReport
+
+    if rental_dates is not None and not isinstance(rental_dates, RentalDateReport):
+        raise TypeError("rental_dates must be a RentalDateReport or None")
+    reasons.extend([PricingBlocker.RENTAL_DATE_ASSESSMENT_MISSING] if rental_dates is None
+                   else [PricingBlocker(b.value) for b in rental_dates.blocking_reasons])
+    reasons = _canonical_offer_blockers(reasons, canonical_offers, location_policy)
     reasons.extend(location_policy.blocking_reasons)
     return PricingReadinessReport(blocking_reasons=tuple(dict.fromkeys(reasons)), location_policy=location_policy,
                                   completeness=completeness, scheduled_coverage=scheduled_coverage,
-                                  job_detail_join=job_detail_join)
+                                  job_detail_join=job_detail_join, job_linkage=job_linkage,
+                                  expected_stream_contract=expected_stream_contract,
+                                  location_authority=location_authority, rental_dates=rental_dates,
+                                  canonical_offers=canonical_offers)
 
 
-def _scheduled_coverage_blockers(report: ScheduledCoverageReport | None,
+def _canonical_offer_blockers(reasons: list[PricingBlocker], report: object,
+                              policy: LocationPolicyReport) -> list[PricingBlocker]:
+    """Resolve the merged-stream blocker only with a ready, matching, authority-backed combination."""
+    from ql2_sixt_canada_analysis.canonical_offers import CanonicalOfferReport
+
+    B = PricingBlocker
+    if report is not None and not isinstance(report, CanonicalOfferReport):
+        raise TypeError("canonical_offers must be a CanonicalOfferReport or None")
+    if report is None:
+        return reasons + [B.CANONICAL_OFFER_ASSESSMENT_MISSING]
+    if B.CANONICAL_OFFER_COMBINATION_UNRESOLVED not in reasons:
+        return reasons + ([B.CANONICAL_OFFERS_UNASSESSABLE] if report.unassessable_rows else [])
+    extra = [B(b.value) for b in report.blocking_reasons]
+    identity = policy.policy
+    if report.policy.available and (identity is None or identity.canonical_location is None or set(
+            report.policy.source_streams) != {tuple(identity.first), tuple(identity.second)}
+            or report.policy.canonical_location != tuple(identity.canonical_location)):
+        extra.append(B.CANONICAL_OFFER_POLICY_MISMATCH)
+    if extra:
+        return reasons + extra
+    return [r for r in reasons if r is not B.CANONICAL_OFFER_COMBINATION_UNRESOLVED]
+
+
+def _location_authority_blockers(report: LocationAuthorityReport | None, policy: LocationPolicyReport,
+                                 contract: ExpectedStreamContract | None) -> list[PricingBlocker]:
+    """Role-map and comparison-pair blockers, re-validated under this gate's identity policy and contract.
+
+    The approved roles and pairs are re-assessed against the identity policy
+    the location-policy report was built from and the source contract given
+    to pricing, so a report validated under another policy or contract can
+    never pass: its own result is kept only when the re-assessment agrees
+    (``roles_pairs_policy_mismatch`` otherwise).
+    """
+    from ql2_sixt_canada_analysis.location_authority import assess_location_authority
+
+    B = PricingBlocker
+    if report is None:
+        return [B.BRANCH_ROLE_AUTHORITY_UNAVAILABLE, B.COMPARISON_PAIR_AUTHORITY_UNAVAILABLE]
+    blockers = [B(b.value) for b in report.blocking_reasons]
+    if contract is not None and report.contract.coverage != contract.coverage:
+        blockers.append(B.LOCATION_AUTHORITY_CONTRACT_MISMATCH)      # validated against another contract
+    if policy.policy is not None:
+        again = assess_location_authority(report.role_map, report.pair_set,
+                                          report.contract, policy.policy)
+        if again.blocking_reasons != report.blocking_reasons or again.effective_pairs != report.effective_pairs:
+            blockers.append(B.LOCATION_AUTHORITY_POLICY_MISMATCH)    # validated under another policy
+            blockers.extend(B(b.value) for b in again.blocking_reasons)
+    return blockers
+
+
+def _expected_stream_contract_blockers(contract: ExpectedStreamContract | None,
+                                       completeness: CompletenessReport | None) -> list[PricingBlocker]:
+    """Source-stream contract blockers (central mapping; anything but an approved, exhaustive, applied contract blocks)."""
+    B = PricingBlocker
+    blockers = ([B.EXPECTED_STREAM_AUTHORITY_UNAVAILABLE, B.EXPECTED_STREAM_UNIVERSE_NOT_EXHAUSTIVE]
+                if contract is None else [B(b.value) for b in contract.blocking_reasons])
+    if completeness is not None:
+        streams = completeness.expected_streams
+        if contract is not None and contract.coverage.is_configured and (
+                streams is None or streams.coverage != contract.coverage):
+            blockers.append(B.EXPECTED_STREAM_CONTRACT_MISMATCH)
+        source_stream = (CompletenessBlocker.EXPECTED_PAIRS_MISSING, CompletenessBlocker.UNEXPECTED_PAIRS,
+                         CompletenessBlocker.SOURCE_SPELLING_MISMATCH)   # repeated at pricing level by value
+        blockers.extend(B(b.value) for b in source_stream if b in completeness.blocking_reasons)
+    return blockers
+
+
+def _linkage_blockers(report: JobLinkageReport | None,
+                      join: JobDetailJoinReadiness | None) -> list[PricingBlocker]:
+    """Job-linkage blockers (central mapping; anything but a valid, consistent report blocks)."""
+    B = PricingBlocker
+    if report is None:
+        return [B.JOB_IDENTIFIER_NORMALIZATION_MISSING]
+    blockers = [B(b.value) for b in report.blocking_reasons]
+    if join is not None and join.job_linkage_report is not report:
+        blockers.append(B.JOB_LINKAGE_REPORT_MISMATCH)
+    if blockers or not report.is_valid:
+        blockers.insert(0, B.JOB_IDENTIFIER_NORMALIZATION_NOT_READY)
+    return blockers
+
+
+def _scheduled_coverage_blockers(report: PerStreamScheduledCoverageReport | ScheduledCoverageReport | None,
                                  completeness: CompletenessReport | None) -> list[PricingBlocker]:
     """Schedule and all-stream coverage blockers (central mapping; every non-pass blocks)."""
     if report is None:
         return [PricingBlocker.SCHEDULED_COVERAGE_ASSESSMENT_MISSING]
     blockers = [PricingBlocker(b.value) for b in report.blocking_reasons]
-    if (report.expected_streams is not None and completeness is not None
-            and completeness.expected_streams is not None
-            and report.expected_streams.coverage != completeness.expected_streams.coverage):
+    if isinstance(report, ScheduledCoverageReport):
+        assessed = report.expected_streams.coverage if report.expected_streams is not None else None
+    else:
+        assessed = report.coverage
+    if (assessed is not None and completeness is not None and completeness.expected_streams is not None
+            and assessed != completeness.expected_streams.coverage):
         blockers.append(PricingBlocker.SCHEDULED_COVERAGE_CONTRACT_MISMATCH)
     if not report.is_valid and not blockers:                       # fail closed on any unforeseen non-pass
         blockers.append(PricingBlocker.SCHEDULED_COVERAGE_INCOMPLETE)
@@ -573,6 +861,7 @@ class CompletenessBlocker(StrEnum):
     UNEXPECTED_PAIRS = "unexpected_pairs"
     UNASSIGNED_LOCATIONS = "unassigned_pairs"
     CONFLICTING_LOCATION_ASSIGNMENT = "conflicting_pair_assignment"
+    SOURCE_SPELLING_MISMATCH = "source_spelling_mismatch"
     EXPECTED_STREAM_ASSESSMENT_UNAVAILABLE = "expected_stream_assessment_unavailable"
     STREAM_CONTRACT_MISMATCH = "stream_contract_mismatch"
     EXPECTED_STREAM_REPORT_MISSING = "expected_stream_report_missing"
@@ -600,6 +889,7 @@ _COVERAGE_BLOCKERS = {
     "unexpected_location": CompletenessBlocker.UNEXPECTED_PAIRS,
     "missing_location_assignment": CompletenessBlocker.UNASSIGNED_LOCATIONS,
     "conflicting_location_assignment": CompletenessBlocker.CONFLICTING_LOCATION_ASSIGNMENT,
+    "source_spelling_mismatch": CompletenessBlocker.SOURCE_SPELLING_MISMATCH,
 }
 
 
@@ -666,7 +956,7 @@ def assess_completeness(
     streams: ExpectedLocationStreamsReport | None,
     reconciliation: JobDetailReconciliationReport | None,
     city_integrity: CityIntegrityReport | None,
-    expected_coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    expected_coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> CompletenessReport:
     """Combine source completeness, city-location coverage, every expected stream, counts and city integrity.
 
@@ -684,6 +974,7 @@ def assess_completeness(
     coverage never substitutes for job-level stream continuity. Every input
     must be present and pass; each failure is reported.
     """
+    expected_coverage = project_default(expected_coverage, "EXPECTED_LOCATION_COVERAGE")
     B = CompletenessBlocker
     if not isinstance(datasets, RawDatasets):
         raise TypeError("datasets must be RawDatasets")

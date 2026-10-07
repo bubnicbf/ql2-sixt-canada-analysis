@@ -53,7 +53,8 @@ import numpy as np
 import pandas as pd
 
 from ql2_sixt_canada_analysis.schemas import (
-    EXPECTED_LOCATION_COVERAGE,
+    PROJECT_DEFAULT,
+    project_default,
     JOB_DETAIL_RELATIONSHIP,
     JobDetailRelationshipDefinition,
     LocationCoverageConfigurationError,
@@ -199,7 +200,7 @@ def assess_city_integrity(
     cars: pd.DataFrame,
     *,
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
-    coverage: LocationCoverageDefinition | None = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition | None = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> CityIntegrityReport:
     """Assess assignable job scope and parent/detail scope agreement.
 
@@ -216,6 +217,7 @@ def assess_city_integrity(
         LocationCoverageConfigurationError: The coverage scope disagrees with
             the relationship's scope pairs.
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(jobs, pd.DataFrame) or not isinstance(cars, pd.DataFrame):
         raise TypeError("jobs and cars must be pandas DataFrames")
     if not isinstance(relationship, JobDetailRelationshipDefinition):

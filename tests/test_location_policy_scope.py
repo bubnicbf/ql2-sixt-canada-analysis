@@ -12,8 +12,8 @@ import dataclasses
 
 import pandas as pd
 import pytest
-from test_city_integrity import PROJECT_GATES, completeness, healthy
-from test_readiness import GATES, evidence
+from test_city_integrity import COV as THREE_STREAM_COV, PROJECT_GATES, completeness, healthy
+from test_readiness import GATES, core_blockers, evidence
 
 import ql2_sixt_canada_analysis
 from ql2_sixt_canada_analysis.comparison import LocationStreamComparisonStatus as CS
@@ -31,7 +31,7 @@ from ql2_sixt_canada_analysis.schemas import (
     COMPARED_LOCATION_STREAMS,
     EXPECTED_LOCATION_COVERAGE as COV,
     INVESTIGATED_LOCATION_STREAM,
-    VANCOUVER_LOCATION_POLICY as VAN_POLICY,
+    VANCOUVER_LOCATION_POLICY as PROJECT_POLICY,
     LocationPolicyAuthority,
     LocationPolicyConfigurationError,
     LocationPolicyScope,
@@ -46,6 +46,10 @@ DOWNTOWN, THURLOW = COMPARED_LOCATION_STREAMS              # the two governed Va
 CAL, VAN = CAL_KEY[0], DOWNTOWN[0]
 CITY_COL, LABEL_COL = COV.location_columns
 AUTHORITY = LocationPolicyAuthority(source="SYNTH-AUTHORITY", reference="SYNTH-DECISION-002")
+
+
+#: The project policy's governed keys with no decision (synthetic variants below add fabricated authority).
+VAN_POLICY = dataclasses.replace(PROJECT_POLICY, state=PS.UNRESOLVED, authority=None, canonical_location=None)
 
 
 def alias(canonical: tuple[object, ...]):  # type: ignore[no-untyped-def]
@@ -82,6 +86,9 @@ def test_project_policy_governs_one_vancouver_scope():
     assert scope.governed_locations == (DOWNTOWN, THURLOW) and scope.governed_scope == (VAN,)
     assert scope.scope_columns == COV.stream_scope_columns and scope.canonical_location is None
     assert CAL != VAN and VAN_POLICY.state is PS.UNRESOLVED
+    # The project policy is the approved alias (record v4): same governed keys, canonical Vancouver / Downtown.
+    assert PROJECT_POLICY.state is PS.CONFIRMED_ALIAS and PROJECT_POLICY.canonical_location == DOWNTOWN
+    assert PROJECT_POLICY.scope.is_valid and PROJECT_POLICY.scope.governed_locations == (DOWNTOWN, THURLOW)
 
 
 def test_calgary_canonical_key_is_rejected_with_typed_defects():
@@ -98,7 +105,7 @@ def test_calgary_canonical_key_is_rejected_with_typed_defects():
     ((CAL, "SYNTH-BRANCH-Z"), (D.CANONICAL_LOCATION_CITY_MISMATCH, D.CANONICAL_LOCATION_SCOPE_MISMATCH)),
     (("SYNTH-CITY-9", DOWNTOWN[1]), (D.CANONICAL_LOCATION_CITY_MISMATCH, D.CANONICAL_LOCATION_SCOPE_MISMATCH)),
     ((VAN, "SYNTH-UNAUTHORISED-BRANCH"), (D.CANONICAL_LOCATION_SCOPE_MISMATCH,)),   # right city, unauthorised branch
-    ((VAN, CAL_KEY[1]), (D.CANONICAL_LOCATION_SCOPE_MISMATCH,)),
+    ((VAN, "SYNTH-" + CAL_KEY[1]), (D.CANONICAL_LOCATION_SCOPE_MISMATCH,)),   # right city, ungoverned label
 ])
 def test_out_of_scope_canonical_keys_are_rejected(canonical, expected):
     policy = alias(canonical)
@@ -204,7 +211,7 @@ def test_scope_mismatch_and_mapping_defect_are_both_reported():
     report = assess_location_policy(TO_CALGARY, evidence(CS.LOCATION_MAPPING_DEFECT))
     assert report.identity_evidence_conflict
     assert report.blocking_reasons == ((B.IDENTITY_EVIDENCE_CONFLICT,) + tuple(B(d.value) for d in CROSS_CITY)
-                                       + (B.ALIAS_CANONICALIZATION_NOT_APPLIED,))
+                                       + (B.ALIAS_CANONICALIZATION_NOT_APPLIED, B.GOVERNED_SOURCE_STREAM_MISSING))
     distinct = assess_location_policy(bypass(DISTINCT, canonical_location=CAL_KEY), evidence(CS.LOCATION_MAPPING_DEFECT))
     assert distinct.blocking_reasons == (B.IDENTITY_EVIDENCE_CONFLICT, B.CANONICAL_LOCATION_NOT_PERMITTED)
     assert not distinct.locations_comparable_independently
@@ -215,11 +222,11 @@ def test_scope_mismatch_and_mapping_defect_are_both_reported():
 
 def test_invalid_alias_changes_no_coverage_stream_or_completeness_population():
     j, c = healthy()                       # Calgary Downtown + both Vancouver streams, all healthy
-    coverage = assess_expected_location_coverage(c, COV)
-    streams = assess_expected_location_streams(j, c, coverage=COV)
+    coverage = assess_expected_location_coverage(c, THREE_STREAM_COV)
+    streams = assess_expected_location_streams(j, c, coverage=THREE_STREAM_COV)
     apply_location_policy(c, TO_CALGARY)   # refused; inputs untouched
-    assert assess_expected_location_coverage(c, COV) == coverage
-    again = assess_expected_location_streams(j, c, coverage=COV)
+    assert assess_expected_location_coverage(c, THREE_STREAM_COV) == coverage
+    again = assess_expected_location_streams(j, c, coverage=THREE_STREAM_COV)
     assert again == streams and again.assessed_exactly_once
     assert [r.target for r in again.results] == [CAL_KEY, DOWNTOWN, THURLOW]   # Vancouver streams stay
     calgary = again.reports[CAL_KEY].event_accounting
@@ -245,7 +252,7 @@ def test_reported_issue_end_to_end():
     assert [r.target for r in complete.expected_streams.results] == [CAL_KEY, DOWNTOWN, THURLOW]
     readiness = assess_pricing_readiness(location_policy=policy, **PROJECT_GATES(complete))
     assert readiness.ready is False
-    assert set(readiness.blocking_reasons) == {B(d.value) for d in CROSS_CITY} | {B.ALIAS_CANONICALIZATION_NOT_APPLIED}
+    assert set(core_blockers(readiness)) == {B(d.value) for d in CROSS_CITY} | {B.ALIAS_CANONICALIZATION_NOT_APPLIED}
 
 
 # ------------------------------------------------------- valid states preserved
@@ -273,7 +280,7 @@ def test_valid_distinct_policy_keeps_streams_separate():
 
 
 def test_unresolved_policy_remains_blocked():
-    report = assess_location_policy()
+    report = assess_location_policy(VAN_POLICY)
     assert report.scope_valid and not report.location_policy_resolved
     assert report.blocking_reasons == (B.LOCATION_POLICY_UNRESOLVED,)
     assert not assess_pricing_readiness(location_policy=report, **GATES).ready

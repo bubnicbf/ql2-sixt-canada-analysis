@@ -87,7 +87,8 @@ import pandas as pd
 
 from ql2_sixt_canada_analysis.relationships import RelationshipPreconditionError, _check_relationship_inputs
 from ql2_sixt_canada_analysis.schemas import (
-    LOCATION_STREAM_COMPARISON,
+    PROJECT_DEFAULT,
+    project_default,
     CapturePairing,
     LocationCoverageConfigurationError,
     LocationCoverageDefinition,
@@ -336,7 +337,7 @@ class LocationAliasNotConfirmedError(Exception):
 def compare_location_streams(
     jobs: pd.DataFrame,
     cars: pd.DataFrame,
-    definition: LocationStreamComparisonDefinition = LOCATION_STREAM_COMPARISON,
+    definition: LocationStreamComparisonDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> LocationStreamComparisonReport:
     """Compare the two configured streams; returns a categorical report.
 
@@ -346,6 +347,7 @@ def compare_location_streams(
         ComparisonPreconditionError: Parent key, identifier dtype or
             blank-row preconditions fail.
     """
+    definition = project_default(definition, "LOCATION_STREAM_COMPARISON")
     if not isinstance(definition, LocationStreamComparisonDefinition):
         raise TypeError("definition must be a LocationStreamComparisonDefinition")
     rel, cov = definition.relationship, definition.coverage
@@ -429,9 +431,10 @@ def compare_location_streams(
 def validate_confirmed_location_alias(
     jobs: pd.DataFrame,
     cars: pd.DataFrame,
-    definition: LocationStreamComparisonDefinition = LOCATION_STREAM_COMPARISON,
+    definition: LocationStreamComparisonDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> LocationStreamComparisonReport:
     """Return the report only if an alias is confirmed by authority; else raise."""
+    definition = project_default(definition, "LOCATION_STREAM_COMPARISON")
     report = compare_location_streams(jobs, cars, definition)
     if not report.alias_authority_sufficient:
         raise LocationAliasNotConfirmedError(report)

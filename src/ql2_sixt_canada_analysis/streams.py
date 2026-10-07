@@ -94,8 +94,9 @@ from ql2_sixt_canada_analysis.ingestion import RawDatasets
 from ql2_sixt_canada_analysis.reconciliation import _VALID, _classify_expected_counts, assess_job_detail_reconciliation
 from ql2_sixt_canada_analysis.relationships import assess_one_to_many_join
 from ql2_sixt_canada_analysis.schemas import (
+    PROJECT_DEFAULT,
+    project_default,
     COLLECTION_SCHEDULE,
-    EXPECTED_LOCATION_COVERAGE,
     JOB_DETAIL_RELATIONSHIP,
     TEMPORAL_RECONCILIATION,
     CollectionScheduleDefinition,
@@ -208,11 +209,14 @@ class StreamEventAccounting:
     jobs_with_other_details_only: int
     zero_offer_jobs: int
     missing_detail_jobs: int
+    #: In-scope jobs whose whole capture is a governed ``INCOMPLETE_PARENT_CAPTURE`` (neither presence nor gap).
+    governed_excluded_jobs: int = 0
 
     def __post_init__(self) -> None:
         assert self.total_jobs == self.scope_excluded_jobs + self.scope_unassignable_jobs + self.in_scope_jobs
         assert self.in_scope_jobs == (self.jobs_with_target_details + self.jobs_with_other_details_only
-                                      + self.zero_offer_jobs + self.missing_detail_jobs)
+                                      + self.zero_offer_jobs + self.missing_detail_jobs
+                                      + self.governed_excluded_jobs)
 
     @property
     def zero_detail_jobs(self) -> int:
@@ -316,7 +320,7 @@ class LocationStreamError(Exception):
 
 def resolve_expected_location(
     target: tuple[str, ...],
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
 ) -> tuple[str, ...]:
     """Return ``target`` if it is a configured expected key, else raise.
 
@@ -327,6 +331,7 @@ def resolve_expected_location(
         LocationCoverageConfigurationError: The contract is unconfigured, or
             ``target`` is malformed or not an expected key.
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(coverage, LocationCoverageDefinition):
         raise TypeError(f"expected a LocationCoverageDefinition, got {type(coverage).__name__}")
     if not coverage.is_configured:
@@ -344,12 +349,13 @@ def investigate_location_stream(
     cars: pd.DataFrame,
     target: tuple[str, ...],
     *,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
     loaded: RawDatasets | None = None,
     raw_source: str | Path | None = None,
     schedule: CollectionScheduleDefinition | None = COLLECTION_SCHEDULE,
     temporal: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
+    capture_exclusions: object = None,
 ) -> LocationStreamInvestigationReport:
     """Trace ``target`` through the pipeline; return a categorical report.
 
@@ -371,6 +377,7 @@ def investigate_location_stream(
             or the schedule's timestamp is not a timestamp field of the
             temporal contract.
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(jobs, pd.DataFrame) or not isinstance(cars, pd.DataFrame):
         raise TypeError("jobs and cars must be pandas DataFrames")
     if not isinstance(coverage, LocationCoverageDefinition):
@@ -437,7 +444,8 @@ def investigate_location_stream(
                                       else TimeCoverageStatus.NOT_ASSESSED))
 
     # --- source continuity across the scope's collection events
-    continuity, accounting = _continuity(jobs, frame, mask, coverage, relationship)
+    continuity, accounting = _continuity(jobs, frame, mask, coverage, relationship,
+                                         _governed_excluded(capture_exclusions, jobs, target))
     continuity_failure = _CONTINUITY_FAILURES.get(continuity)
     if continuity_failure is not None:
         fail(PipelineStage.SOURCE_CONTINUITY, continuity_failure)
@@ -680,11 +688,12 @@ def assess_expected_location_streams(
     jobs: pd.DataFrame,
     cars: pd.DataFrame,
     *,
-    coverage: LocationCoverageDefinition = EXPECTED_LOCATION_COVERAGE,
+    coverage: LocationCoverageDefinition = PROJECT_DEFAULT,  # type: ignore[assignment]
     relationship: JobDetailRelationshipDefinition = JOB_DETAIL_RELATIONSHIP,
     loaded: RawDatasets | None = None,
     schedule: CollectionScheduleDefinition | None = COLLECTION_SCHEDULE,
     temporal: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
+    capture_exclusions: object = None,
 ) -> ExpectedLocationStreamsReport:
     """Investigate every configured expected stream once; return the validated aggregate.
 
@@ -696,6 +705,7 @@ def assess_expected_location_streams(
         LocationCoverageConfigurationError: The contract is unconfigured or
             its columns are absent (as for :func:`investigate_location_stream`).
     """
+    coverage = project_default(coverage, "EXPECTED_LOCATION_COVERAGE")
     if not isinstance(coverage, LocationCoverageDefinition):
         raise TypeError(f"expected a LocationCoverageDefinition, got {type(coverage).__name__}")
     if not coverage.is_configured:
@@ -704,7 +714,7 @@ def assess_expected_location_streams(
     results = tuple(
         ExpectedStreamResult(key, investigate_location_stream(
             jobs, cars, key, coverage=coverage, relationship=relationship, loaded=loaded,
-            schedule=schedule, temporal=temporal))
+            schedule=schedule, temporal=temporal, capture_exclusions=capture_exclusions))
         for key in coverage.expected_locations
     )
     aggregate = ExpectedLocationStreamsReport(coverage=coverage, results=results, schedule=schedule)
@@ -954,10 +964,26 @@ def _raw_contains(path: Path, columns: tuple[str, ...], keys: tuple[tuple[str, .
         return any(tuple(row[c] for c in columns) in wanted for row in reader)
 
 
+def _governed_excluded(capture_exclusions: object, jobs: pd.DataFrame, target: tuple[str, ...]) -> np.ndarray | None:
+    """Jobs whose whole capture is a governed ``INCOMPLETE_PARENT_CAPTURE`` for ``target`` (``None`` = none given)."""
+    if capture_exclusions is None:
+        return None
+    from ql2_sixt_canada_analysis.collection_schedule import CaptureExclusionSet
+
+    if not isinstance(capture_exclusions, CaptureExclusionSet):
+        raise TypeError("capture_exclusions must be a CaptureExclusionSet or None")
+    return capture_exclusions.parent_mask(jobs, tuple(target))
+
+
 def _continuity(jobs: pd.DataFrame, frame: pd.DataFrame, mask: pd.Series, coverage: LocationCoverageDefinition,
-                relationship: JobDetailRelationshipDefinition,
+                relationship: JobDetailRelationshipDefinition, governed_excluded: np.ndarray | None = None,
                 ) -> tuple[StreamContinuity, StreamEventAccounting | None]:
-    """Presence of the target across every in-scope *job* (zero-detail jobs included)."""
+    """Presence of the target across every in-scope *job* (zero-detail jobs included).
+
+    In-scope jobs whose whole capture is a governed parent-capture exclusion
+    for the target are counted separately (``governed_excluded_jobs``) and are
+    neither a presence nor a gap; every other in-scope job is classified.
+    """
     scope = coverage.stream_scope_columns
     if not scope or coverage.dataset != relationship.detail:
         return StreamContinuity.NOT_APPLICABLE, None
@@ -993,15 +1019,19 @@ def _continuity(jobs: pd.DataFrame, frame: pd.DataFrame, mask: pd.Series, covera
         category, expected = _classify_expected_counts(jobs[column])
         declared_zero &= (category == _VALID) & (expected == 0)
 
+    governed = (np.zeros(len(jobs), dtype=bool) if governed_excluded is None
+                else np.asarray(governed_excluded, dtype=bool)) & in_scope
+    counted = in_scope & ~governed
     accounting = StreamEventAccounting(
         total_jobs=len(jobs),
         scope_excluded_jobs=int((~in_scope & ~scope_missing).sum()),
         scope_unassignable_jobs=int(scope_missing.sum()),
         in_scope_jobs=int(in_scope.sum()),
-        jobs_with_target_details=int((in_scope & has_target).sum()),
-        jobs_with_other_details_only=int((in_scope & has_details & ~has_target).sum()),
-        zero_offer_jobs=int((in_scope & ~has_details & declared_zero).sum()),
-        missing_detail_jobs=int((in_scope & ~has_details & ~declared_zero).sum()),
+        jobs_with_target_details=int((counted & has_target).sum()),
+        jobs_with_other_details_only=int((counted & has_details & ~has_target).sum()),
+        zero_offer_jobs=int((counted & ~has_details & declared_zero).sum()),
+        missing_detail_jobs=int((counted & ~has_details & ~declared_zero).sum()),
+        governed_excluded_jobs=int(governed.sum()),
     )
     if accounting.scope_unassignable_jobs:
         status = StreamContinuity.SCOPE_UNASSIGNABLE          # denominator itself unproven
