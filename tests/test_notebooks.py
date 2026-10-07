@@ -68,7 +68,8 @@ def _code_source(notebook: nbformat.NotebookNode) -> str:
 REPORTING_STEPS = ("current_expected_stream_contract(", "current_location_authority(", "current_temporal_authority(", "assess_rental_dates(", "assess_job_linkage(", "assess_per_stream_scheduled_coverage(", "assess_city_integrity(", "assess_expected_location_streams(", "assess_vehicle_attribute_stability(", "assess_job_detail_join_readiness(",
                    "assess_pricing_readiness(", "compare_location_streams(", "load_raw_datasets(raw_dir)",
                    "assess_dataset_location_coverage(", "assess_job_detail_reconciliation(",
-                   "investigate_location_stream(", "assess_completeness(")
+                   "investigate_location_stream(", "assess_completeness(", "build_pricing_population(",
+                   "assess_canonical_offers(")
 
 
 def _is_reporting(cell: nbformat.NotebookNode) -> bool:
@@ -964,7 +965,9 @@ def test_ingestion_notebook_gates_pricing_on_schedule_coverage_and_trusted_join(
     # The decision is the central API's: no readiness is computed in the notebook itself.
     assert re.search(r"^pricing_analysis_ready = pricing_readiness\.ready$", pricing, re.M)
     assert len(re.findall(r"pricing_analysis_ready\s*=", code)) == 1
-    order = [sources.index(s) for s in (streams, coverage, pricing)]
+    # The scheduled coverage runs first: the streams consume its resolved governed exclusions.
+    assert "capture_exclusions=scheduled_coverage_report.capture_exclusions" in streams
+    order = [sources.index(s) for s in (coverage, streams, pricing)]
     assert order == sorted(order)
 
 

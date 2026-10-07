@@ -106,7 +106,10 @@ __all__ = [
     "ApprovedDateAgreement",
     "baseline_authority_inputs",
     "rental_date_fields",
+    "CanonicalOfferSummary",
     "CollectionScheduleSummary",
+    "PricingPopulationSummary",
+    "ReportingDaySummary",
     "LocationAuthoritySummary",
     "StreamScheduleSummary",
     "TemporalBaselineSummary",
@@ -272,6 +275,8 @@ class ContinuityFinding:
     in_scope_capture_events: int
     capture_events_lacking_stream: int
     schedule_available: bool
+    #: In-scope jobs whose whole capture is a governed parent-capture exclusion (neither present nor a gap).
+    governed_excluded_jobs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +306,8 @@ class StreamScheduleSummary:
     unexcused_missing_periods: int
     excused_periods: int
     missing_by_failure: tuple[tuple[str, int], ...]
+    excluded_periods: int = 0          # governed parent-capture exclusion (analytically null)
+    required_periods: int = 0          # expected (nominal) minus excluded
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +331,12 @@ class CollectionScheduleSummary:
     detail_copy_mismatches: int
     unexcused_missing_periods: int
     streams: tuple[StreamScheduleSummary, ...]
+    nominal_stream_periods: int = 0
+    excluded_stream_periods: int = 0
+    required_stream_periods: int = 0
+    covered_stream_periods: int = 0
+    excluded_parent_captures: int = 0
+    unmatched_exclusions: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +378,68 @@ class TemporalBaselineSummary:
     city_mismatch_detail_rows: int
     unavailable_rules: tuple[str, ...]
     temporal_fields_trusted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReportingDaySummary:
+    """Reporting-day derivation and source-date agreement in aggregate (no dates)."""
+
+    status: str                         # available | unavailable | report_missing
+    source_field: str | None            # jobs.finished_at
+    timezone_mode: str | None           # parent_city
+    scrape_date_derivation: str | None  # reporting_day
+    date_clean_status: str              # retired_from_pricing | not_approved | ...
+    date_clean_rule_unavailable: bool   # date_derivation:cars.date_clean still reported unavailable
+    parent_status_counts: tuple[tuple[str, int], ...]
+    detail_status_counts: tuple[tuple[str, int], ...]
+    parent_boundary_crossings: int      # agreeing parent dates whose UTC date differs (legitimate)
+    detail_boundary_crossings: int
+    date_clean_rows: int
+    date_clean_valid: int
+    date_clean_missing: int
+    date_clean_invalid: int
+
+
+@dataclass(frozen=True, slots=True)
+class PricingPopulationSummary:
+    """Nominal, governed-excluded and eligible parent captures and detail rows (counts only)."""
+
+    status: str                         # available | report_missing
+    nominal_parent_captures: int
+    excluded_parent_captures: int
+    ineligible_parent_captures: int
+    eligible_parent_captures: int
+    nominal_detail_rows: int
+    excluded_detail_rows: int
+    ineligible_detail_rows: int
+    eligible_detail_rows: int
+    detail_status_counts: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalOfferSummary:
+    """Canonical offer combination in aggregate (approved keys and counts; no offers, prices or names)."""
+
+    policy_status: str                  # approved | not_approved | record_unavailable | invalid | report_missing
+    source_streams: tuple[tuple[str, ...], ...]
+    stream: tuple[str, ...] | None      # canonical location
+    source_rows: int
+    out_of_scope_rows: int
+    combined_observations: int
+    unassessable_rows: int
+    canonical_offers: int
+    unique_offers: int
+    deduplicated_offers: int
+    duplicate_groups: int
+    collapsed_observations: int
+    variation_groups: int
+    variation_offers: int
+    unassessable_group_count: int
+    unassessable_groups: tuple[tuple[str, int], ...]
+    vancouver_source_counts: tuple[tuple[tuple[str, ...], int], ...]
+    vancouver_canonical_offers: int
+    cross_stream_offers: int
+    blockers: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,6 +510,11 @@ class PricingReadinessBaseline:
     collection_schedule: CollectionScheduleSummary | None = None
     temporal: TemporalBaselineSummary | None = None
     rental_dates: RentalDateSummary | None = None
+    reporting_day: ReportingDaySummary | None = None
+    pricing_population: PricingPopulationSummary | None = None
+    canonical_offers: CanonicalOfferSummary | None = None
+    #: Every authority decision of the current record (its ``DecisionId``) and its status.
+    authority_statuses: tuple[tuple[DecisionId, str], ...] = ()
 
     def to_dict(self) -> dict:
         """Plain, sanitized structure; raises :class:`UnsafeBaselineValueError` on anything unsafe."""
@@ -456,6 +536,9 @@ def build_pricing_baseline(
     temporal_contract: TemporalReconciliationDefinition = TEMPORAL_RECONCILIATION,
     investigated_stream: tuple[str, ...] = INVESTIGATED_LOCATION_STREAM,
     temporal_authority: object = None,
+    reporting_days: object = None,
+    pricing_population: object = None,
+    authority_record: AuthorityDecisionRecord | None = None,
 ) -> PricingReadinessBaseline:
     """Assemble the sanitized baseline from existing assessment results (inputs are not modified).
 
@@ -523,7 +606,78 @@ def build_pricing_baseline(
         collection_schedule=_schedule_summary(pricing),
         temporal=_temporal_summary(temporal, temporal_authority),
         rental_dates=_rental_summary(pricing),
+        reporting_day=_reporting_day_summary(temporal, temporal_authority, reporting_days),
+        pricing_population=_population_summary(pricing_population),
+        canonical_offers=_offer_summary(pricing),
+        authority_statuses=(tuple((d.id, d.status.value.lower()) for d in authority_record.decisions)
+                            if isinstance(authority_record, AuthorityDecisionRecord) else ()),
     )
+
+
+def _reporting_day_summary(report: TemporalReconciliationReport | None, authority: object,
+                           derived: object) -> ReportingDaySummary:
+    """Reporting-day statuses and counts (``report_missing`` without a derived reporting-day structure)."""
+    from ql2_sixt_canada_analysis.schemas import DatasetKey
+    from ql2_sixt_canada_analysis.temporal import DerivedReportingDays
+    from ql2_sixt_canada_analysis.temporal_authority import DATE_CLEAN_FIELD, TemporalAuthority
+
+    available = isinstance(authority, TemporalAuthority) and authority.reporting_day_available
+    clean = ("retired_from_pricing" if isinstance(authority, TemporalAuthority) and authority.date_clean_retired
+             else authority.date_semantics_status.value if isinstance(authority, TemporalAuthority)
+             else "report_missing")
+    field = next((f for f in report.field_reports if f.ref == DATE_CLEAN_FIELD), None) if report else None
+    unavailable = bool(report is not None and "date_derivation:cars.date_clean" in report.unavailable_rules)
+    crossings = {r.name: r.boundary_crossing for r in report.date_checks} if report is not None else {}
+    ok = isinstance(derived, DerivedReportingDays)
+    return ReportingDaySummary(
+        status=("available" if available and ok else "report_missing" if available else "unavailable"),
+        source_field=authority.reporting_day_source if available else None,
+        timezone_mode="parent_city" if available else None,
+        scrape_date_derivation=authority.scrape_date_derivation.lower() if available else None,
+        date_clean_status=clean, date_clean_rule_unavailable=unavailable,
+        parent_status_counts=tuple(derived.status_counts(DatasetKey.JOBS).items()) if ok else (),
+        detail_status_counts=tuple(derived.status_counts(DatasetKey.CARS).items()) if ok else (),
+        parent_boundary_crossings=crossings.get("date_derivation:jobs.scrape_date", 0),
+        detail_boundary_crossings=crossings.get("date_derivation:cars.scrape_date", 0),
+        date_clean_rows=field.row_count if field else 0, date_clean_valid=field.valid_count if field else 0,
+        date_clean_missing=field.missing_count if field else 0,
+        date_clean_invalid=field.invalid_count if field else 0)
+
+
+def _population_summary(population: object) -> PricingPopulationSummary:
+    from ql2_sixt_canada_analysis.pricing_population import PricingPopulation
+
+    if not isinstance(population, PricingPopulation):
+        return PricingPopulationSummary("report_missing", 0, 0, 0, 0, 0, 0, 0, 0, ())
+    return PricingPopulationSummary(
+        "available", population.nominal_parent_captures, population.excluded_parent_captures,
+        population.ineligible_parent_captures, population.eligible_parent_captures,
+        population.nominal_detail_rows, population.excluded_detail_rows, population.ineligible_detail_rows,
+        population.eligible_detail_rows, tuple(population.detail_counts().items()))
+
+
+def _offer_summary(pricing: PricingReadinessReport) -> CanonicalOfferSummary:
+    from ql2_sixt_canada_analysis.canonical_offers import CanonicalOfferReport
+
+    report = pricing.canonical_offers
+    if not isinstance(report, CanonicalOfferReport):
+        return CanonicalOfferSummary("report_missing", (), None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (), (), 0, 0,
+                                     ("canonical_offer_report_missing",))
+    policy = report.policy
+    sources = set(policy.source_streams)
+    canonical = policy.canonical_location
+    return CanonicalOfferSummary(
+        policy_status=policy.status.value, source_streams=tuple(policy.source_streams), stream=canonical,
+        source_rows=report.source_rows, out_of_scope_rows=report.out_of_scope_rows,
+        combined_observations=report.combined_observations, unassessable_rows=report.unassessable_rows,
+        canonical_offers=report.canonical_offers, unique_offers=report.unique_offers,
+        deduplicated_offers=report.deduplicated_offers, duplicate_groups=report.duplicate_groups,
+        collapsed_observations=report.collapsed_observations, variation_groups=report.variation_groups,
+        variation_offers=report.variation_offers, unassessable_group_count=len(report.unassessable_groups),
+        unassessable_groups=report.unassessable_groups,
+        vancouver_source_counts=tuple((k, n) for k, n in report.source_counts if k in sources),
+        vancouver_canonical_offers=dict(report.canonical_counts).get(canonical, 0) if canonical else 0,
+        cross_stream_offers=report.cross_stream_offers, blockers=_codes(report.blocking_reasons))
 
 
 def _temporal_summary(report: TemporalReconciliationReport | None, authority: object) -> TemporalBaselineSummary:
@@ -586,8 +740,12 @@ def _schedule_summary(pricing: PricingReadinessReport) -> CollectionScheduleSumm
         streams=tuple(StreamScheduleSummary(
             stream=tuple(c.stream), expected_periods=c.expected, covered_periods=c.covered,
             unexcused_missing_periods=c.unexcused_missing, excused_periods=c.excused,
-            missing_by_failure=tuple((k.lower(), n) for k, n in c.missing_by_failure.items()))
-            for c in report.streams))
+            missing_by_failure=tuple((k.lower(), n) for k, n in c.missing_by_failure.items()),
+            excluded_periods=len(c.excluded), required_periods=c.required)
+            for c in report.streams),
+        nominal_stream_periods=report.nominal_periods, excluded_stream_periods=report.excluded_periods,
+        required_stream_periods=report.required_periods, covered_stream_periods=report.covered_periods,
+        excluded_parent_captures=report.excluded_parent_captures, unmatched_exclusions=report.unmatched_exclusions)
 
 
 def _location_summary(pricing: PricingReadinessReport) -> LocationAuthoritySummary:
@@ -739,6 +897,12 @@ def _subordinate(pricing: PricingReadinessReport, temporal: TemporalReconciliati
     else:
         statuses.append(("rental_date_policy", rental.policy.status.value))
         blockers.append(("rental_dates", _codes(rental.blocking_reasons)))
+    offers = pricing.canonical_offers
+    if offers is None:
+        blockers.append(("canonical_offers", ("canonical_offer_report_missing",)))
+    else:
+        statuses.append(("canonical_offer_policy", offers.policy.status.value))
+        blockers.append(("canonical_offers", _codes(offers.blocking_reasons)))
     policy = pricing.location_policy
     statuses.append(("location_policy_state", policy.state.value))
     blockers.append(("location_policy", _codes(policy.blocking_reasons)))
@@ -799,7 +963,8 @@ def _continuity(pricing: PricingReadinessReport, cars: pd.DataFrame, coverage: L
         in_scope_jobs=accounting.in_scope_jobs if accounting is not None else 0,
         jobs_without_linked_details=accounting.zero_detail_jobs if accounting is not None else 0,
         in_scope_capture_events=events, capture_events_lacking_stream=lacking,
-        schedule_available=bool(scheduled is not None and scheduled.schedule_assessment.available))
+        schedule_available=bool(scheduled is not None and scheduled.schedule_assessment.available),
+        governed_excluded_jobs=accounting.governed_excluded_jobs if accounting is not None else 0)
 
 
 def _apparent_gap(cars: pd.DataFrame, coverage: LocationCoverageDefinition,
@@ -834,10 +999,12 @@ def _sanitize(value: object, where: str):  # type: ignore[no-untyped-def]
         if value < 0:
             raise UnsafeBaselineValueError(f"negative count at {where}")
         return value
+    if isinstance(value, DecisionId):
+        return value.value          # a fixed decision name from the authority schema, never source data
     if isinstance(value, StrEnum):
         return _sanitize(value.value, where)
     if isinstance(value, str):
-        if re.search(r"\.(keys|stream)(\[\])?$", where):
+        if re.search(r"\.(keys|stream|source_streams|vancouver_source_counts)(\[\])?$", where):
             if not _LABEL.match(value):
                 raise UnsafeBaselineValueError(f"unsafe location label at {where}")
         elif not _CODE.match(value):
@@ -858,7 +1025,8 @@ def _sanitize(value: object, where: str):  # type: ignore[no-untyped-def]
 _SERIALIZABLE = (PricingReadinessBaseline, StreamPopulation, ObservedPopulation, StreamHealth, ObservedStreamHealth,
                  ContinuityFinding, LocationAuthoritySummary, CollectionScheduleSummary, StreamScheduleSummary,
                  TemporalBaselineSummary, TemporalFieldSummary, RentalDateSummary, RentalFieldSummary,
-                 RentalPeriodSummary, RentalAgreementSummary)
+                 RentalPeriodSummary, RentalAgreementSummary, ReportingDaySummary, PricingPopulationSummary,
+                 CanonicalOfferSummary)
 
 
 def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str, date: str) -> str:
@@ -968,13 +1136,75 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
                   + f"; detail copies disagreeing with their parent: {cs['detail_copy_mismatches']}.",
                   "- Expected city-periods without exactly one valid job: "
                   + (", ".join(f"{c} {n}" for c, n in cs["missing_city_periods"]) or "none") + ".",
-                  f"- Unexcused missing stream-periods: {cs['unexcused_missing_periods']}.", "",
-                  "| Stream | Expected periods | Covered | Unexcused missing | Excused | Missing by failure |",
-                  "| --- | --- | --- | --- | --- | --- |"]
-        lines += [f"| {key(st['stream'])} | {st['expected_periods']} | {st['covered_periods']} | "
+                  f"- Stream-periods: {cs['nominal_stream_periods']} nominal, {cs['excluded_stream_periods']} "
+                  f"excluded by a governed parent-capture exclusion, {cs['required_stream_periods']} required, "
+                  f"{cs['covered_stream_periods']} covered; unexcused missing: {cs['unexcused_missing_periods']}.",
+                  f"- Governed excluded parent captures: {cs['excluded_parent_captures']} (analytically null for "
+                  "pricing; raw rows preserved, nothing deleted); exclusions matching no or several captures: "
+                  f"{cs['unmatched_exclusions']}.", "",
+                  "| Stream | Nominal periods | Excluded | Required | Covered | Unexcused missing | Excused | "
+                  "Missing by failure |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+        lines += [f"| {key(st['stream'])} | {st['expected_periods']} | {st['excluded_periods']} | "
+                  f"{st['required_periods']} | {st['covered_periods']} | "
                   f"{st['unexcused_missing_periods']} | {st['excused_periods']} | "
                   + (", ".join(f"`{k}` {n}" for k, n in st["missing_by_failure"]) or "none") + " |"
-                  for st in cs["streams"]] or ["| none | | | | | |"]
+                  for st in cs["streams"]] or ["| none | | | | | | | |"]
+    pp = d["pricing_population"]
+    if pp is not None:
+        lines += ["", "### Pricing-eligible population (after every foundational control)", "",
+                  f"- Status: `{pp['status']}`.",
+                  f"- Parent captures: {pp['nominal_parent_captures']} nominal, {pp['excluded_parent_captures']} "
+                  f"governed exclusion, {pp['ineligible_parent_captures']} failing another control, "
+                  f"{pp['eligible_parent_captures']} eligible.",
+                  f"- Detail rows: {pp['nominal_detail_rows']} nominal, {pp['excluded_detail_rows']} governed "
+                  f"exclusion, {pp['ineligible_detail_rows']} failing another control, "
+                  f"{pp['eligible_detail_rows']} eligible.",
+                  "- Detail eligibility: " + (", ".join(f"`{k}` {n}" for k, n in pp["detail_status_counts"])
+                                              or "none") + ".",
+                  "- Excluded rows stay in ingestion, linkage, reconciliation, audit and exception reporting; "
+                  "they never enter price summaries, comparisons, product populations, pricing vehicle "
+                  "stability, duplicate calculations, offer counts or reporting-day cohorts."]
+    rdy = d["reporting_day"]
+    if rdy is not None:
+        lines += ["", "### Reporting day and source dates", "",
+                  f"- Reporting day: `{rdy['status']}`; source `{rdy['source_field'] or 'none'}`; zone mode "
+                  f"`{rdy['timezone_mode'] or 'none'}`; scrape-date derivation "
+                  f"`{rdy['scrape_date_derivation'] or 'none'}`.",
+                  "- Parent scrape dates: " + (", ".join(f"`{k}` {n}" for k, n in rdy["parent_status_counts"])
+                                               or "none") + f"; local-date boundary crossings (agreeing, UTC date "
+                  f"differs): {rdy['parent_boundary_crossings']}.",
+                  "- Detail scrape dates: " + (", ".join(f"`{k}` {n}" for k, n in rdy["detail_status_counts"])
+                                               or "none") + f"; boundary crossings: {rdy['detail_boundary_crossings']}.",
+                  f"- `cars.date_clean`: `{rdy['date_clean_status']}`; {rdy['date_clean_rows']} rows, "
+                  f"{rdy['date_clean_valid']} valid, {rdy['date_clean_missing']} missing, "
+                  f"{rdy['date_clean_invalid']} invalid (presence and parse quality only; never a pricing date); "
+                  f"derivation rule still reported unavailable: {rdy['date_clean_rule_unavailable']}."]
+    co = d["canonical_offers"]
+    if co is not None:
+        sources = " and ".join(key(k) for k in co["source_streams"]) or "none"
+        lines += ["", "### Canonical offers (Vancouver alias combination)", "",
+                  f"- Policy: `{co['policy_status']}`; source streams {sources}; canonical location "
+                  f"{key(co['stream']) if co['stream'] else 'none'}.",
+                  f"- Detail rows: {co['source_rows']} source, {co['out_of_scope_rows']} out of scope (governed "
+                  f"exclusion), {co['combined_observations']} combined, {co['unassessable_rows']} unassessable.",
+                  f"- Canonical offers: {co['canonical_offers']} ({co['unique_offers']} unique, "
+                  f"{co['deduplicated_offers']} deduplicated); duplicate groups {co['duplicate_groups']} "
+                  f"({co['collapsed_observations']} observations collapsed); price-variation groups "
+                  f"{co['variation_groups']} ({co['variation_offers']} offers kept and flagged); unassessable "
+                  f"groups {co['unassessable_group_count']}"
+                  + (" (" + ", ".join(f"`{k}` {n}" for k, n in co["unassessable_groups"]) + ")"
+                     if co["unassessable_groups"] else "") + ".",
+                  "- Vancouver source observations: " + (", ".join(f"{key(k)} {n}"
+                                                                   for k, n in co["vancouver_source_counts"])
+                                                         or "none")
+                  + f"; Vancouver canonical offers: {co['vancouver_canonical_offers']}; offers observed in more "
+                  f"than one source stream: {co['cross_stream_offers']}.",
+                  "- Blockers: " + (", ".join(f"`{b}`" for b in co["blockers"]) or "none") + "."]
+    au = d["authority_statuses"]
+    if au:
+        lines += ["", "### Authority decision statuses", "", "| Decision | Status |", "| --- | --- |"]
+        lines += [f"| `{k}` | `{v}` |" for k, v in au]
     lines += ["", "### Expected stream health (per approved stream)", "",
               "| Stream | Status | Continuity | Time coverage (legacy shared schedule) |", "| --- | --- | --- | --- |"]
     lines += [f"| {key(h['stream'])} | `{h['stream_status']}` | `{h['continuity']}` | `{h['time_coverage']}` |"
@@ -995,7 +1225,8 @@ def render_baseline_markdown(baseline: PricingReadinessBaseline, *, commit: str,
                   f"- Job-based continuity: {c['in_scope_jobs']} in-scope jobs, "
                   f"{c['jobs_without_linked_details']} without linked detail rows.",
                   f"- Apparent source-continuity gap: {c['capture_events_lacking_stream']} of "
-                  f"{c['in_scope_capture_events']} in-scope capture events (detail rows) carry no row of the stream.",
+                  f"{c['in_scope_capture_events']} in-scope capture events (detail rows) carry no row of the stream; "
+                  f"in-scope jobs under a governed parent-capture exclusion: {c['governed_excluded_jobs']}.",
                   "- " + ("An authoritative per-stream schedule is available; scheduled coverage is reported "
                           "in the collection-schedule section." if c["schedule_available"] else
                           "No authoritative collection schedule exists, so these captures are not called "
@@ -1026,7 +1257,12 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
     )
     from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract
     from ql2_sixt_canada_analysis.temporal_authority import temporal_authority_from_record
-    from ql2_sixt_canada_analysis.rental_dates import assess_rental_dates, rental_date_policy_from_record
+    from ql2_sixt_canada_analysis.rental_dates import (
+        assess_rental_dates, derive_rental_periods, rental_date_policy_from_record,
+    )
+    from ql2_sixt_canada_analysis.temporal import TemporalConfigurationError, derive_reporting_days
+    from ql2_sixt_canada_analysis.pricing_population import PricingPopulationError, build_pricing_population
+    from ql2_sixt_canada_analysis.canonical_offers import assess_canonical_offers, canonical_offer_policy_from_record
     from ql2_sixt_canada_analysis.location_authority import location_authority_from_record
     from ql2_sixt_canada_analysis.authority_decisions import load_current_decision_record
     from ql2_sixt_canada_analysis.paths import resolve_raw_data_dir
@@ -1056,13 +1292,16 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
     relationship = attempt(lambda: assess_one_to_many_join(jobs, cars, rel), RelationshipPreconditionError)
     city = assess_city_integrity(jobs, cars, relationship=rel, coverage=cov if configured else None)
     join = assess_job_detail_join_readiness(jobs, cars, rel, job_linkage=linkage.report)
-    streams = (assess_expected_location_streams(jobs, cars, coverage=cov, relationship=rel, loaded=raw,
-                                                schedule=COLLECTION_SCHEDULE) if configured else None)
-    # The authority-backed per-stream schedule (one schedule per approved stream; parent jobs.finished_at).
+    # The authority-backed per-stream schedule (one schedule per approved stream; parent jobs.finished_at),
+    # including the governed parent-capture exclusions it resolved (raw rows are kept; never deleted).
     record = load_current_decision_record()
     schedule = schedule_from_record(record, contract)
     scheduled = attempt(lambda: assess_per_stream_scheduled_coverage(jobs, cars, schedule=schedule, contract=contract,
                                                                      relationship=rel), ScheduleConfigurationError)
+    exclusions = scheduled.capture_exclusions if scheduled is not None else None
+    streams = (assess_expected_location_streams(jobs, cars, coverage=cov, relationship=rel, loaded=raw,
+                                                schedule=COLLECTION_SCHEDULE, capture_exclusions=exclusions)
+               if configured else None)
     # Authority-backed rental-date validity and parent/detail agreement on the linked frames.
     rental_dates = attempt(lambda: assess_rental_dates(jobs, cars, policy=rental_date_policy_from_record(record),
                                                        job_linkage=linkage.report, relationship=rel), ValueError)
@@ -1070,10 +1309,27 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
     temporal_authority = temporal_authority_from_record(record, ANALYSIS_TEMPORAL_RECONCILIATION, contract)
     temporal = attempt(lambda: assess_temporal_reconciliation(jobs, cars, temporal_authority.definition),
                        RelationshipPreconditionError)
-    comparison = attempt(lambda: compare_location_streams(jobs, cars, ANALYSIS_LOCATION_STREAM_COMPARISON),
-                         RelationshipPreconditionError)
-    stability = attempt(lambda: assess_vehicle_attribute_stability(cars, VEHICLE_ATTRIBUTE_STABILITY),
-                        VehicleStabilityPreconditionError)
+    # After temporal validation: the derived reporting day (raw values kept), rental eligibility, and the
+    # pricing-eligible population - the governed Calgary exclusion applies here, before any cohort.
+    reporting_days = attempt(lambda: derive_reporting_days(jobs, cars, temporal_authority.definition),
+                             TemporalConfigurationError, RelationshipPreconditionError)
+    rental_periods = attempt(lambda: derive_rental_periods(jobs, cars, policy=rental_date_policy_from_record(record),
+                                                           job_linkage=linkage.report, relationship=rel), ValueError)
+    population = attempt(lambda: build_pricing_population(jobs, cars, scheduled=scheduled,
+                                                          reporting_days=reporting_days,
+                                                          rental_periods=rental_periods), PricingPopulationError)
+    eligible_jobs = population.eligible_parents(jobs, cars) if population is not None else None
+    eligible_cars = population.eligible_details(jobs, cars) if population is not None else None
+    # Comparisons and pricing vehicle stability use only the pricing-eligible population (fail closed without it).
+    comparison = (attempt(lambda: compare_location_streams(eligible_jobs, eligible_cars,
+                                                           ANALYSIS_LOCATION_STREAM_COMPARISON),
+                          RelationshipPreconditionError) if population is not None else None)
+    stability = (attempt(lambda: assess_vehicle_attribute_stability(eligible_cars, VEHICLE_ATTRIBUTE_STABILITY),
+                         VehicleStabilityPreconditionError) if population is not None else None)
+    offers = (attempt(lambda: assess_canonical_offers(
+        jobs, cars, population=population, scheduled=scheduled,
+        policy=canonical_offer_policy_from_record(record, contract)), PricingPopulationError)
+        if population is not None else None)
     completeness = (assess_completeness(datasets=analysis, coverage=coverage, streams=streams,
                                         reconciliation=reconciliation, city_integrity=city, expected_coverage=cov)
                     if configured else None)
@@ -1085,12 +1341,13 @@ def run_pricing_baseline(raw_dir: str | Path | None = None) -> PricingReadinessB
         temporal_fields_trusted=bool(temporal is not None and temporal.is_valid),
         vehicle_stability=stability, scheduled_coverage=scheduled, job_detail_join=join,
         job_linkage=linkage.report, expected_stream_contract=contract,
-        rental_dates=rental_dates,
+        rental_dates=rental_dates, canonical_offers=offers,
         location_authority=location_authority_from_record(record, contract,
                                                           VANCOUVER_LOCATION_POLICY))
     return build_pricing_baseline(pricing=pricing, jobs=jobs, cars=cars, temporal=temporal, vehicle_stability=stability,
                                   relationship=rel, temporal_contract=temporal_authority.definition,
-                                  temporal_authority=temporal_authority)
+                                  temporal_authority=temporal_authority, reporting_days=reporting_days,
+                                  pricing_population=population, authority_record=record)
 
 
 def main(argv: list[str] | None = None) -> int:
