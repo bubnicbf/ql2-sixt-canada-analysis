@@ -633,6 +633,20 @@ def test_vehicle_type_tests_are_not_testable_with_insufficient_groups() -> None:
                         p_value=0.5)
 
 
+def test_vehicle_narrative_uses_the_percentage_test_population() -> None:
+    rows = []
+    for j in range(MIN_PAIRS_PER_TESTED_VEHICLE_TYPE):
+        job = f"SYNTH-JOB-T{j:02d}"
+        rows += [car(TOR_AIR, job, 10.0, name="SYNTH A", car_type="SYNTH A"),
+                 car(TOR_DOWN, job, 10.0 if j == 0 else 0.0, name="SYNTH A", car_type="SYNTH A"),
+                 car(TOR_AIR, job, 20.0, name="SYNTH B", car_type="SYNTH B"),
+                 car(TOR_DOWN, job, 10.0, name="SYNTH B", car_type="SYNTH B")]
+    result = run(rows)
+    narrative = mlp._vehicle_sentence(result.report)
+    assert "tested-type median premiums range +100.0% to +100.0%" in narrative
+    assert "tested-type median premiums range 0.0% to +100.0%" not in narrative
+
+
 # ============================================================================ visualization
 
 

@@ -1130,7 +1130,7 @@ def _vehicle_sentence(report: MatchedLocationPricingReport) -> str:
     parts = []
     for t in primary:
         medians = [v.percent.median for v in report.vehicle_types
-                   if v.city == t.city and v.dollars.n >= MIN_PAIRS_PER_TESTED_VEHICLE_TYPE and v.percent.n]
+                   if v.city == t.city and v.percent.n >= t.minimum_per_type]
         spread = (f"tested-type median premiums range {_fmt(min(medians), 'percent')} to "
                   f"{_fmt(max(medians), 'percent')}" if medians else "no type meets the minimum")
         if t.status is VehicleTypeTestStatus.TESTED:
