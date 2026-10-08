@@ -3105,7 +3105,16 @@ gives `candidate_only`: it can neither pass nor trigger.
   Only an explicitly supplied `approved` policy, with a recorded authority
   record and reference and every parameter, makes either control an evaluated
   rule; the repository approves none, and the synthetic tests exercise that
-  path with fabricated policies. No threshold is estimated from the sample:
+  path with fabricated policies. Approved minimums are inclusive and are
+  compared exactly: for each canonical location interval the changed share
+  is `Fraction(price_change_count, comparable)` and the magnitude is the
+  `statistics.median` of the absolute `exact_change_percent` values of its
+  increases or decreases, both re-derived from the integer cents of the
+  bound, validated candidate evidence. The float summaries of the event
+  table are never converted back into fractions, a zero or missing
+  denominator never qualifies, and candidate evidence that disagrees with
+  the event table makes the control `not_assessable`
+  (`price_change_evidence_inconsistent`). No threshold is estimated from the sample:
   no extremum, quantile, standard deviation or observed maximum is used.
 - **Right-censored, `confirmation_required`:** unconfirmed anomalies at the end
   of a collection window. Right-censored events provide no persistence

@@ -1072,3 +1072,188 @@ def test_notebook_readme_lists_notebook_05_with_its_behaviour_and_limits() -> No
     for phrase in ("run_monitoring", "exactly once", "candidate-only", "confirmation", "not_assessable",
                    "No files are written", "no alert"):
         assert phrase in text, phrase
+
+
+# ============================================================================ exact policy boundaries
+
+#: Every approved minimum is permissive except the one a test probes (fabricated policy values).
+TINY = Fraction(1, 10**9)
+
+
+def boundary_policy(**params) -> SynchronizedMovementPolicy:  # type: ignore[no-untyped-def]
+    return approved_movement(**{"minimum_changed_offers": 2, "minimum_changed_share": TINY,
+                                "minimum_median_abs_change_percent": TINY, "minimum_locations": 1, **params})
+
+
+def synchronized_world(rising: tuple[tuple[float, float], ...], steady: int = 0, stream=TOR_DOWN):  # type: ignore[no-untyped-def]
+    """``rising`` products move from the first to the second price at hour 1; ``steady`` products never move.
+
+    The constant filler product is always present and unchanged, so the comparable denominator is
+    ``len(rising) + steady + 1``.
+    """
+    parts = [path(stream, (a, b, b), f"SYNTH Car R{i}") for i, (a, b) in enumerate(rising)]
+    parts += [path(stream, (20.0, 20.0, 20.0), f"SYNTH Car S{i}") for i in range(steady)]
+    return synthetic_world(products=merge(*parts))
+
+
+def movement_status(world: dict, policy: SynchronizedMovementPolicy) -> ControlEvaluation:  # type: ignore[no-untyped-def]
+    return evaluate(world, movement_policy=policy).report.evaluation(C.LARGE_SYNCHRONIZED_PRICE_MOVEMENTS)
+
+
+@pytest.mark.parametrize("steady, share", [(3, Fraction(1, 3)), (0, Fraction(2, 3))])
+def test_an_exact_changed_share_meets_an_equal_inclusive_minimum(steady, share) -> None:  # type: ignore[no-untyped-def]
+    world = synthetic_world(products=merge(*(
+        [path(TOR_DOWN, (50.0, 55.0, 55.0), "SYNTH Car R0"), path(TOR_DOWN, (80.0, 88.0, 88.0), "SYNTH Car R1")]
+        + [path(TOR_DOWN, (20.0, 20.0, 20.0), f"SYNTH Car S{i}") for i in range(steady)])))
+    table = evaluate(world).evidence.price_changes.event_table
+    row = table[(table["canonical_location"] == TOR_DOWN[1]) & (table["price_change_count"] == 2)].iloc[0]
+    assert Fraction(row["price_change_count"], row["comparable"]) == share
+    assert Fraction(row["changed_share_of_comparable"]) < share     # the float summary falls below the boundary
+    at = movement_status(world, boundary_policy(minimum_changed_share=share))
+    assert at.status is ST.TRIGGERED and at.findings == (F.APPROVED_SYNCHRONIZED_INCREASE_RULE_MET,)
+    above = movement_status(world, boundary_policy(minimum_changed_share=share + TINY))
+    assert above.status is ST.PASSED and N.SYNCHRONIZED_MOVEMENTS_BELOW_APPROVED_RULE in above.notes
+
+
+@pytest.mark.parametrize("cents, median", [(1, Fraction(1, 3)), (2, Fraction(2, 3))])
+def test_an_exact_median_percentage_meets_an_equal_inclusive_minimum(cents, median) -> None:  # type: ignore[no-untyped-def]
+    after = 3.0 + cents / 100                                        # 100 * cents / 300 percent
+    world = synchronized_world(((3.0, after), (3.0, after)))
+    table = evaluate(world).evidence.price_changes.event_table
+    row = table[(table["canonical_location"] == TOR_DOWN[1]) & (table["price_change_count"] == 2)].iloc[0]
+    assert Fraction(row["median_abs_change_percent"]) != median     # the float summary is not the exact value
+    at = movement_status(world, boundary_policy(minimum_median_abs_change_percent=median))
+    assert at.status is ST.TRIGGERED and at.findings == (F.APPROVED_SYNCHRONIZED_INCREASE_RULE_MET,)
+    above = movement_status(world, boundary_policy(minimum_median_abs_change_percent=median + TINY))
+    assert above.status is ST.PASSED
+
+
+def test_an_even_sized_set_uses_the_exact_rational_median() -> None:
+    # Decreases of one, two, three and five cents from three dollars: one third, two thirds, one and five thirds
+    # percent. The exact median of the middle pair is five sixths.
+    world = synchronized_world(((3.0, 2.99), (3.0, 2.98), (3.0, 2.97), (3.0, 2.95)))
+    expected = Fraction(5, 6)
+    import statistics as stats
+    assert stats.median([Fraction(1, 3), Fraction(2, 3), Fraction(1), Fraction(5, 3)]) == expected
+    analysis = evaluate(world).evidence.price_changes
+    exact = mon._exact_intervals(analysis)
+    measures = [m for m in exact.values() if m.decrease == 4]
+    assert len(measures) == 1 and measures[0].median_abs_change_percent == expected
+    assert measures[0].increase == 0 and measures[0].changed_share == Fraction(4, 5)
+    at = movement_status(world, boundary_policy(minimum_median_abs_change_percent=expected))
+    assert at.status is ST.TRIGGERED and at.findings == (F.APPROVED_SYNCHRONIZED_DECREASE_RULE_MET,)
+    assert movement_status(world, boundary_policy(minimum_median_abs_change_percent=expected + TINY)).status \
+        is ST.PASSED
+
+
+def _candidate(outcome: str, previous: object = None, change: object = None) -> dict:
+    return {"outcome": outcome, "previous_price_cents": previous, "change_cents": change}
+
+
+def test_exact_interval_measures_exclude_non_changes_and_invalid_denominators() -> None:
+    rows = [_candidate("increase", 300, 1), _candidate("increase", 0, 5), _candidate("increase", None, 5),
+            _candidate("unchanged", 300, 0), _candidate("appeared"), _candidate("disappeared", 300),
+            _candidate("ambiguous")]
+    measures = mon._exact_interval(rows)
+    assert (measures.increase, measures.decrease, measures.comparable) == (3, 0, 4)
+    assert measures.changed_share == Fraction(3, 4)
+    assert measures.median_abs_change_percent == Fraction(1, 3)    # zero and missing denominators never enter
+    only_invalid = mon._exact_interval([_candidate("decrease", 0, -5), _candidate("decrease", None, -5)])
+    assert only_invalid.median_abs_change_percent is None
+    no_comparable = mon._exact_interval([_candidate("appeared"), _candidate("ambiguous")])
+    assert no_comparable.comparable == 0 and no_comparable.changed_share is None
+    with pytest.raises(MonitoringContractError):
+        mon._exact_interval([_candidate("increase", 300.0, 1)])     # an approximate cent value is refused
+    with pytest.raises(MonitoringContractError):
+        mon._exact_interval([_candidate("increase", 300, None)])
+
+
+def test_the_exact_comparison_never_qualifies_missing_values_and_refuses_floats() -> None:
+    assert mon._exact_at_least(Fraction(1, 3), Fraction(1, 3)) and mon._exact_at_least(1, Fraction(1))
+    assert not mon._exact_at_least(Fraction(1, 3) - TINY, Fraction(1, 3))
+    assert not mon._exact_at_least(None, TINY)                      # zero or missing denominators never qualify
+    for approximate in (1 / 3, float("nan"), True):
+        with pytest.raises(TypeError):
+            mon._exact_at_least(approximate, Fraction(1, 3))      # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        mon._exact_at_least(Fraction(1), 0.5)                     # type: ignore[arg-type]
+    assert not hasattr(mon, "_at_least")
+
+
+def test_stale_or_inconsistent_candidate_evidence_is_refused_not_replaced_by_the_float_summary(sync_world) -> None:  # type: ignore[no-untyped-def]
+    evidence = evaluate(sync_world).evidence
+    analysis = evidence.price_changes
+    candidates = analysis.events.candidates
+    stale_events = dataclasses.replace(analysis.events)
+    object.__setattr__(stale_events, "candidates", candidates[candidates["outcome"] != "increase"])
+    stale = object.__new__(type(analysis))
+    for f in dataclasses.fields(analysis):
+        object.__setattr__(stale, f.name, getattr(analysis, f.name))
+    object.__setattr__(stale, "events", stale_events)
+    evaluation = one(dataclasses.replace(evidence, price_changes=stale), C.LARGE_SYNCHRONIZED_PRICE_MOVEMENTS,
+                     movement_policy=approved_movement())
+    assert evaluation.status is ST.NOT_ASSESSABLE
+    assert evaluation.unavailable_evidence == (G.PRICE_CHANGE_EVIDENCE_INCONSISTENT,)
+    assert candidates.equals(analysis.events.candidates)            # the bound evidence itself is unchanged
+
+
+def test_mixed_direction_intervals_never_become_synchronized_under_an_approved_policy() -> None:
+    world = synchronized_world(((3.0, 3.03), (3.0, 2.97)))
+    evaluation = movement_status(world, boundary_policy())
+    assert evaluation.status is ST.PASSED and not evaluation.findings
+    assert N.MIXED_DIRECTION_INTERVALS_NOT_SYNCHRONIZED in evaluation.notes
+
+
+def test_exact_boundaries_keep_directions_aliases_and_location_counts(sync_world) -> None:  # type: ignore[no-untyped-def]
+    # SYNC: Toronto Downtown rises by ten percent and Vancouver (Downtown with its Thurlow alias) falls by ten
+    # percent, each with a two-thirds changed share. The exact boundaries hold for both directions separately.
+    policy = boundary_policy(minimum_changed_share=Fraction(2, 3), minimum_median_abs_change_percent=Fraction(10))
+    evaluation = movement_status(sync_world, policy)
+    assert evaluation.findings == (F.APPROVED_SYNCHRONIZED_INCREASE_RULE_MET,
+                                   F.APPROVED_SYNCHRONIZED_DECREASE_RULE_MET)
+    two = movement_status(sync_world, approved_movement(minimum_changed_share=Fraction(2, 3),
+                                                        minimum_median_abs_change_percent=Fraction(10),
+                                                        minimum_locations=2))
+    assert two.status is ST.PASSED                                   # opposite directions never combine
+    exact = mon._exact_intervals(evaluate(sync_world).evidence.price_changes)
+    vancouver = [m for (city, location, *_), m in exact.items() if (city, location) == VAN_DOWN and m.decrease]
+    assert len(vancouver) == 1 and vancouver[0].decrease == 2       # the alias never doubles the candidates
+    assert not any(location == VAN_THUR[1] for _, location, *_ in exact)
+
+
+def test_unavailable_and_proposed_policies_stay_candidate_only_at_exact_boundaries() -> None:
+    world = synchronized_world(((3.0, 3.01), (3.0, 3.01)), steady=3)   # share 1/3, median 1/3
+    for policy in (DEFAULT_SYNCHRONIZED_MOVEMENT_POLICY, SynchronizedMovementPolicy(APS.PROPOSED)):
+        evaluation = movement_status(world, policy)
+        assert evaluation.status is ST.CANDIDATE_ONLY
+        assert evaluation.findings == (F.SYNCHRONIZED_INCREASE_REVIEW_CANDIDATE,)
+
+
+def test_exact_policy_evaluation_is_deterministic_sanitized_and_side_effect_free(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    world = synchronized_world(((3.0, 3.01), (3.0, 3.01)), steady=3)   # share 1/3, median 1/3
+    run = full_run(world)
+    policy = boundary_policy(minimum_changed_share=Fraction(1, 3), minimum_median_abs_change_percent=Fraction(1, 3))
+    candidates = monitoring_from_pipeline(run).evidence.price_changes.events.candidates.copy(deep=True)
+    cars = run.cars.copy(deep=True)
+
+    def refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("monitoring must not perform I/O")
+
+    before_env = dict(os.environ)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(builtins, "open", refuse)
+    monkeypatch.setattr(builtins, "print", refuse)
+    monkeypatch.setattr(socket, "socket", refuse)
+    first = monitoring_from_pipeline(run, movement_policy=policy)
+    second = monitoring_from_pipeline(run, movement_policy=policy)
+    again = evaluate_monitoring_controls(first.evidence, movement_policy=policy)
+    table = monitoring_control_table(first.report)
+    monkeypatch.undo()
+    assert first.report == second.report == again
+    assert first.report.evaluation(C.LARGE_SYNCHRONIZED_PRICE_MOVEMENTS).status is ST.TRIGGERED
+    assert tuple(table.columns) == MONITORING_TABLE_COLUMNS and len(table) == 8
+    validate_monitoring_table(table)
+    assert "SYNTH" not in table.to_csv(index=False) and not re.search(r"\d", table.to_csv(index=False))
+    pd.testing.assert_frame_equal(first.evidence.price_changes.events.candidates, candidates)
+    pd.testing.assert_frame_equal(run.cars, cars)
+    assert dict(os.environ) == before_env and list(tmp_path.iterdir()) == []

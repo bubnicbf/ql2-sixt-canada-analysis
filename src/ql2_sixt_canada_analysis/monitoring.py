@@ -54,10 +54,18 @@ default is unavailable. The synchronized-movement control uses
 parameters. Only an explicitly supplied approved policy, with a recorded
 authority and every parameter, can turn either control into an evaluated rule.
 No threshold is estimated from the data.
+
+Approved minimums are inclusive and compared exactly. The changed share and
+the median absolute percentage change are re-derived as
+:class:`fractions.Fraction` values from the integer cents of the bound,
+validated candidate evidence, never from the float summaries of the event
+table, and stale or inconsistent evidence makes the control not assessable.
 """
 
 from __future__ import annotations
 
+import numbers
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -283,6 +291,7 @@ class EvidenceGap(StrEnum):
     PRODUCT_POPULATION_EMPTY = "product_population_empty"
     VISIBLE_ASSORTMENT_UNAVAILABLE = "visible_assortment_unavailable"
     PRICE_CHANGE_ANALYSIS_UNAVAILABLE = "price_change_analysis_unavailable"
+    PRICE_CHANGE_EVIDENCE_INCONSISTENT = "price_change_evidence_inconsistent"
 
 
 class MonitoringNote(StrEnum):
@@ -1059,22 +1068,131 @@ _DIRECTIONS = (
 )
 
 
-def _at_least(value: object, minimum: Fraction) -> bool:
-    """``value >= minimum`` with exact rational comparison; a missing value never qualifies."""
-    if value is None or (isinstance(value, float) and value != value) or value is pd.NA:
+class _InconsistentPriceEvidence(MonitoringContractError):
+    """The bound candidate evidence disagrees with the validated event table (stale or inconsistent)."""
+
+
+_INCREASE, _DECREASE = "increase", "decrease"
+_COMPARABLE_OUTCOMES = frozenset({"unchanged", _INCREASE, _DECREASE})
+
+
+def _exact_int(value: object) -> int | None:
+    """An exact integer (``None`` when missing); a float or any other approximate value is refused."""
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise _InconsistentPriceEvidence("price-change cents must be exact integers")
+    return int(value)
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactInterval:
+    """Exact policy measures of one canonical location interval (in memory only; never reported)."""
+
+    increase: int
+    decrease: int
+    comparable: int
+    #: ``price_change_count / comparable`` as an exact rational (``None`` for a zero denominator).
+    changed_share: Fraction | None
+    #: Median absolute exact percentage change over changed offers with a valid denominator (``None`` if none).
+    median_abs_change_percent: Fraction | None
+
+    @property
+    def price_change_count(self) -> int:
+        return self.increase + self.decrease
+
+
+def _exact_interval(rows: Sequence[Mapping]) -> _ExactInterval:
+    """Exact measures of one interval's validated candidates, mirroring the higher-order analysis.
+
+    The changed share is ``Fraction(increase + decrease, unchanged + increase + decrease)``. The magnitude is
+    ``statistics.median`` over ``abs(exact_change_percent(previous, change))`` of the increases and decreases
+    whose previous price is a positive integer (the same population as ``median_abs_change_percent``); unchanged,
+    appeared, disappeared, ambiguous and zero-denominator observations never enter it. Every value stays a
+    :class:`fractions.Fraction`, including the mean of the two middle values of an even-sized set.
+    """
+    from ql2_sixt_canada_analysis.price_change_analysis import exact_change_percent
+
+    outcomes = [row["outcome"] for row in rows]
+    increase, decrease = outcomes.count(_INCREASE), outcomes.count(_DECREASE)
+    comparable = sum(1 for o in outcomes if o in _COMPARABLE_OUTCOMES)
+    percents = []
+    for row in rows:
+        if row["outcome"] not in (_INCREASE, _DECREASE):
+            continue
+        previous, change = _exact_int(row["previous_price_cents"]), _exact_int(row["change_cents"])
+        if change is None:
+            raise _InconsistentPriceEvidence("an increase or decrease carries an exact change")
+        percent = exact_change_percent(previous, change) if previous is not None else None
+        if percent is not None:
+            percents.append(abs(percent))
+    return _ExactInterval(
+        increase, decrease, comparable,
+        Fraction(increase + decrease, comparable) if comparable > 0 else None,
+        statistics.median(percents) if percents else None)
+
+
+def _exact_at_least(value: Fraction | None, minimum: Fraction) -> bool:
+    """Inclusive ``value >= minimum`` on exact rationals only; a missing value never qualifies.
+
+    Only :class:`fractions.Fraction` (or ``int``) values are accepted; a float is refused, never
+    reinterpreted as exact.
+    """
+    if not isinstance(minimum, Fraction):
+        raise TypeError("a policy minimum must be a Fraction")
+    if value is None:
         return False
-    return Fraction(value) >= minimum
+    if isinstance(value, bool) or not isinstance(value, (Fraction, int)):
+        raise TypeError("only exact rational values can be compared with a policy minimum")
+    return value >= minimum
 
 
-def _rule_met(table: pd.DataFrame, movement: MovementClass, policy: SynchronizedMovementPolicy) -> bool:
-    """The approved rule for one direction over canonical location intervals (aliases are one location)."""
+def _exact_intervals(analysis: PriceChangeAnalysisResult) -> dict[tuple, _ExactInterval]:
+    """Exact measures for every interval of the validated event table, from its bound candidate frame.
+
+    Raises:
+        _InconsistentPriceEvidence: A candidate falls outside the table, or the exact counts disagree with the
+            validated table (stale or inconsistent evidence is refused, never replaced by the float summary).
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for row in analysis.events.candidates.to_dict("records"):
+        key = (row["canonical_city"], row["canonical_location"], row[_PREV], row[_CUR])
+        groups.setdefault(key, []).append(row)
+    out: dict[tuple, _ExactInterval] = {}
+    for row in analysis.event_table.to_dict("records"):
+        key = (row["canonical_city"], row["canonical_location"], row[_PREV], row[_CUR])
+        if key in out:
+            raise _InconsistentPriceEvidence("one event-table row per canonical location interval")
+        exact = _exact_interval(groups.get(key, []))
+        if (exact.increase, exact.decrease, exact.comparable, exact.price_change_count) != (
+                row[_INCREASE], row[_DECREASE], row["comparable"], row["price_change_count"]):
+            raise _InconsistentPriceEvidence("the candidate evidence disagrees with the event table")
+        summary = row["median_abs_change_percent"]
+        summary_missing = summary is None or summary is pd.NA or (isinstance(summary, float) and summary != summary)
+        if (exact.median_abs_change_percent is None) != summary_missing:
+            raise _InconsistentPriceEvidence("the candidate evidence disagrees with the event table")
+        out[key] = exact
+    if set(groups) - set(out):
+        raise _InconsistentPriceEvidence("a candidate belongs to no event-table interval")
+    return out
+
+
+def _rule_met(analysis: PriceChangeAnalysisResult, exact: Mapping[tuple, _ExactInterval],
+              movement: MovementClass, policy: SynchronizedMovementPolicy) -> bool:
+    """The approved rule for one direction over canonical location intervals (aliases are one location).
+
+    Every minimum is inclusive and compared exactly: the share and the magnitude come from the bound integer
+    candidate evidence (:func:`_exact_interval`), never from the float summaries of the event table.
+    """
     periods: dict[str, set[tuple[str, str]]] = {}
-    for row in table.to_dict("records"):
+    for row in analysis.event_table.to_dict("records"):
         if row["movement_class"] != movement.value:
             continue
-        if row["price_change_count"] < policy.minimum_changed_offers \
-                or not _at_least(row["changed_share_of_comparable"], policy.minimum_changed_share) \
-                or not _at_least(row["median_abs_change_percent"], policy.minimum_median_abs_change_percent):
+        measures = exact[(row["canonical_city"], row["canonical_location"], row[_PREV], row[_CUR])]
+        if measures.price_change_count < policy.minimum_changed_offers \
+                or not _exact_at_least(measures.changed_share, policy.minimum_changed_share) \
+                or not _exact_at_least(measures.median_abs_change_percent,
+                                       policy.minimum_median_abs_change_percent):
             continue
         periods.setdefault(row[_CUR], set()).add((row["canonical_city"], row["canonical_location"]))
     return any(len(locations) >= policy.minimum_locations for locations in periods.values())
@@ -1096,10 +1214,15 @@ def _large_synchronized_movements(ev: MonitoringEvidence, policy: SynchronizedMo
         c.note(MonitoringNote.OPERATIONAL_THRESHOLD_NOT_APPROVED)
         return ControlEvaluation(_C.LARGE_SYNCHRONIZED_PRICE_MOVEMENTS, ControlStatus.CANDIDATE_ONLY,
                                  tuple(c.findings), (), tuple(c.notes), policy_status=policy.status)
+    try:
+        exact = _exact_intervals(analysis)
+    except _InconsistentPriceEvidence:
+        c.gap(EvidenceGap.PRICE_CHANGE_EVIDENCE_INCONSISTENT)
+        return c.evaluation(_C.LARGE_SYNCHRONIZED_PRICE_MOVEMENTS, policy=policy.status)
     any_synchronized = False
     for movement, _, met in _DIRECTIONS:
         any_synchronized |= classes.get(movement.value, 0) > 0
-        c.finding(met, _rule_met(analysis.event_table, movement, policy))
+        c.finding(met, _rule_met(analysis, exact, movement, policy))
     c.note(MonitoringNote.SYNCHRONIZED_MOVEMENTS_BELOW_APPROVED_RULE, any_synchronized and not c.findings)
     return c.evaluation(_C.LARGE_SYNCHRONIZED_PRICE_MOVEMENTS, policy=policy.status)
 
