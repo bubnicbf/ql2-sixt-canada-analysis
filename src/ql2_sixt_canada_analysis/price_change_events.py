@@ -1,12 +1,17 @@
-"""The price-change event contract: observed price-change candidates between adjacent scheduled captures.
+"""Price-change events: the locked event contract and the event-construction engine (issue #4).
 
-This module locks the contract of issue #4 (price-change events). It turns the
-pricing-eligible canonical offers of :func:`~ql2_sixt_canada_analysis.pricing_pipeline.run_pricing_pipeline`
-into **observed price-change candidates**: one candidate per offer identity per
-eligible one-hour capture interval, each with exactly one terminal outcome. A
-candidate is an observation of the collected feed, never a proven genuine market
-event: deciding that requires source and operational corroboration outside this
-contract.
+The engine turns the pricing-eligible canonical offers of
+:func:`~ql2_sixt_canada_analysis.pricing_pipeline.run_pricing_pipeline` into
+**observed price-change candidates**: one candidate per offer identity per
+eligible one-hour capture interval, each with exactly one terminal outcome and
+exact-cent change metrics. A candidate is an observation of the collected feed,
+never a proven genuine market repricing or extraction anomaly: deciding that
+requires source and operational corroboration outside this module.
+
+Entry points: :func:`run_price_change_events` (runs the pipeline, then every
+gate), :func:`price_change_candidates_from_pipeline` (one existing pipeline run),
+:func:`assess_price_change_candidates` (the gated assessment of supplied
+evidence) and :func:`classify_price_change_candidates` (the pure engine).
 
 Population
 ----------
@@ -14,7 +19,8 @@ Only :attr:`CanonicalOfferReport.offers <ql2_sixt_canada_analysis.canonical_offe
 of the pricing-eligible population (the governed Calgary
 ``INCOMPLETE_PARENT_CAPTURE`` exclusion and every ineligible row never enter;
 the Vancouver ``Downtown``/``Thurlow`` aliases are already one canonical
-location). Never ``MatchedLocationPricingResult.pairs``: that table holds only the
+location). Never ``MatchedLocationPricingResult.pairs``, raw detail rows, raw
+job identifiers, row order or generated files: the pair table holds only the
 airport/downtown shared assortment and would drop one-sided products.
 
 Offer identity (:data:`EVENT_IDENTITY_COLUMNS`)
@@ -25,7 +31,7 @@ Offer identity (:data:`EVENT_IDENTITY_COLUMNS`)
 Values are the canonical-offer assessment's parsed values, compared by exact
 equality: no trimming, recasing, fuzzy matching, imputation or inference. Price
 is never part of the identity. Raw source location labels are provenance only
-(kept per endpoint for diagnostics) and never split the identity.
+(kept per endpoint for later alias diagnostics) and never split the identity.
 
 Canonical timestamp (:data:`EVENT_TIMESTAMP_COLUMN`)
 ----------------------------------------------------
@@ -36,20 +42,24 @@ strictly by :func:`parse_scheduled_period`. Never raw ``job_id``, row order,
 ``scrape_date``, ``date_clean``, raw scrape or finish timestamps, the reporting
 day, or the last time a product happened to appear.
 
-Exact one-hour adjacency
-------------------------
-Capture intervals come from the per-stream schedule and its assessed coverage
-(:func:`capture_timelines`), independently of which products are visible. For
-each canonical location every scheduled period is ``eligible`` (every source
-stream scheduling it is covered), a ``governed_exclusion`` or a
-``missing_capture``. A :class:`CaptureInterval` joins two schedule-adjacent
-eligible periods exactly one hour apart with the same contributing source
-streams; every other adjacent pair is a typed :class:`IntervalBreak`. "Previous"
-therefore means the immediately preceding scheduled capture, never the last
+Interval grid and exact one-hour adjacency
+------------------------------------------
+:func:`capture_timelines` builds one timeline per canonical location from the
+per-stream schedule, its assessed coverage and the resolved governed exclusions,
+never from offers, so the grid exists independently of product presence. Each
+scheduled period is ``eligible`` (every contributing source stream is covered),
+a ``governed_exclusion`` or a ``missing_capture`` (excused or not). A
+:class:`CaptureInterval` joins two schedule-adjacent eligible periods exactly
+one hour apart with the same contributing source streams; every other adjacent
+pair is a typed :class:`IntervalBreak`. The first eligible capture of a run
+seeds state only: it has no preceding interval and creates no appearances.
+"Previous" is the immediately preceding scheduled capture, never the last
 earlier observation of the product: a product absent at ``t-1`` and present at
-``t`` *appeared* at ``t``; a governed exclusion or a missing capture is a hard
-break - nothing is compared across it and no appearance or disappearance is
-attributed to it.
+``t`` *appeared* at ``t``. A governed exclusion or a missing capture is a hard
+break: nothing is compared across it and no appearance or disappearance is
+attributed to it. The gated assessment also proves that eligible captures are
+eligible parent captures of the pricing population and excluded captures are
+its governed exclusions.
 
 Terminal outcomes (:class:`TerminalOutcome`)
 -------------------------------------------
@@ -57,9 +67,8 @@ For every interval and every identity present at either endpoint, exactly one
 outcome, first applicable wins:
 
 1. ``ambiguous`` - more than one canonical offer for the identity at either
-   endpoint (price-distinct offers with no authority-backed way to choose; never
-   resolved by row order, minimum, maximum, mean, median, first, last or a
-   Cartesian product; no comparison price is exposed);
+   endpoint (never resolved by row order, minimum, maximum, mean, median, first,
+   last or a Cartesian product; no price is exposed);
 2. ``appeared`` - absent previously, exactly one offer currently;
 3. ``disappeared`` - exactly one offer previously, absent currently;
 4. ``unchanged`` / ``increase`` / ``decrease`` - exactly one offer at both
@@ -67,26 +76,30 @@ outcome, first applicable wins:
 
 A currency or price-basis change is never a price movement: the unit is part of
 the identity, so the old unit disappears and the new unit appears. Nothing is
-converted or normalized.
+converted or normalized, and mixed units across different identities never
+block anything.
 
-Prices
-------
-Exact non-negative integer ``price_cents``. Change direction is current minus
-previous; ``unchanged`` is a zero-cent difference. The (later) percentage change
-uses the previous price as its denominator: a zero previous price makes it
-undefined and is counted separately (``zero_baseline``), never infinite.
-Display rounding never affects classification.
+Change metrics
+--------------
+From exact non-negative integer ``price_cents`` only, for comparable outcomes
+(unchanged, increase, decrease): ``change_cents = current - previous``,
+``change_dollars = change_cents / 100`` and
+``change_percent = 100 * change_cents / previous`` evaluated exactly
+(:class:`fractions.Fraction`) and stored as a finite float. A zero previous
+price has no percentage (``zero_denominator``; never infinite or NaN);
+``percent_valid`` and ``zero_denominator`` partition the comparable candidates.
+Nothing is rounded here; rounding is presentation only.
 
 Confidentiality
 ---------------
 The candidate frame (:attr:`PriceChangeCandidateResult.candidates`) holds
 proprietary event-level values: it stays in memory, is excluded from ``repr``
-and is never written by this module. :class:`PriceChangeCandidateReport` holds
+and equality and is never written. :class:`PriceChangeCandidateReport` holds
 counts, enum values and approved configuration keys only.
 
 Deliberately deferred to later issue #4 phases: synchronized-movement detection,
-persistence, the Vancouver decrease case study, alert thresholds, anomaly
-scoring, monitoring rules, heatmaps, final event tables and notebook 03.
+persistence, the Vancouver decrease case study, anomaly review and conclusions,
+alert thresholds, monitoring rules, heatmaps, presentation tables and notebook 03.
 """
 
 from __future__ import annotations
@@ -97,7 +110,9 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from fractions import Fraction
 from functools import cached_property
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -128,13 +143,17 @@ __all__ = [
     "PriceChangeStatus",
     "ScheduledCapture",
     "TerminalOutcome",
+    "UnknownCanonicalLocationError",
+    "approved_canonical_locations",
     "assess_price_change_candidates",
     "capture_timelines",
+    "change_percent",
     "classify_endpoint_offers",
     "classify_price_change_candidates",
     "parse_scheduled_period",
     "price_change_candidates_from_pipeline",
     "price_change_cents",
+    "run_price_change_events",
     "validate_candidate_frame",
 ]
 
@@ -151,14 +170,17 @@ EVENT_UNIT_COLUMNS: tuple[str, ...] = ("currency", "price_basis")
 #: The exact identity two captures must share before their prices are compared (price is never part of it).
 EVENT_IDENTITY_COLUMNS: tuple[str, ...] = ("canonical_city", "canonical_location", "pickup_date", "return_date",
                                            *APPROVED_PRODUCT_COLUMNS, *EVENT_UNIT_COLUMNS)
-#: The endpoints of a one-hour capture interval (scheduled periods).
-EVENT_INTERVAL_COLUMNS: tuple[str, ...] = ("previous_period", "current_period")
+#: The endpoints of a one-hour capture interval (canonical scheduled periods).
+EVENT_INTERVAL_COLUMNS: tuple[str, ...] = ("previous_scheduled_capture_period", "current_scheduled_capture_period")
 #: The unique key of a candidate: one identity in one capture interval.
 EVENT_KEY_COLUMNS: tuple[str, ...] = (*EVENT_IDENTITY_COLUMNS, *EVENT_INTERVAL_COLUMNS)
-#: Columns of the in-memory candidate frame (proprietary; never printed or written here).
-CANDIDATE_COLUMNS: tuple[str, ...] = (*EVENT_KEY_COLUMNS, "outcome", "previous_offer_count", "current_offer_count",
-                                      "previous_price_cents", "current_price_cents", "change_cents", "zero_baseline",
-                                      "previous_source_labels", "current_source_labels")
+#: Columns of the in-memory candidate frame, in this order (proprietary; never printed or written here).
+#: Price and change fields are ``None`` where the outcome supports no value.
+CANDIDATE_COLUMNS: tuple[str, ...] = (
+    *EVENT_KEY_COLUMNS, "previous_offer_count", "current_offer_count", "outcome",
+    "previous_price_cents", "current_price_cents", "change_cents", "previous_price", "current_price",
+    "change_dollars", "change_percent", "percent_valid", "zero_denominator",
+    "previous_source_labels", "current_source_labels")
 #: Fields that must never order, place or identify a capture (and never appear in a candidate).
 FORBIDDEN_TIMESTAMP_SOURCES: tuple[str, ...] = ("job_id", "row_index", "scrape_date", "date_clean", "scraped_at",
                                                 "finished_at", "job_finished_at", "reporting_day")
@@ -173,7 +195,11 @@ class PriceChangeContractError(ValueError):
 
 
 class CaptureEvidenceError(PriceChangeContractError):
-    """The schedule, coverage and offer evidence disagree (stale, malformed or inconsistent)."""
+    """The schedule, coverage, exclusion, population and offer evidence disagree (stale or inconsistent)."""
+
+
+class UnknownCanonicalLocationError(PriceChangeContractError):
+    """An offer or timeline names a canonical location outside the approved configuration (never inferred)."""
 
 
 class TerminalOutcome(StrEnum):
@@ -188,7 +214,7 @@ class TerminalOutcome(StrEnum):
 
 
 #: Outcomes that compare exactly one previous and one current price.
-_PRICED = frozenset({TerminalOutcome.UNCHANGED, TerminalOutcome.INCREASE, TerminalOutcome.DECREASE})
+_COMPARABLE = frozenset({TerminalOutcome.UNCHANGED, TerminalOutcome.INCREASE, TerminalOutcome.DECREASE})
 
 
 class CaptureState(StrEnum):
@@ -221,6 +247,8 @@ class PriceChangeBlocker(StrEnum):
     FRAME_BINDING_MISMATCH = "frame_binding_mismatch"
     CANONICAL_OFFERS_NOT_READY = "canonical_offers_not_ready"
     SCHEDULE_EVIDENCE_INVALID = "schedule_evidence_invalid"
+    LOCATION_AUTHORITY_UNAVAILABLE = "location_authority_unavailable"
+    UNKNOWN_CANONICAL_LOCATION = "unknown_canonical_location"
     CAPTURE_EVIDENCE_INCONSISTENT = "capture_evidence_inconsistent"
     OFFER_CONTRACT_INVALID = "offer_contract_invalid"
 
@@ -258,6 +286,17 @@ def _cents(value: object) -> int:
 def price_change_cents(previous: object, current: object) -> int:
     """Exact ``current - previous`` in integer cents (direction: positive is an increase)."""
     return _cents(current) - _cents(previous)
+
+
+def change_percent(previous: object, current: object) -> float | None:
+    """``100 * (current - previous) / previous`` evaluated exactly from integer cents (``None`` for a zero baseline).
+
+    The exact rational is converted to a float once; it is always finite.
+    """
+    base = _cents(previous)
+    if base == 0:
+        return None
+    return float(Fraction(100 * price_change_cents(previous, current), base))
 
 
 def classify_endpoint_offers(previous: Sequence[int], current: Sequence[int]) -> TerminalOutcome:
@@ -387,17 +426,19 @@ class LocationCaptureTimeline:
 
 
 def capture_timelines(scheduled: object, policy: object) -> tuple[LocationCaptureTimeline, ...]:
-    """One timeline per canonical location from the per-stream schedule and its assessed coverage.
+    """One timeline per canonical location from the per-stream schedule, its coverage and resolved exclusions.
 
     Each stream's periods are its materialized schedule; a period is excluded
     or missing exactly as the coverage report recorded it, otherwise covered.
-    A canonical location's period is a governed exclusion if any contributing
-    stream has it excluded, missing if any has it missing, else eligible.
-    Offers are never read, so adjacency is independent of product presence.
+    The excluded periods must be exactly the scheduled periods of the resolved
+    governed parent captures of their city. A canonical location's period is a
+    governed exclusion if any contributing stream has it excluded, missing if
+    any has it missing, else eligible. Offers are never read, so adjacency is
+    independent of product presence.
 
     Raises:
         TypeError: Wrong argument types.
-        CaptureEvidenceError: The schedule is unavailable or the coverage disagrees with it.
+        CaptureEvidenceError: The schedule is unavailable, evidence is absent, or coverage disagrees with it.
     """
     from ql2_sixt_canada_analysis.canonical_offers import CanonicalOfferPolicy
     from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
@@ -409,9 +450,17 @@ def capture_timelines(scheduled: object, policy: object) -> tuple[LocationCaptur
     schedule = scheduled.schedule
     if not schedule.available:
         raise CaptureEvidenceError("the schedule is not available")
+    if scheduled.capture_periods is None or scheduled.capture_exclusions is None:
+        raise CaptureEvidenceError("capture-period and governed-exclusion evidence are required")
     coverage = {c.stream: c for c in scheduled.streams}
     if len(coverage) != len(scheduled.streams) or set(coverage) != set(schedule.expected_streams):
         raise CaptureEvidenceError("coverage must name every scheduled stream exactly once")
+    resolved: dict[str, set[str]] = {}
+    for entry in scheduled.capture_exclusions.entries:
+        period = scheduled.capture_periods.periods.get(entry.parent_key)
+        if not isinstance(period, str):
+            raise CaptureEvidenceError("a governed exclusion has no scheduled capture period")
+        resolved.setdefault(entry.city, set()).add(period)
     by_location: dict[Key, dict[str, list[tuple[Key, CaptureState]]]] = {}
     for stream_schedule in schedule.schedules:
         stream, report = stream_schedule.stream, coverage[stream_schedule.stream]
@@ -423,6 +472,8 @@ def capture_timelines(scheduled: object, policy: object) -> tuple[LocationCaptur
                 or not (excluded | missing) <= set(nominal)
                 or report.covered != len(nominal) - len(excluded) - len(missing)):
             raise CaptureEvidenceError("a stream's coverage disagrees with its schedule")
+        if excluded != resolved.get(stream_schedule.city, set()) & set(nominal):
+            raise CaptureEvidenceError("excluded periods differ from the resolved governed exclusions")
         location = tuple(policy.canonical(stream))
         for text in nominal:
             state = (CaptureState.GOVERNED_EXCLUSION if text in excluded
@@ -441,6 +492,32 @@ def capture_timelines(scheduled: object, policy: object) -> tuple[LocationCaptur
     return tuple(timelines)
 
 
+def approved_canonical_locations(location_authority: object, policy: object) -> tuple[Key, ...]:
+    """The approved canonical locations in authority order (the contract's stream order, aliases merged).
+
+    Requires an exact authority-backed role map and a canonical-offer policy
+    that canonicalizes every approved stream exactly as the location authority
+    does.
+
+    Raises:
+        TypeError: Wrong argument types.
+        UnknownCanonicalLocationError: The configuration is unavailable or inconsistent.
+    """
+    from ql2_sixt_canada_analysis.canonical_offers import CanonicalOfferPolicy
+    from ql2_sixt_canada_analysis.location_authority import LocationAuthorityReport
+
+    if not isinstance(location_authority, LocationAuthorityReport):
+        raise TypeError("location_authority must be a LocationAuthorityReport")
+    if not isinstance(policy, CanonicalOfferPolicy):
+        raise TypeError("policy must be a CanonicalOfferPolicy")
+    keys = tuple(tuple(k) for k in location_authority.contract.expected_keys)
+    if not location_authority.roles_exact or not policy.available or not keys:
+        raise UnknownCanonicalLocationError("the approved canonical-location configuration is unavailable")
+    if any(tuple(location_authority.canonical(k)) != tuple(policy.canonical(k)) for k in keys):
+        raise UnknownCanonicalLocationError("the canonical-offer policy disagrees with the location authority")
+    return tuple(dict.fromkeys(tuple(policy.canonical(k)) for k in keys))
+
+
 # ------------------------------------------------------------------ results
 
 
@@ -451,8 +528,9 @@ def _count(value: object, name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class OutcomeCounts:
-    """Candidate accounting: every candidate has exactly one terminal outcome."""
+    """Interval and candidate accounting: every candidate has exactly one terminal outcome."""
 
+    intervals: int = 0
     candidates: int = 0
     unchanged: int = 0
     increase: int = 0
@@ -460,34 +538,44 @@ class OutcomeCounts:
     appeared: int = 0
     disappeared: int = 0
     ambiguous: int = 0
-    #: Priced candidates whose previous price is zero cents (a future percentage change is undefined).
-    zero_baseline: int = 0
+    #: Comparable candidates with a nonzero previous price (the percentage is defined).
+    percent_valid: int = 0
+    #: Comparable candidates with a zero previous price (the percentage is undefined, never infinite).
+    zero_denominator: int = 0
 
     def __post_init__(self) -> None:
         for name in self.__slots__:
             _count(getattr(self, name), name)
         if self.candidates != sum(getattr(self, o.value) for o in TerminalOutcome):
             raise PriceChangeContractError("candidates must equal the sum of terminal outcomes")
-        if self.zero_baseline > self.priced:
-            raise PriceChangeContractError("a zero baseline needs a priced comparison")
+        if self.comparable != self.percent_valid + self.zero_denominator:
+            raise PriceChangeContractError("comparable must equal percent-valid plus zero-denominator")
+        if self.intervals == 0 and self.candidates:
+            raise PriceChangeContractError("candidates exist only within intervals")
 
     @property
-    def priced(self) -> int:
+    def comparable(self) -> int:
         """Candidates with exactly one offer at both endpoints (unchanged, increase or decrease)."""
         return self.unchanged + self.increase + self.decrease
+
+    @property
+    def changed(self) -> int:
+        return self.increase + self.decrease
 
     def __add__(self, other: OutcomeCounts) -> OutcomeCounts:
         return OutcomeCounts(*(getattr(self, n) + getattr(other, n) for n in self.__slots__))
 
     @classmethod
-    def of(cls, outcomes: Sequence[TerminalOutcome], zero_baseline: int = 0) -> OutcomeCounts:
+    def of(cls, outcomes: Sequence[TerminalOutcome], *, intervals: int, zero_denominator: int = 0) -> OutcomeCounts:
         values = [TerminalOutcome(o) for o in outcomes]
-        return cls(len(values), *(values.count(o) for o in TerminalOutcome), zero_baseline=zero_baseline)
+        comparable = sum(1 for o in values if o in _COMPARABLE)
+        return cls(intervals, len(values), *(values.count(o) for o in TerminalOutcome),
+                   percent_valid=comparable - zero_denominator, zero_denominator=zero_denominator)
 
 
 @dataclass(frozen=True, slots=True)
 class LocationPriceChangeSummary:
-    """One canonical location: its scheduled-period states, intervals, breaks and outcome counts."""
+    """One approved canonical location: its scheduled-period states, breaks and counts."""
 
     canonical_location: Key
     source_streams: tuple[Key, ...]
@@ -495,22 +583,27 @@ class LocationPriceChangeSummary:
     eligible_periods: int
     excluded_periods: int
     missing_periods: int
-    intervals: int
     breaks: tuple[tuple[str, int], ...]
     counts: OutcomeCounts
 
     def __post_init__(self) -> None:
         _location(self.canonical_location)
-        for name in ("scheduled_periods", "eligible_periods", "excluded_periods", "missing_periods", "intervals"):
+        for name in ("scheduled_periods", "eligible_periods", "excluded_periods", "missing_periods"):
             _count(getattr(self, name), name)
         if self.scheduled_periods != self.eligible_periods + self.excluded_periods + self.missing_periods:
             raise PriceChangeContractError("every scheduled period is eligible, excluded or missing")
         if any(r not in {b.value for b in IntervalBreak} or n <= 0 for r, n in self.breaks):
             raise PriceChangeContractError("breaks are typed positive counts")
-        if self.intervals + sum(n for _, n in self.breaks) != max(self.scheduled_periods - 1, 0):
+        if not isinstance(self.counts, OutcomeCounts):
+            raise PriceChangeContractError("counts must be OutcomeCounts")
+        if self.counts.intervals + sum(n for _, n in self.breaks) != max(self.scheduled_periods - 1, 0):
             raise PriceChangeContractError("every adjacent scheduled pair is an interval or a break")
-        if not isinstance(self.counts, OutcomeCounts) or (self.intervals == 0 and self.counts.candidates):
-            raise PriceChangeContractError("candidates exist only within intervals")
+        if self.counts.intervals > max(self.eligible_periods - 1, 0):
+            raise PriceChangeContractError("intervals join eligible periods only")
+
+    @property
+    def intervals(self) -> int:
+        return self.counts.intervals
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,12 +624,14 @@ class PriceChangeCandidateReport:
         if self.status is PriceChangeStatus.BLOCKED:
             if not self.blockers or self.locations or self.overall is not None:
                 raise PriceChangeContractError("a blocked report has blockers and no result")
+            if not all(isinstance(b, PriceChangeBlocker) for b in self.blockers):
+                raise PriceChangeContractError("blockers must be PriceChangeBlocker values")
             return
         if self.blockers or self.readiness_blockers or not isinstance(self.overall, OutcomeCounts):
             raise PriceChangeContractError("a completed report has no blockers and overall counts")
         keys = [s.canonical_location for s in self.locations]
-        if keys != sorted(set(keys)):
-            raise PriceChangeContractError("one summary per canonical location, in key order")
+        if len(set(keys)) != len(keys):
+            raise PriceChangeContractError("one summary per canonical location")
         if sum((s.counts for s in self.locations), OutcomeCounts()) != self.overall:
             raise PriceChangeContractError("location counts must sum to the overall counts")
 
@@ -545,12 +640,20 @@ class PriceChangeCandidateReport:
         return self.status is PriceChangeStatus.COMPLETED
 
     @property
-    def intervals(self) -> int:
-        return sum(s.intervals for s in self.locations)
+    def approved_locations(self) -> tuple[Key, ...]:
+        return tuple(s.canonical_location for s in self.locations)
+
+    def location(self, key: Key) -> LocationPriceChangeSummary:
+        return next(s for s in self.locations if s.canonical_location == tuple(key))
 
 
 def _missing(value: object) -> bool:
     return value is None or (isinstance(value, float) and math.isnan(value)) or value is pd.NA or value is pd.NaT
+
+
+def _finite_equal(value: object, expected: float) -> bool:
+    return (isinstance(value, float) and not isinstance(value, bool) and math.isfinite(value)
+            and value == expected)
 
 
 def validate_candidate_frame(candidates: pd.DataFrame, report: PriceChangeCandidateReport,
@@ -568,38 +671,58 @@ def validate_candidate_frame(candidates: pd.DataFrame, report: PriceChangeCandid
     if candidates.duplicated(list(EVENT_KEY_COLUMNS)).any():
         raise PriceChangeContractError("the event key must be unique")
     allowed = {(i.canonical_location, i.previous_period, i.current_period) for t in timelines for i in t.intervals}
-    outcomes: list[TerminalOutcome] = []
-    zero = 0
+    if {t.canonical_location for t in timelines} != set(report.approved_locations):
+        raise PriceChangeContractError("one timeline per reported canonical location")
+    if sum(len(t.intervals) for t in timelines) != overall.intervals:
+        raise PriceChangeContractError("the timelines contradict the interval counts")
+    per_location: dict[Key, list[TerminalOutcome]] = {k: [] for k in report.approved_locations}
+    zero: dict[Key, int] = {k: 0 for k in report.approved_locations}
+    previous_key, current_key = EVENT_INTERVAL_COLUMNS
     for row in candidates.itertuples(index=False, name=None):
         values = dict(zip(CANDIDATE_COLUMNS, row))
         if any(_missing(values[c]) for c in EVENT_KEY_COLUMNS):
             raise PriceChangeContractError("every candidate carries the full identity and interval")
         location = (values["canonical_city"], values["canonical_location"])
-        CaptureInterval(location, values["previous_period"], values["current_period"])
-        if (location, values["previous_period"], values["current_period"]) not in allowed:
+        CaptureInterval(location, values[previous_key], values[current_key])
+        if (location, values[previous_key], values[current_key]) not in allowed:
             raise PriceChangeContractError("a candidate lies outside every eligible capture interval")
         outcome = TerminalOutcome(values["outcome"])
         n_prev, n_cur = values["previous_offer_count"], values["current_offer_count"]
         _count(n_prev, "previous_offer_count"), _count(n_cur, "current_offer_count")
         prev, cur, change = values["previous_price_cents"], values["current_price_cents"], values["change_cents"]
+        derived = (values["change_dollars"], values["change_percent"])
+        valid, zero_denominator = values["percent_valid"], values["zero_denominator"]
+        if not isinstance(valid, (bool, np.bool_)) or not isinstance(zero_denominator, (bool, np.bool_)):
+            raise PriceChangeContractError("percent_valid and zero_denominator are booleans")
         if outcome is TerminalOutcome.AMBIGUOUS:
-            ok = (n_prev > 1 or n_cur > 1) and prev is None and cur is None and change is None
+            ok = ((n_prev > 1 or n_cur > 1) and prev is None and cur is None and change is None
+                  and values["previous_price"] is None and values["current_price"] is None)
         elif outcome is TerminalOutcome.APPEARED:
-            ok = (n_prev, n_cur) == (0, 1) and prev is None and change is None and _cents(cur) >= 0
+            ok = ((n_prev, n_cur) == (0, 1) and prev is None and values["previous_price"] is None
+                  and change is None and _finite_equal(values["current_price"], _cents(cur) / 100))
         elif outcome is TerminalOutcome.DISAPPEARED:
-            ok = (n_prev, n_cur) == (1, 0) and cur is None and change is None and _cents(prev) >= 0
+            ok = ((n_prev, n_cur) == (1, 0) and cur is None and values["current_price"] is None
+                  and change is None and _finite_equal(values["previous_price"], _cents(prev) / 100))
         else:
+            percent = change_percent(prev, cur)
             ok = ((n_prev, n_cur) == (1, 1) and classify_endpoint_offers([prev], [cur]) is outcome
-                  and change == price_change_cents(prev, cur))
+                  and change == price_change_cents(prev, cur)
+                  and _finite_equal(values["previous_price"], prev / 100)
+                  and _finite_equal(values["current_price"], cur / 100)
+                  and _finite_equal(derived[0], change / 100)
+                  and bool(valid) == (percent is not None) and bool(zero_denominator) == (percent is None)
+                  and (derived[1] is None if percent is None else _finite_equal(derived[1], percent)))
+        if outcome not in _COMPARABLE:
+            ok = ok and derived == (None, None) and not valid and not zero_denominator
         if not ok:
-            raise PriceChangeContractError("a candidate's offers and prices contradict its outcome")
-        baseline = values["zero_baseline"]
-        if not isinstance(baseline, (bool, np.bool_)) or bool(baseline) != (outcome in _PRICED and prev == 0):
-            raise PriceChangeContractError("zero_baseline marks exactly the priced candidates with a zero baseline")
-        zero += bool(baseline)
-        outcomes.append(outcome)
-    if OutcomeCounts.of(outcomes, zero) != overall:
-        raise PriceChangeContractError("the candidate frame contradicts the outcome counts")
+            raise PriceChangeContractError("a candidate's offers, prices and metrics contradict its outcome")
+        per_location[location].append(outcome)
+        zero[location] += bool(zero_denominator)
+    for summary in report.locations:
+        key = summary.canonical_location
+        if OutcomeCounts.of(per_location[key], intervals=summary.intervals, zero_denominator=zero[key]) \
+                != summary.counts:
+            raise PriceChangeContractError("the candidate frame contradicts the location counts")
 
 
 @dataclass(frozen=True)
@@ -626,7 +749,7 @@ class PriceChangeCandidateResult:
         return self.report.completed
 
 
-# ------------------------------------------------------------------ classification
+# ------------------------------------------------------------------ the pure engine
 
 
 def _validate_offers(offers: pd.DataFrame) -> None:
@@ -647,81 +770,107 @@ def _validate_offers(offers: pd.DataFrame) -> None:
         raise PriceChangeContractError("canonical offers are unique by identity, period and price")
 
 
-def _labels(members: list[tuple[int, str]]) -> str | None:
+def _labels(members: list[tuple[int, object]]) -> str | None:
     labels = sorted({part for _, text in members if isinstance(text, str) for part in text.split("|") if part})
     return "|".join(labels) if labels else None
 
 
+def _candidate_row(identity: tuple, interval: CaptureInterval, prev: list, cur: list) -> tuple:
+    outcome = classify_endpoint_offers([c for c, _ in prev], [c for c, _ in cur])
+    p = prev[0][0] if len(prev) == 1 and outcome is not TerminalOutcome.AMBIGUOUS else None
+    c = cur[0][0] if len(cur) == 1 and outcome is not TerminalOutcome.AMBIGUOUS else None
+    comparable = outcome in _COMPARABLE
+    change = c - p if comparable else None
+    percent = change_percent(p, c) if comparable else None
+    return (*identity, interval.previous_period, interval.current_period, len(prev), len(cur), outcome.value,
+            p, c, change, None if p is None else p / 100, None if c is None else c / 100,
+            None if change is None else change / 100, percent, comparable and percent is not None,
+            comparable and percent is None, _labels(prev), _labels(cur))
+
+
 def classify_price_change_candidates(
         offers: pd.DataFrame, timelines: Sequence[LocationCaptureTimeline],
+        locations: Sequence[Key] | None = None,
 ) -> tuple[pd.DataFrame, tuple[LocationPriceChangeSummary, ...]]:
-    """Classify every identity of every eligible interval (exact, order independent; inputs unchanged).
+    """The pure engine: classify every identity of every eligible interval (exact, order independent).
 
     ``offers`` are canonical offers (:data:`EVENT_IDENTITY_COLUMNS`,
     ``scheduled_capture_period``, ``price_cents``, ``source_location_labels``);
     ``timelines`` come from :func:`capture_timelines` on the same evidence.
+    ``locations`` is the approved canonical-location authority order (default:
+    the timelines' locations in key order); it must name exactly the timelines'
+    locations, and every location gets a summary, with zero counts if it has no
+    candidates. An eligible capture without offers is a valid empty capture
+    (the gated assessment separately proves no pipeline capture is empty).
+    Inputs are never modified.
 
     Raises:
         PriceChangeContractError: Malformed offers or timelines.
-        CaptureEvidenceError: An offer lies outside every eligible capture, or an eligible capture has no offers.
+        UnknownCanonicalLocationError: An offer or timeline names an unapproved canonical location.
+        CaptureEvidenceError: An offer lies outside every eligible capture.
     """
     if not isinstance(timelines, (tuple, list)) or not all(isinstance(t, LocationCaptureTimeline) for t in timelines):
         raise TypeError("timelines must be LocationCaptureTimeline objects")
-    locations = [t.canonical_location for t in timelines]
-    if len(set(locations)) != len(locations):
+    by_location = {t.canonical_location: t for t in timelines}
+    if len(by_location) != len(timelines):
         raise PriceChangeContractError("one timeline per canonical location")
+    order = tuple(tuple(k) for k in locations) if locations is not None else tuple(sorted(by_location))
+    for key in order:
+        _location(key)
+    if len(set(order)) != len(order):
+        raise PriceChangeContractError("the approved locations are distinct exact keys")
+    if set(by_location) - set(order):
+        raise UnknownCanonicalLocationError("a timeline names an unapproved canonical location")
+    if set(order) - set(by_location):
+        raise CaptureEvidenceError("an approved canonical location has no capture timeline")
     _validate_offers(offers)
     eligible = {(t.canonical_location, p) for t in timelines for p in t.periods(CaptureState.ELIGIBLE)}
-    index: dict[tuple[Key, str], dict[tuple, list[tuple[int, str]]]] = {}
+    index: dict[tuple[Key, str], dict[tuple, list[tuple[int, object]]]] = {}
     rows = offers.loc[:, [*EVENT_IDENTITY_COLUMNS, EVENT_TIMESTAMP_COLUMN, "price_cents", "source_location_labels"]]
     for values in rows.astype(object).itertuples(index=False, name=None):
         identity, period, cents, labels = values[:len(EVENT_IDENTITY_COLUMNS)], values[-3], int(values[-2]), values[-1]
-        capture = ((identity[0], identity[1]), period)
-        if capture not in eligible:
+        location = (identity[0], identity[1])
+        if location not in by_location:
+            raise UnknownCanonicalLocationError("an offer names an unapproved canonical location")
+        if (location, period) not in eligible:
             raise CaptureEvidenceError("an offer lies outside every eligible scheduled capture")
-        index.setdefault(capture, {}).setdefault(identity, []).append((cents, labels))
-    if set(index) != eligible:
-        raise CaptureEvidenceError("an eligible scheduled capture has no canonical offers")
+        index.setdefault((location, period), {}).setdefault(identity, []).append((cents, labels))
 
+    rank = {k: i for i, k in enumerate(order)}
     out: list[tuple] = []
     summaries = []
-    for timeline in sorted(timelines, key=lambda t: t.canonical_location):
+    for key in order:
+        timeline = by_location[key]
         outcomes: list[TerminalOutcome] = []
         zero = 0
         for interval in timeline.intervals:
-            before = index[(timeline.canonical_location, interval.previous_period)]
-            after = index[(timeline.canonical_location, interval.current_period)]
+            before = index.get((key, interval.previous_period), {})
+            after = index.get((key, interval.current_period), {})
             for identity in set(before) | set(after):
-                prev, cur = before.get(identity, []), after.get(identity, [])
-                outcome = classify_endpoint_offers([c for c, _ in prev], [c for c, _ in cur])
-                priced = outcome in _PRICED
-                p = prev[0][0] if len(prev) == 1 and outcome is not TerminalOutcome.AMBIGUOUS else None
-                c = cur[0][0] if len(cur) == 1 and outcome is not TerminalOutcome.AMBIGUOUS else None
-                baseline = priced and p == 0
-                zero += baseline
-                outcomes.append(outcome)
-                out.append((*identity, interval.previous_period, interval.current_period, outcome.value, len(prev),
-                            len(cur), p, c, (c - p) if priced else None, baseline, _labels(prev), _labels(cur)))
-        breaks = timeline.break_counts
+                row = _candidate_row(identity, interval, before.get(identity, []), after.get(identity, []))
+                outcomes.append(TerminalOutcome(row[len(EVENT_KEY_COLUMNS) + 2]))
+                zero += row[CANDIDATE_COLUMNS.index("zero_denominator")]
+                out.append(row)
         summaries.append(LocationPriceChangeSummary(
-            canonical_location=timeline.canonical_location, source_streams=timeline.source_streams,
+            canonical_location=key, source_streams=timeline.source_streams,
             scheduled_periods=len(timeline.captures),
             eligible_periods=len(timeline.periods(CaptureState.ELIGIBLE)),
             excluded_periods=len(timeline.periods(CaptureState.GOVERNED_EXCLUSION)),
             missing_periods=len(timeline.periods(CaptureState.MISSING_CAPTURE)),
-            intervals=len(timeline.intervals), breaks=breaks, counts=OutcomeCounts.of(outcomes, zero)))
+            breaks=timeline.break_counts,
+            counts=OutcomeCounts.of(outcomes, intervals=len(timeline.intervals), zero_denominator=zero)))
     position = {c: i for i, c in enumerate(CANDIDATE_COLUMNS)}
-    order = [position[c] for c in ("canonical_city", "canonical_location", "previous_period", "current_period",
-                                   *EVENT_IDENTITY_COLUMNS[2:])]
-    out.sort(key=lambda r: tuple(r[i] for i in order))
+    tail = [position[c] for c in (*EVENT_INTERVAL_COLUMNS, *EVENT_IDENTITY_COLUMNS[2:])]
+    out.sort(key=lambda r: (rank[(r[0], r[1])], *(r[i] for i in tail)))
     frame = pd.DataFrame(out, columns=list(CANDIDATE_COLUMNS), dtype=object)
-    frame["previous_offer_count"] = frame["previous_offer_count"].astype(int)
-    frame["current_offer_count"] = frame["current_offer_count"].astype(int)
-    frame["zero_baseline"] = frame["zero_baseline"].astype(bool)
+    for column in ("previous_offer_count", "current_offer_count"):
+        frame[column] = frame[column].astype(int)
+    for column in ("percent_valid", "zero_denominator"):
+        frame[column] = frame[column].astype(bool)
     return frame, tuple(summaries)
 
 
-# ------------------------------------------------------------------ assessment
+# ------------------------------------------------------------------ gated assessment
 
 
 def _blocked(blockers: Sequence[PriceChangeBlocker], readiness_blockers: Sequence[str] = (),
@@ -731,27 +880,69 @@ def _blocked(blockers: Sequence[PriceChangeBlocker], readiness_blockers: Sequenc
         readiness_blockers=tuple(readiness_blockers), offers_assessed=offers_assessed))
 
 
+def _population_agrees(jobs: pd.DataFrame, cars: pd.DataFrame, population, scheduled,  # type: ignore[no-untyped-def]
+                       timelines: Sequence[LocationCaptureTimeline], offers: pd.DataFrame,
+                       city_column: str) -> bool:
+    """Eligible captures are eligible population parents with offers; excluded ones are its governed exclusions."""
+    from ql2_sixt_canada_analysis.pricing_population import DetailEligibility
+
+    if city_column not in jobs.columns:
+        return False
+    periods = scheduled.capture_periods.parent_periods(jobs).tolist()
+    cities = jobs[city_column].astype(object).tolist()
+    eligible: set[tuple[str, str]] = set()
+    excluded: set[tuple[str, str]] = set()
+    for city, period, status in zip(cities, periods, population.parent_status):
+        if isinstance(city, str) and isinstance(period, str):
+            if status == DetailEligibility.ELIGIBLE.value:
+                eligible.add((city, period))
+            elif status == DetailEligibility.GOVERNED_EXCLUSION.value:
+                excluded.add((city, period))
+    offered = set(zip(offers["canonical_city"].astype(object), offers["canonical_location"].astype(object),
+                      offers[EVENT_TIMESTAMP_COLUMN].astype(object)))
+    for timeline in timelines:
+        city, location = timeline.canonical_location
+        if any((city, p) not in eligible or (city, location, p) not in offered
+               for p in timeline.periods(CaptureState.ELIGIBLE)):
+            return False
+        if any((city, p) not in excluded for p in timeline.periods(CaptureState.GOVERNED_EXCLUSION)):
+            return False
+    return True
+
+
 def assess_price_change_candidates(jobs: pd.DataFrame, cars: pd.DataFrame, *, readiness: object,
-                                   scheduled: object, canonical_offers: object) -> PriceChangeCandidateResult:
+                                   population: object, scheduled: object, canonical_offers: object,
+                                   location_authority: object, city_column: str = "city",
+                                   ) -> PriceChangeCandidateResult:
     """Observed price-change candidates of the pricing-eligible canonical offers (see the module docstring).
 
     ``jobs``/``cars`` are the analysis-stage frames every report was assessed
-    on. Pricing readiness must be ready and be the assessment of exactly the
-    supplied schedule and canonical-offer reports; the offers must be bound to
-    these frames. Any failure returns a ``BLOCKED`` result with typed blockers
-    and no candidates. Inputs are never modified; raw ``job_id`` is never read.
+    on. Gates, in order (any failure returns a ``BLOCKED`` result with typed
+    blockers and no candidates): pricing readiness is ready and is the
+    assessment of exactly the supplied schedule, canonical-offer and
+    location-authority reports; the population and canonical offers are bound
+    to these frames and the schedule was assessed on them; the canonical offers
+    are ready with no unassessable row; the schedule assessment is valid with
+    capture-period and governed-exclusion evidence; the approved
+    canonical-location configuration is available and agrees with the offer
+    policy and the schedule. The pure engine runs only after every gate, and
+    its capture grid must agree with the population. Inputs are never
+    modified; raw ``job_id`` is never read.
 
     Raises:
         TypeError: An argument has the wrong type.
     """
     from ql2_sixt_canada_analysis.canonical_offers import CanonicalOfferReport
     from ql2_sixt_canada_analysis.collection_schedule import PerStreamScheduledCoverageReport
-    from ql2_sixt_canada_analysis.pricing_population import PricingPopulationError, frame_binding
+    from ql2_sixt_canada_analysis.location_authority import LocationAuthorityReport
+    from ql2_sixt_canada_analysis.pricing_population import PricingPopulation, PricingPopulationError, frame_binding
     from ql2_sixt_canada_analysis.readiness import PricingReadinessReport
 
     for value, kind, name in ((readiness, PricingReadinessReport, "readiness"),
+                              (population, PricingPopulation, "population"),
                               (scheduled, PerStreamScheduledCoverageReport, "scheduled"),
-                              (canonical_offers, CanonicalOfferReport, "canonical_offers")):
+                              (canonical_offers, CanonicalOfferReport, "canonical_offers"),
+                              (location_authority, LocationAuthorityReport, "location_authority")):
         if not isinstance(value, kind):
             raise TypeError(f"{name} must be a {kind.__name__}")
     if not isinstance(jobs, pd.DataFrame) or not isinstance(cars, pd.DataFrame):
@@ -760,14 +951,24 @@ def assess_price_change_candidates(jobs: pd.DataFrame, cars: pd.DataFrame, *, re
     if not readiness.ready:
         return _blocked([B.PRICING_NOT_READY], [b.value for b in readiness.blocking_reasons])
     blockers: list[PriceChangeBlocker] = []
-    if readiness.canonical_offers is not canonical_offers or readiness.scheduled_coverage is not scheduled:
+    if (readiness.canonical_offers is not canonical_offers or readiness.scheduled_coverage is not scheduled
+            or readiness.location_authority is not location_authority):
         blockers.append(B.READINESS_EVIDENCE_MISMATCH)
-    if canonical_offers.binding != frame_binding(jobs, cars):
+    binding = frame_binding(jobs, cars)
+    if (population.binding != binding or canonical_offers.binding != binding
+            or scheduled.jobs_assessed != len(jobs)):
         blockers.append(B.FRAME_BINDING_MISMATCH)
     if not canonical_offers.ready or canonical_offers.unassessable_rows or canonical_offers.offers is None:
         blockers.append(B.CANONICAL_OFFERS_NOT_READY)
-    if not scheduled.is_valid or scheduled.capture_periods is None or scheduled.jobs_assessed != len(jobs):
+    if (not scheduled.is_valid or scheduled.capture_periods is None or scheduled.capture_exclusions is None
+            or scheduled.unmatched_exclusions):
         blockers.append(B.SCHEDULE_EVIDENCE_INVALID)
+    try:
+        approved = approved_canonical_locations(location_authority, canonical_offers.policy)
+        if set(location_authority.contract.expected_keys) != set(scheduled.schedule.expected_streams):
+            raise UnknownCanonicalLocationError("the schedule and the location authority name other streams")
+    except UnknownCanonicalLocationError:
+        blockers.append(B.LOCATION_AUTHORITY_UNAVAILABLE)
     if blockers:
         return _blocked(blockers)
     try:
@@ -776,11 +977,15 @@ def assess_price_change_candidates(jobs: pd.DataFrame, cars: pd.DataFrame, *, re
         return _blocked([B.FRAME_BINDING_MISMATCH])
     try:
         timelines = capture_timelines(scheduled, canonical_offers.policy)
-        frame, summaries = classify_price_change_candidates(offers, timelines)
+        frame, summaries = classify_price_change_candidates(offers, timelines, approved)
+    except UnknownCanonicalLocationError:
+        return _blocked([B.UNKNOWN_CANONICAL_LOCATION], offers_assessed=len(offers))
     except CaptureEvidenceError:
         return _blocked([B.CAPTURE_EVIDENCE_INCONSISTENT], offers_assessed=len(offers))
     except PriceChangeContractError:
         return _blocked([B.OFFER_CONTRACT_INVALID], offers_assessed=len(offers))
+    if not _population_agrees(jobs, cars, population, scheduled, timelines, offers, city_column):
+        return _blocked([B.CAPTURE_EVIDENCE_INCONSISTENT], offers_assessed=len(offers))
     report = PriceChangeCandidateReport(
         status=PriceChangeStatus.COMPLETED, offers_assessed=len(offers), locations=summaries,
         overall=sum((s.counts for s in summaries), OutcomeCounts()))
@@ -801,8 +1006,17 @@ def price_change_candidates_from_pipeline(run: object) -> PriceChangeCandidateRe
     pricing = run.pricing
     if not isinstance(pricing, PricingReadinessReport):
         raise TypeError("the pipeline produced no readiness report")
-    if not pricing.ready or run.scheduled is None or run.canonical_offers is None:
+    required = (run.population, run.scheduled, run.canonical_offers, run.location_authority)
+    if not pricing.ready or any(v is None for v in required):
         return _blocked([PriceChangeBlocker.PRICING_NOT_READY],
                         [b.value for b in pricing.blocking_reasons] or ["required_assessment_unavailable"])
-    return assess_price_change_candidates(run.jobs, run.cars, readiness=pricing, scheduled=run.scheduled,
-                                          canonical_offers=run.canonical_offers)
+    return assess_price_change_candidates(
+        run.jobs, run.cars, readiness=pricing, population=run.population, scheduled=run.scheduled,
+        canonical_offers=run.canonical_offers, location_authority=run.location_authority)
+
+
+def run_price_change_events(raw_dir: str | Path | None = None) -> PriceChangeCandidateResult:
+    """Run the validated pricing pipeline, then the gated event engine (read-only; nothing is written)."""
+    from ql2_sixt_canada_analysis.pricing_pipeline import run_pricing_pipeline
+
+    return price_change_candidates_from_pipeline(run_pricing_pipeline(raw_dir))

@@ -565,6 +565,10 @@ __all__ = [
     "price_change_candidates_from_pipeline",
     "price_change_cents",
     "validate_candidate_frame",
+    "UnknownCanonicalLocationError",
+    "approved_canonical_locations",
+    "change_percent",
+    "run_price_change_events",
     "location_authority_from_record",
     "role_map_from_record",
     "vancouver_policy_from_record",
@@ -754,6 +758,10 @@ _LAZY_OTHER = {
     "price_change_candidates_from_pipeline": "price_change_events",
     "price_change_cents": "price_change_events",
     "validate_candidate_frame": "price_change_events",
+    "UnknownCanonicalLocationError": "price_change_events",
+    "approved_canonical_locations": "price_change_events",
+    "change_percent": "price_change_events",
+    "run_price_change_events": "price_change_events",
 }
 
 
