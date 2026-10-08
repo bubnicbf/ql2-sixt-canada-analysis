@@ -95,6 +95,7 @@ from ql2_sixt_canada_analysis.visible_assortment import (
     assess_visible_assortment,
     calculate_visible_assortment,
     run_visible_assortment,
+    validate_price_coincidence,
     visible_assortment_from_pipeline,
 )
 
@@ -595,6 +596,111 @@ def test_duplicate_stale_or_mismatched_price_evidence_fails_closed() -> None:
     with pytest.raises(AssortmentPriceEvidenceError):
         calculate_visible_assortment(frame(rows), blocked)
     assert prices.completed
+
+
+UNIT_VARIANTS = pytest.mark.parametrize("unit", [
+    ({"currency": "CA$"}, {"currency": "US$"}),                                  # two currencies
+    ({"basis": "day"}, {"basis": "week"}),                                      # two price bases
+], ids=["currency", "price_basis"])
+
+
+@UNIT_VARIANTS
+def test_one_retained_product_may_carry_several_unit_specific_price_increases(unit) -> None:  # type: ignore[no-untyped-def]
+    """Regression: price counts are candidate-level and may exceed the retained visible-product count."""
+    first, second = unit
+    rows = [car(0, "SYNTH Car A", 5000, **first), car(0, "SYNTH Car A", 4000, **second),
+            car(1, "SYNTH Car A", 5500, **first), car(1, "SYNTH Car A", 4400, **second)]
+    result = build(rows, [timeline([0, 1])])                                    # validated on construction
+    assert result.completed
+    seed, r = row(result, 0), row(result, 1)
+    assert seed["returned_product_count"] == r["returned_product_count"] == 1    # units never inflate products
+    assert counts(r) == (1, 1, 1, 0, 0) and (r["retention"], r["jaccard_similarity"]) == (1.0, 1.0)
+    assert (r["price_increase_count"], r["price_decrease_count"]) == (2, 0)
+    assert r["price_increase_count"] + r["price_decrease_count"] > r["retained_count"]
+    assert r["price_change"] is True and r["assortment_change"] is False
+    assert r["assortment_price_coincidence"] is False and r["falling_assortment_with_price_increase"] is False
+    assert len(result.membership) == 1 and members(result, 1) == {"SYNTH Car A": "retained"}
+    candidates = result.price_changes.candidates
+    assert (candidates["outcome"] == "increase").sum() == 2
+    o = result.report.overall
+    assert (o.price_increases, o.price_decreases, o.price_changes, o.retained) == (2, 0, 2, 1)
+    assert (o.price_change_intervals, o.assortment_change_intervals, o.coincident_intervals) == (1, 0, 0)
+    assert result.report.location(LOC).counts.price_increases == 2
+
+
+@UNIT_VARIANTS
+def test_unit_specific_changes_keep_directions_separate_on_one_product(unit) -> None:  # type: ignore[no-untyped-def]
+    first, second = unit
+    rows = [car(0, "SYNTH Car A", 5000, **first), car(0, "SYNTH Car A", 4000, **second), car(0, "SYNTH Car B"),
+            car(1, "SYNTH Car A", 5500, **first), car(1, "SYNTH Car A", 3900, **second)]
+    r = row(build(rows, [timeline([0, 1])]), 1)
+    assert counts(r) == (2, 1, 1, 0, 1) and (r["price_increase_count"], r["price_decrease_count"]) == (1, 1)
+    assert r["assortment_price_coincidence"] is True and r["falling_assortment_with_price_increase"] is True
+
+
+def test_assessed_rows_are_not_rejected_for_price_counts_above_retained_products() -> None:
+    """The aggregate row check allows candidate counts above ``retained_count`` but not changes without one."""
+    result = build([car(0, "SYNTH Car A", 1, currency="CA$"), car(0, "SYNTH Car A", 2, currency="US$"),
+                    car(1, "SYNTH Car A", 3, currency="CA$"), car(1, "SYNTH Car A", 4, currency="US$")],
+                   [timeline([0, 1])])
+    assessed = row(result, 1)
+    va._check_assessed(assessed)                                                 # 2 changes, 1 retained product
+    orphan = {**assessed, "previous_product_count": 1, "returned_product_count": 1, "retained_count": 0,
+              "addition_count": 1, "removal_count": 1, "retention": 0.0, "jaccard_similarity": 0.0,
+              "assortment_change": True, "assortment_price_coincidence": True}
+    with pytest.raises(AssortmentReconciliationError, match="only retained products can change price"):
+        va._check_assessed(orphan)
+
+
+def _forged(result: VisibleAssortmentResult, change) -> VisibleAssortmentResult:  # type: ignore[no-untyped-def]
+    """Attach a copy of the result's price evidence whose candidate frame was altered by ``change``."""
+    forged = dataclasses.replace(result.price_changes)
+    table = result.price_changes.candidates.copy()
+    change(table)
+    object.__setattr__(forged, "candidates", table)
+    return VisibleAssortmentResult(result.report, result.timeline, result.membership, result.timelines, forged)
+
+
+def test_completed_results_prove_price_counts_from_candidate_identities() -> None:
+    rows = [car(0, "SYNTH Car A", 5000), car(0, "SYNTH Car B"), car(1, "SYNTH Car A", 5500)]
+    result = build(rows, [timeline([0, 1])])
+    increase = result.price_changes.candidates["outcome"] == "increase"
+
+    def to_removed(t: pd.DataFrame) -> None:                                    # projects to a removed product
+        t.loc[increase, "car_name"] = "SYNTH Car B"
+
+    def to_unknown(t: pd.DataFrame) -> None:                                    # projects to no product at all
+        t.loc[increase, "car_type"] = "SYNTH Other Type"
+
+    def to_other_interval(t: pd.DataFrame) -> None:
+        t.loc[increase, [PREV, CUR]] = [P(5), P(6)]
+
+    def recount(t: pd.DataFrame) -> None:                                       # counts no longer reconcile
+        t.loc[increase, "outcome"] = "unchanged"
+
+    def extra_unit(t: pd.DataFrame) -> None:                                    # a second, uncounted increase
+        t.loc[len(t)] = t.loc[increase].iloc[0].to_dict() | {"currency": "US$"}
+
+    for change in (to_removed, to_unknown, to_other_interval, recount, extra_unit):
+        with pytest.raises(AssortmentReconciliationError):
+            _forged(result, change)
+    with pytest.raises(AssortmentReconciliationError, match="lack a contract column"):
+        _forged(result, lambda t: t.drop(columns=["currency"], inplace=True))
+    with pytest.raises(AssortmentReconciliationError):
+        validate_price_coincidence(result.timeline, result.membership.iloc[0:0], result.price_changes)
+    validate_price_coincidence(result.timeline, result.membership, result.price_changes)
+
+
+@UNIT_VARIANTS
+def test_a_unit_specific_change_on_a_non_retained_product_still_fails_closed(unit) -> None:  # type: ignore[no-untyped-def]
+    first, second = unit
+    rows = [car(0, "SYNTH Car A", **first), car(1, "SYNTH Car A", **first), car(1, "SYNTH Car B", **second)]
+    forged = classify(rows, [timeline([0, 1])])
+    table = forged.candidates.copy()
+    table.loc[table["car_name"] == "SYNTH Car B", "outcome"] = "increase"        # an added product cannot change
+    object.__setattr__(forged, "candidates", table)
+    with pytest.raises(AssortmentPriceEvidenceError, match="only a retained product can change price"):
+        calculate_visible_assortment(frame(rows), forged)
 
 
 def test_membership_detail_never_assigns_prices_to_additions_or_removals() -> None:

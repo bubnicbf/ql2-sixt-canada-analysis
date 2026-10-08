@@ -2723,6 +2723,13 @@ blocked result holds no frames.
   - The candidate identities must equal the union of the two endpoint
     sets, and every increase or decrease must belong to a retained
     product. Any disagreement blocks with `price_change_evidence_invalid`.
+  - Price counts are candidate-level: they count price-comparison
+    identities (product plus currency and price basis). One retained product
+    with several units can contribute several increases or decreases, so
+    `price_increase_count + price_decrease_count` may exceed
+    `retained_count`. The assortment counts remain distinct visible
+    products. `validate_price_coincidence` proves each changed candidate
+    projects to a retained product of its interval.
   - A coincidence is temporal association, not causation.
 - **Timeline grain:** one row per approved canonical location and
   scheduled capture, in authority and period order, with the exact

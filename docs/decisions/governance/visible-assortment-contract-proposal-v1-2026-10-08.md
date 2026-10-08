@@ -319,6 +319,17 @@ or authority. The proposed items remain **PROPOSED - not approved**.
   projected onto location, rental context and product must equal the union
   of the two endpoint sets. Every increase or decrease must be a retained
   product. Any disagreement fails closed.
+- **Counting grain.** `price_increase_count` and `price_decrease_count` count
+  price-change candidates, whose identity adds currency and price basis to
+  the product. `returned_product_count`, `retained_count`, `addition_count`
+  and `removal_count` count distinct visible products. One retained product
+  can carry several unit-specific candidates, for example separate CA$ and
+  US$ changes, so the price counts may exceed `retained_count`. The proof
+  that every changed candidate projects to a retained product of its interval
+  uses candidate identities (`validate_price_coincidence`, run whenever price
+  evidence is attached to a result). The aggregate row check only requires a
+  retained product whenever a price change is counted. This is an
+  implementation correction (2026-10-08), not a new rule.
 - **Blocker categories.** `AssortmentBlocker` gains four engine categories:
   `unknown_canonical_location`, `capture_evidence_inconsistent`,
   `price_change_evidence_invalid` and `reconciliation_failed`.

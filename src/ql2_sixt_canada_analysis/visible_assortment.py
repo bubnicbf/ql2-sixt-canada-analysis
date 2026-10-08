@@ -61,7 +61,12 @@ counted. ``unchanged``, ``appeared``, ``disappeared`` and ``ambiguous`` are neve
 price changes. The candidates' identities, projected onto location, context
 and product, must equal the union of the two endpoint sets exactly, and every
 increase or decrease must belong to a retained product; any disagreement fails
-closed. A coincidence is temporal association only, never causation.
+closed. Price counts are candidate-level (the price-comparison identity adds
+currency and price basis to the product), so one retained product may carry
+several unit-specific increases or decreases and ``price_increase_count +
+price_decrease_count`` may exceed ``retained_count``; assortment counts stay
+distinct visible products. A coincidence is temporal association only, never
+causation.
 
 Confidentiality
 ---------------
@@ -133,6 +138,7 @@ __all__ = [
     "calculate_visible_assortment",
     "run_visible_assortment",
     "validate_assortment_timeline",
+    "validate_price_coincidence",
     "visible_assortment_from_pipeline",
 ]
 
@@ -446,8 +452,63 @@ def _check_assessed(row: dict) -> None:
     for name, expected in flags.items():
         if not _flag(row[name]) or bool(row[name]) is not expected:
             raise AssortmentReconciliationError(f"{name} contradicts its definition")
-    if inc + dec > r:
+    # Price counts are candidate-level (price-comparison identity: product plus currency and price basis), while
+    # ``retained_count`` counts visible products, so one retained product may carry several unit-specific
+    # increases or decreases and ``inc + dec`` may exceed ``r``. The only aggregate bound is that a price change
+    # needs a retained product; the per-candidate proof that every change projects to a retained product needs
+    # candidate identities and is made by ``validate_price_coincidence``.
+    if inc + dec > 0 and r == 0:
         raise AssortmentReconciliationError("only retained products can change price")
+
+
+def validate_price_coincidence(timeline: pd.DataFrame, membership: pd.DataFrame,
+                               price_changes: PriceChangeCandidateResult) -> None:
+    """Prove the timeline's price counts from the attached candidate identities (candidate grain, not product grain).
+
+    For every assessed row the ``increase`` and ``decrease`` candidates of the
+    exact location interval must equal ``price_increase_count`` and
+    ``price_decrease_count``; each such candidate, projected onto location,
+    rental context and product (dropping currency and price basis), must be a
+    ``retained`` membership row of that interval. Several unit-specific
+    candidates may therefore project to one retained product. An interval
+    without an assessed row (a rental-context break) holds no price change.
+
+    Raises:
+        AssortmentReconciliationError: Any disagreement.
+    """
+    R = AssortmentReconciliationError
+    candidates = price_changes.candidates
+    needed = (*EVENT_IDENTITY_COLUMNS, *EVENT_INTERVAL_COLUMNS, "outcome")
+    if not isinstance(candidates, pd.DataFrame) or any(c not in candidates.columns for c in needed):
+        raise R("the attached price-change candidates lack a contract column")
+    retained = {tuple(r[:-1]) for r in membership.astype(object).itertuples(index=False, name=None)
+                if r[-1] == ProductMembership.RETAINED.value}
+    counted: dict[tuple, Counter] = {}
+    position = {c: i for i, c in enumerate(needed)}
+    member_at = [position[c] for c in _MEMBERSHIP_KEY]
+    for values in candidates.loc[:, list(needed)].astype(object).itertuples(index=False, name=None):
+        outcome = values[position["outcome"]]
+        if outcome not in _PRICE_CHANGES:
+            continue
+        member = tuple(values[i] for i in member_at)
+        if member not in retained:
+            raise R("a price change projects to a product that is not retained in its interval")
+        key = ((values[position["canonical_city"]], values[position["canonical_location"]]),
+               values[position[_PREVIOUS]], values[position[_CURRENT]])
+        counted.setdefault(key, Counter())[outcome] += 1
+    assessed = set()
+    for values in timeline.astype(object).itertuples(index=False, name=None):
+        row = dict(zip(ASSORTMENT_TIMELINE_COLUMNS, values))
+        if row["assessability_status"] != AssessabilityStatus.ASSESSED.value:
+            continue
+        key = ((row["canonical_city"], row["canonical_location"]), row[_PREVIOUS], row[_CAPTURE])
+        assessed.add(key)
+        tally = counted.get(key, Counter())
+        if (tally[TerminalOutcome.INCREASE.value], tally[TerminalOutcome.DECREASE.value]) != (
+                row["price_increase_count"], row["price_decrease_count"]):
+            raise R("the price counts differ from the attached price-change candidates")
+    if set(counted) - assessed:
+        raise R("a price change lies outside every assessed interval")
 
 
 def validate_assortment_timeline(timeline: pd.DataFrame, membership: pd.DataFrame, report: AssortmentReport,
@@ -604,6 +665,8 @@ class VisibleAssortmentResult:
                                                or self.price_changes.timelines != self.timelines):
             raise AssortmentReconciliationError("the price-change evidence shares the assortment capture grid")
         validate_assortment_timeline(self.timeline, self.membership, self.report, self.timelines)
+        if self.price_changes is not None:
+            validate_price_coincidence(self.timeline, self.membership, self.price_changes)
 
     @property
     def completed(self) -> bool:
@@ -758,6 +821,8 @@ def calculate_visible_assortment(
                         raise AssortmentPriceEvidenceError("a price change cannot span a rental-context change")
                     reason = RENTAL_CONTEXT_CHANGED
                 else:
+                    # ``changed`` holds distinct (context, product) projections: several unit-specific
+                    # candidates of one retained product collapse to one member here and are counted below.
                     if any(c not in previous & current for _, c in changed):
                         raise AssortmentPriceEvidenceError("only a retained product can change price")
                     comparison = compare_assortment(previous, current, interval=pair)

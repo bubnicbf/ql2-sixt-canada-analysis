@@ -476,6 +476,20 @@ def test_unchanged_appeared_disappeared_and_ambiguous_never_coincide() -> None:
     assert row["assortment_change_intervals"] == 2                            # C/D turnover, then A/B/C removed
 
 
+def test_multi_unit_price_changes_on_one_retained_product_reconcile_in_the_presentation() -> None:
+    rows = [car(0, "SYNTH Car A", 5000, currency="CA$"), car(0, "SYNTH Car A", 4000, currency="US$"),
+            car(1, "SYNTH Car A", 5500, currency="CA$"), car(1, "SYNTH Car A", 4400, currency="US$")]
+    t = tables_of(rows, [timeline([0, 1])])
+    assessed = [r for r in records(t.assortment_timeline) if r["assessability_status"] == AS.ASSESSED.value]
+    assert [(r["retained_count"], r["price_increase_count"]) for r in assessed] == [(1, 2)]
+    summary = records(t.location_summary)[0]
+    assert (summary["total_additions"], summary["total_removals"], summary["price_increase_intervals"]) == (0, 0, 1)
+    assert (t.reconciliation_summary["status"] == "reconciled").all()
+    recon = dict(zip(t.reconciliation_summary["check"], t.reconciliation_summary["observed"]))
+    assert recon["price_changes_equal_increases_plus_decreases"] == 2
+    assert t.observed_drop_review.empty and records(t.price_coincidence_summary)[0]["coincident_intervals"] == 0
+
+
 def test_changes_in_different_intervals_never_coincide() -> None:
     rows = [car(0, "SYNTH Car A", 50), car(1, "SYNTH Car A", 60), car(2, "SYNTH Car A", 60), car(0, "SYNTH Car B"),
             car(1, "SYNTH Car B")]
