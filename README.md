@@ -1993,11 +1993,131 @@ pricing-readiness baseline.
 Planned extensions of the matched premium: capture time (hour of day) and
 price-percentile views.
 
-## Genuine pricing events
+## Price-change events
+
+Issue #4 begins with a locked, executable event contract
+(`src/ql2_sixt_canada_analysis/price_change_events.py`, enforced by
+`tests/test_price_change_events.py` on fabricated data only). It defines what
+may be compared from one hourly capture to the next; it produces **observed
+price-change candidates**, never proven genuine market events. Deciding that a
+movement is a genuine repricing rather than a collection effect requires
+source and operational corroboration that is outside this contract. It is a
+derived analysis under the already approved authorities (record v8) and adds
+no authority decision.
+
+**Population.** Only the pricing-eligible canonical offers produced by
+`run_pricing_pipeline` (`CanonicalOfferReport.offers`): the governed Calgary
+exclusion and every ineligible row never enter, and the Vancouver
+`Downtown`/`Thurlow` aliases are already one canonical location. Never
+`MatchedLocationPricingResult.pairs`: that table holds only the
+airport/downtown shared assortment and would drop one-sided products that
+within-location event detection needs.
+
+**Event grain.** One candidate is one offer identity in one eligible capture
+interval of its canonical location. Its unique key (`EVENT_KEY_COLUMNS`) is
+`EVENT_IDENTITY_COLUMNS` plus `previous_period, current_period`.
+
+**Offer identity** (`EVENT_IDENTITY_COLUMNS`), which must be exactly equal at
+both endpoints before prices are compared:
+`canonical_city, canonical_location, pickup_date, return_date, car_name, car_type, transmission, seats, bags, currency, price_basis`.
+The values are the canonical-offer assessment's parsed values; nothing is
+trimmed, recased, fuzzy-matched, imputed or inferred. Price is never part of
+the identity. Raw source location labels are kept per endpoint as provenance
+(`previous_source_labels`, `current_source_labels`, for later alias
+diagnostics) and never split the canonical identity.
+
+**Canonical timestamp.** `scheduled_capture_period` from the authority-backed
+`CapturePeriodIndex`: the trusted UTC start of the scheduled hourly capture,
+exact `YYYYMMDDTHHMMSSZ` text, parsed strictly by `parse_scheduled_period`
+(missing, non-string, malformed or non-canonical values fail closed). Raw
+`job_id`, row order, `scrape_date`, `date_clean`, raw scrape or finish
+timestamps, the reporting day and the last time a product happened to appear
+are never used (`FORBIDDEN_TIMESTAMP_SOURCES`).
+
+**Exact one-hour adjacency.** `capture_timelines` builds one timeline per
+canonical location from the per-stream schedule and its assessed coverage,
+never from offers, so adjacency is independent of which products are visible.
+Every scheduled period is `eligible` (every contributing source stream is
+covered), `governed_exclusion` or `missing_capture` (excused or not). A
+`CaptureInterval` joins two schedule-adjacent eligible periods exactly one hour
+apart with the same contributing source streams; every other adjacent pair is
+a typed `IntervalBreak` (`governed_exclusion`, `missing_capture`,
+`not_one_hour`, `source_streams_changed`). A two-hour or longer gap is never
+bridged.
+
+**Why "previous" is not "last observed".** The previous capture is the
+immediately preceding scheduled capture of the location, not the last earlier
+capture where the same product was visible. A product seen at `t-2` and `t`
+but absent at `t-1` disappeared at `t-1` and appeared at `t`; it is never a
+price change from `t-2`.
+
+**Calgary exclusion.** The governed Calgary `INCOMPLETE_PARENT_CAPTURE`
+exclusion is analytically null and a hard break: it is never an interval
+endpoint, the captures on either side are never compared with each other, and
+no product appears or disappears because of it. The behaviour comes from the
+existing scheduled-coverage report and its resolved exclusion; no timestamp is
+hard-coded.
+
+**Terminal outcomes** (`TerminalOutcome`). For every eligible interval and
+every identity present at either endpoint, exactly one outcome:
+
+| Outcome | Rule |
+| --- | --- |
+| `ambiguous` | more than one canonical offer for the identity at either endpoint |
+| `appeared` | absent previously, exactly one offer currently |
+| `disappeared` | exactly one offer previously, absent currently |
+| `unchanged` | exactly one offer at both endpoints, zero-cent difference |
+| `increase` | exactly one offer at both endpoints, current cents greater |
+| `decrease` | exactly one offer at both endpoints, current cents lower |
+
+**Ambiguity precedence.** `ambiguous` takes precedence over every other
+outcome and never exposes a comparison price. It is never resolved by row
+order, minimum, maximum, mean, median, first or last value, or a Cartesian
+product.
+
+**Units.** Currency and price basis are part of the identity. A change of
+either is never an increase, decrease or unchanged price: the old unit
+disappears and the new unit appears. Nothing is converted, normalized or
+treated as equivalent.
+
+**Exact-cent comparison.** Prices are the canonical offer's exact
+non-negative integer `price_cents`; the change direction is current minus
+previous (`price_change_cents`); unchanged means a zero-cent difference.
+Display rounding never affects classification.
+
+**Future zero-baseline rule.** The later percentage change will use the
+previous price as its denominator. A zero previous price makes it undefined:
+such candidates are flagged (`zero_baseline`) and counted separately, never
+represented as infinity.
+
+**Invariants and fail-closed gates.** `assess_price_change_candidates` (or
+`price_change_candidates_from_pipeline` on one pipeline run) requires ready
+pricing readiness that is the assessment of exactly the supplied schedule and
+canonical-offer reports, offers bound to the same frames, a valid schedule
+assessment and capture evidence that agrees with the offers (every offer on an
+eligible capture, every eligible capture with offers); otherwise it returns a
+`BLOCKED` result with typed `PriceChangeBlocker` values and no candidates.
+Completed results enforce that candidates equal the sum of terminal outcomes
+per location and overall, event keys are unique, every candidate lies on an
+eligible one-hour interval, each outcome has the offer counts and prices its
+rule requires, and source frames are never modified.
+
+> **Confidentiality.** The candidate frame
+> (`PriceChangeCandidateResult.candidates`) holds proprietary event-level
+> values; it stays in memory, is excluded from `repr` and is never written.
+> `PriceChangeCandidateReport` holds counts, enum values and approved
+> configuration keys only. This section is metric-free and contains no real
+> results.
+
+**Deliberately deferred** to later issue #4 phases, after this contract is
+reviewed: synchronized-movement detection, persistence measurement, the
+Vancouver decrease case study, alert thresholds, anomaly scoring, monitoring
+rules, heatmaps, final event tables, notebook 03 and any commercial
+conclusion. The questions those phases will address:
 
 - Matched offer frequency from one hour to the next
 - Typical increase/decrease
-- Simultaneuous products move count
+- Simultaneous products move count
 - Do airport/downtown locations move together
 - New price persistence
 - Simultaneous assortment change
