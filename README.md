@@ -2501,13 +2501,38 @@ written.
 
 | Table | Grain and content |
 | --- | --- |
-| `event_interval_summary` | One row per approved canonical location and eligible interval. It holds the authority role, the six outcome counts, the comparable, price-change and assortment counts, the movement class, the three synchronization flags, the largest cohorts and magnitude summaries. Magnitudes are suppressed when an interval has a single change, because they would equal that offer's change. It also holds provenance counts, persistence counts for changes originating in the interval, the interval flag, `material_synchronized` and `interpretation_status`. |
+| `event_interval_summary` | One row per approved canonical location and eligible interval. It holds the authority role, the six outcome counts, the comparable, price-change and assortment counts, the movement class, the three synchronization flags, the largest cohorts and magnitude summaries. Cent magnitudes (`min_change_cents`, `max_change_cents`) are governed by the interval's changed offers (`magnitude_suppressed`). Percentage magnitudes (`median_abs_change_percent`, `max_abs_change_percent`) are governed separately by `change_percent_contributor_count`, the changed offers with a nonzero previous price (`percent_magnitude_suppressed`). It also holds provenance counts, persistence counts for changes originating in the interval, the interval flag, `material_synchronized` and `interpretation_status`. |
 | `material_synchronized_movements` | The intervals selected by `MATERIAL_SELECTION_RULE`: direction-synchronized, meaning at least two changed offers, all in one direction. This is a descriptive rule, not an alert threshold. Rows carry the rule and every denominator. |
 | `material_selection_reconciliation` | Intervals and price changes per movement class, with whether each class is selected. Selected plus excluded price changes equal all price changes. |
 | `airport_downtown_summary` | One row per city and shared eligible interval under the approved pairs. It holds matched products, airport-only and downtown-only products, the count of every `CrossLocationOutcome`, and the same-direction, same-cent and same-percent counts. |
 | `persistence_summary` | One row per location, role and direction. It holds changed events, testable events (with a following interval), comparable-following events (held + continued + reverted), each outcome, not-testable counts by reason, returns and overshoots, and shares with named denominators. Not-testable (right-censored or hard-break) events are never in a denominator. |
-| `final_vancouver_decrease` | Exactly one fixed-schema aggregate record. It no longer accepts arbitrary section, metric or value rows. Its approved fields are: `status` (`derived`, `no_decrease` or `city_unavailable`); `canonical_city`; the previous and current scheduled capture periods; `participating_locations`; `airport_involved`, `downtown_involved` and `all_locations_end_at_final_capture`; the six outcome counts; `comparable`, `price_change_count`, `assortment_event_count` and `changed_share_of_comparable`; the three synchronization flags and the largest cohorts; `magnitude_suppressed` with the decrease cent and percentage minimum, median and maximum, suppressed below two decreases; one `cross_<outcome>` count per cross-location outcome; provenance as four fixed category counts (`provenance_dual_alias_source`, `provenance_primary_alias_only`, `provenance_secondary_alias_only`, `provenance_other_canonical_location`), never raw source labels; one `persistence_<outcome>` count per outcome and one `not_testable_<reason>` count per reason; `persistence_testable`; and one `indicator_<FinalDecreaseIndicator>` flag per indicator. Derived-case fields must be empty unless the status is `derived`, and only `city_unavailable` has no city. The descriptive sentence (`FinalDecreaseCase.describe()`) is printed separately by the notebook and never stored in the table. |
+| `final_vancouver_decrease` | Exactly one fixed-schema aggregate record. It no longer accepts arbitrary section, metric or value rows. Its approved fields are: `status` (`derived`, `no_decrease` or `city_unavailable`); `canonical_city`; the previous and current scheduled capture periods; `participating_locations`; `airport_involved`, `downtown_involved` and `all_locations_end_at_final_capture`; the six outcome counts; `comparable`, `price_change_count`, `assortment_event_count` and `changed_share_of_comparable`; the three synchronization flags and the largest cohorts; the decrease contributor counts (`decrease_cent_contributor_count`, `decrease_percent_contributor_count`, `decrease_zero_denominator_count`), the suppression flags (`decrease_cent_magnitude_suppressed`, `decrease_percent_magnitude_suppressed`) and the decrease cent and percentage minimum, median and maximum, each governed by its own contributors; one `cross_<outcome>` count per cross-location outcome; provenance as four fixed category counts (`provenance_dual_alias_source`, `provenance_primary_alias_only`, `provenance_secondary_alias_only`, `provenance_other_canonical_location`), never raw source labels; one `persistence_<outcome>` count per outcome and one `not_testable_<reason>` count per reason; `persistence_testable`; and one `indicator_<FinalDecreaseIndicator>` flag per indicator. Derived-case fields must be empty unless the status is `derived`, and only `city_unavailable` has no city. The descriptive sentence (`FinalDecreaseCase.describe()`) is printed separately by the notebook and never stored in the table. |
 | `reconciliation_summary` | Each check with its expected and observed totals and its status. |
+
+**Magnitude suppression.** Every magnitude statistic is governed by its own
+contributing population. No statistic built from fewer than
+`MINIMUM_MAGNITUDE_CONTRIBUTORS` (two) contributors is presented. Zero
+contributors means no statistic, and one contributor means a suppressed
+statistic.
+
+- Decrease cent summaries are governed by `decrease_cent_contributor_count`,
+  which counts every decrease, since each has an exact cent change.
+- Decrease percentage summaries are governed by
+  `decrease_percent_contributor_count`, the decreases with a nonzero previous
+  price. Zero-denominator decreases are counted separately and never
+  contribute to a percentage.
+- Total price-change, comparable, candidate or overall percent-valid counts
+  are never a privacy denominator for a decrease-only statistic. For
+  example, one decrease plus one increase is still suppressed.
+
+Suppressed values are unavailable (empty), never zero. The suppression flag
+is set when contributors exist but are too few. Suppression happens in the
+tested package layer (`magnitude_disclosable`, `final_case_table`) before the
+table exists, so it precedes notebook display, CSV export, the manifest and
+any `repr`. Validation rejects any magnitude that disagrees with its
+contributor count or suppression flag, again immediately before export.
+Reconciliation also checks the contributor counts against the validated
+decrease rows and the presented values against the validated case.
 
 Sanitized means safe for the aggregate notebook presentation and protected
 against product-level disclosure. It does **not** mean approved for

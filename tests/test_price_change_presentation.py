@@ -9,6 +9,7 @@ canonical-offer policy of the current authority record).
 from __future__ import annotations
 
 import dataclasses
+from fractions import Fraction
 import json
 import os
 import re
@@ -235,7 +236,8 @@ def test_final_vancouver_table_is_a_subset_of_the_validated_case(rich, tables) -
         n for _, n in case.counts)
     assert (f["participating_locations"], f["airport_involved"], f["downtown_involved"]) == (2, True, True)
     assert f["all_locations_end_at_final_capture"] is True
-    assert f["decrease_cents_min"] is not None and f["magnitude_suppressed"] is False
+    assert f["decrease_cents_min"] is not None and f["decrease_cent_magnitude_suppressed"] is False
+    assert f["decrease_percent_min"] is not None and f["decrease_percent_magnitude_suppressed"] is False
     s = tables.event_interval_summary
     sub = s[(s["canonical_city"] == "vancouver") & (s[CUR] == case.current_period)]
     assert int(sub["price_change_count"].sum()) == case.price_change_count
@@ -737,3 +739,180 @@ def test_exported_final_case_csv_holds_only_the_fixed_aggregate_fields(tables, t
     assert tuple(frame.columns) == SANITIZED_TABLE_SCHEMAS[FINAL] and len(frame) == 1
     text = final.read_text(encoding="utf-8")
     assert "SYNTH" not in text and "|" not in text and "Thurlow" not in text and "not proof" not in text
+
+
+# ============================================================================ contributor-based magnitude suppression
+
+CENTS = ("decrease_cents_min", "decrease_cents_median", "decrease_cents_max")
+PERCENTS = ("decrease_percent_min", "decrease_percent_median", "decrease_percent_max")
+VAN_AIR = ("vancouver", "Vancouver Int Airport")
+
+
+def final_of(products):  # type: ignore[no-untyped-def]
+    """(validated final case, sanitized final record) for synthetic products (final interval = hours 1 -> 2)."""
+    result = analyze(products)
+    tables = build_presentation_tables(result)
+    return result.report.final_decrease, tables.final_vancouver_decrease.iloc[0].to_dict(), tables
+
+
+def test_the_threshold_is_a_named_validated_constant() -> None:
+    assert pcp.MINIMUM_MAGNITUDE_CONTRIBUTORS == 2
+    assert [pcp.magnitude_disclosable(n) for n in (0, 1, 2, 3)] == [False, False, True, True]
+    assert [pcp.magnitude_suppressed(n) for n in (0, 1, 2)] == [False, True, False]
+    for bad in (-1, True, 1.0, None):
+        with pytest.raises(ValueError):
+            pcp.magnitude_disclosable(bad)
+
+
+def test_one_decrease_plus_one_increase_keeps_every_decrease_magnitude_suppressed() -> None:
+    """Regression: two price changes in total, but the decrease statistics have one contributor."""
+    case, f, tables = final_of(merge(path(VAN_DOWN, (50.0, 50.0, 45.0)), path(VAN_DOWN, (60.0, 60.0, 66.0), "SYNTH Car B")))
+    assert f["price_change_count"] == case.price_change_count == 2
+    assert (f["decrease"], f["increase"]) == (1, 1)
+    assert f["decrease_cent_contributor_count"] == f["decrease_percent_contributor_count"] == 1
+    assert all(f[c] is None for c in (*CENTS, *PERCENTS))                     # never zero, never the value
+    assert f["decrease_cent_magnitude_suppressed"] is True and f["decrease_percent_magnitude_suppressed"] is True
+    assert dict(case.decrease_cents)["min"] == -500.0                          # the validated case keeps it in memory
+    text = all_text(tables.final_vancouver_decrease)
+    assert "-500" not in text and "-10.0" not in text
+
+
+@pytest.mark.parametrize("products", [
+    path(VAN_DOWN, (50.0, 50.0, 45.0)),                                        # one decrease, nothing else
+    merge(path(VAN_DOWN, (50.0, 50.0, 45.0)), *(path(VAN_DOWN, (p, p, p), f"SYNTH Car {i}")
+                                                for i, p in enumerate((60.0, 70.0, 80.0)))),   # plus unchanged offers
+])
+def test_one_decrease_is_suppressed_whatever_else_is_in_the_interval(products) -> None:  # type: ignore[no-untyped-def]
+    case, f, _ = final_of(products)
+    assert f["decrease"] == 1 and f["decrease_cent_contributor_count"] == 1
+    assert all(f[c] is None for c in (*CENTS, *PERCENTS))
+    assert f["decrease_cent_magnitude_suppressed"] and f["decrease_percent_magnitude_suppressed"]
+
+
+def test_two_decreases_disclose_correct_exact_statistics() -> None:
+    case, f, _ = final_of(merge(path(VAN_DOWN, (50.0, 50.0, 45.0)), path(VAN_DOWN, (80.0, 80.0, 60.0), "SYNTH Car B")))
+    assert f["decrease_cent_contributor_count"] == f["decrease_percent_contributor_count"] == 2
+    assert (f["decrease_cents_min"], f["decrease_cents_median"], f["decrease_cents_max"]) == (-2000.0, -1250.0, -500.0)
+    assert (f["decrease_percent_min"], f["decrease_percent_median"], f["decrease_percent_max"]) == (
+        -25.0, float(Fraction(-35, 2)), -10.0)                                 # exact rationals, then floats
+    assert not f["decrease_cent_magnitude_suppressed"] and not f["decrease_percent_magnitude_suppressed"]
+    assert f["decrease_zero_denominator_count"] == 0
+
+
+def test_contributor_counts_reconcile_and_are_row_order_independent(tables) -> None:  # type: ignore[no-untyped-def]
+    case, f, t = final_of(merge(path(VAN_DOWN, (50.0, 50.0, 45.0)), path(VAN_AIR, (80.0, 80.0, 60.0)),
+                                path(VAN_DOWN, (60.0, 60.0, 66.0), "SYNTH Car B")))
+    assert f["decrease"] == case.decrease_cent_contributors == 2
+    assert case.decrease_percent_contributors + case.decrease_zero_denominator == f["decrease"]
+    recon = t.reconciliation_summary.set_index("check")
+    for check in ("final_case_decreases_equal_outcome_counts", "final_case_cent_contributors_equal_decrease_rows",
+                  "final_case_percent_contributors_equal_percent_valid_decreases",
+                  "final_case_zero_denominator_decreases_equal_remaining_decreases",
+                  "final_case_presented_magnitudes_equal_validated_case",
+                  "interval_percent_contributors_equal_percent_valid_changes"):
+        assert recon.loc[check, "status"] == "reconciled", check
+    from ql2_sixt_canada_analysis.price_change_analysis import analyze_price_change_events
+
+    result = analyze(merge(path(VAN_DOWN, (50.0, 50.0, 45.0)), path(VAN_AIR, (80.0, 80.0, 60.0)),
+                           path(VAN_DOWN, (60.0, 60.0, 66.0), "SYNTH Car B")))
+    shuffled = dataclasses.replace(result.events, candidates=result.events.candidates.sample(
+        frac=1.0, random_state=2).reset_index(drop=True))
+    again = build_presentation_tables(analyze_price_change_events(shuffled, location_authority=result.location_authority))
+    pd.testing.assert_frame_equal(again.final_vancouver_decrease, t.final_vancouver_decrease)
+
+
+def test_zero_decreases_produce_no_magnitude_statistics() -> None:
+    _, f, _ = final_of(path(VAN_DOWN, (50.0, 45.0, 45.0)))                    # the decrease is not at the end
+    assert f["status"] == "derived" and f["decrease"] == 1
+    case, g, _ = final_of(path(VAN_DOWN, (50.0, 55.0, 55.0)))
+    assert g["status"] == "no_decrease" and all(g[c] is None for c in (*CENTS, *PERCENTS))
+    assert g["decrease_cent_contributor_count"] is None and case.decrease_cent_contributors == 0
+
+
+# ---- percentage populations narrower than the decrease population (defensive: built from a synthetic case)
+
+
+def synthetic_case(case, decreases: int, percent_valid: int, cents=(-900.0, -600.0, -300.0), percents=(-20.0, -10.0, -5.0)):  # type: ignore[no-untyped-def]
+    counts = dict(case.counts)
+    counts.update(decrease=decreases, increase=0, unchanged=counts["unchanged"])
+    return dataclasses.replace(
+        case, counts=tuple(counts.items()), price_change_count=decreases,
+        persistence=(("not_testable", decreases),), not_testable_reasons=(("right_censored_final_capture", decreases),),
+        decrease_cents=tuple(zip(("min", "median", "max"), cents)),
+        decrease_percent=tuple(zip(("min", "median", "max"), percents)) if percent_valid else (),
+        decrease_cent_contributors=decreases, decrease_percent_contributors=percent_valid,
+        decrease_zero_denominator=decreases - percent_valid)
+
+
+@pytest.mark.parametrize(("decreases", "valid", "cents_shown", "percent_shown"), [
+    (2, 1, True, False),                     # two decreases, one percent-valid: cents allowed, percent suppressed
+    (3, 1, True, False),                     # three decreases, one percent-valid
+    (2, 0, True, False),                     # no percent-valid decrease: no percentage statistic at all
+    (2, 2, True, True),
+])
+def test_percent_statistics_follow_percent_valid_decreases_only(rich, decreases, valid, cents_shown, percent_shown) -> None:  # type: ignore[no-untyped-def]
+    case = synthetic_case(rich.report.final_decrease, decreases, valid)
+    frame = pcp.final_case_table(case, rich.location_authority)
+    validate_sanitized_frame("final_vancouver_decrease", frame)
+    f = frame.iloc[0].to_dict()
+    assert all((f[c] is not None) == cents_shown for c in CENTS)
+    assert all((f[c] is not None) == percent_shown for c in PERCENTS)
+    assert f["decrease_percent_magnitude_suppressed"] is (0 < valid < 2)
+    assert f["decrease_zero_denominator_count"] == decreases - valid
+    assert not any(isinstance(v, float) and not np.isfinite(v) for v in f.values() if v is not None)
+
+
+def test_inconsistent_case_contributors_are_rejected(rich) -> None:  # type: ignore[no-untyped-def]
+    case = rich.report.final_decrease
+    for changes in (dict(decrease_cent_contributors=1), dict(decrease_percent_contributors=1),
+                    dict(decrease_zero_denominator=1), dict(decrease_cent_contributors=True),
+                    dict(decrease_percent=()), dict(decrease_cents=())):
+        with pytest.raises(PriceChangeReconciliationError):
+            dataclasses.replace(case, **changes)
+
+
+@pytest.mark.parametrize("changes", [
+    dict(decrease_cent_magnitude_suppressed=True),                            # marked suppressed, values present
+    dict(decrease_percent_magnitude_suppressed=True),
+    dict(decrease_percent_contributor_count=1, decrease_zero_denominator_count=1),   # too few for the percents shown
+    dict(decrease_cent_contributor_count=1),                                  # disagrees with the decrease count
+    dict(decrease_cents_median=None),                                         # partially suppressed
+])
+def test_tampered_final_magnitudes_are_rejected(tables, changes) -> None:  # type: ignore[no-untyped-def]
+    frame = tables.final_vancouver_decrease.copy().astype(object)
+    for column, value in changes.items():
+        frame[column] = pd.Series([value], dtype=object)
+    with pytest.raises(PrivacyViolationError, match="rule magnitude_suppression"):
+        validate_sanitized_frame("final_vancouver_decrease", frame)
+
+
+def test_suppressed_values_cannot_be_reinserted_before_export(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    t = build_presentation_tables(analyze(merge(path(VAN_DOWN, (50.0, 50.0, 45.0)),
+                                                path(VAN_DOWN, (60.0, 60.0, 66.0), "SYNTH Car B"))))
+    assert t.final_vancouver_decrease.loc[0, "decrease_cents_min"] is None
+    t.final_vancouver_decrease.loc[0, "decrease_cents_min"] = -500.0          # mutated after construction
+    with pytest.raises(PrivacyViolationError, match="rule magnitude_suppression"):
+        export_sanitized_tables(t, tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_interval_percent_magnitudes_follow_percent_valid_changes() -> None:
+    result = analyze(merge(path(TOR_DOWN, (0.0, 5.0)), path(TOR_DOWN, (50.0, 55.0), "SYNTH Car B")))
+    s = build_presentation_tables(result).event_interval_summary
+    row = s[(s["canonical_location"] == TOR_DOWN[1]) & (s["price_change_count"] == 2)].iloc[0]
+    assert row["change_percent_contributor_count"] == 1 and bool(row["percent_magnitude_suppressed"])
+    assert pd.isna(row["median_abs_change_percent"]) and pd.isna(row["max_abs_change_percent"])
+    assert row["min_change_cents"] == 500 and not row["magnitude_suppressed"]   # two cent contributors
+    tampered = s.copy().astype(object)
+    index = row.name
+    tampered.loc[index, "median_abs_change_percent"] = 10.0
+    tampered.loc[index, "max_abs_change_percent"] = 10.0
+    with pytest.raises(PrivacyViolationError, match="rule magnitude_suppression"):
+        validate_sanitized_frame("event_interval_summary", tampered)
+
+
+def test_detailed_table_is_unaffected_and_still_opt_in(rich, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    detail = build_detailed_event_table(rich)
+    assert tuple(detail.columns) == DETAILED_EVENT_TABLE_COLUMNS and len(detail) == len(rich.events.candidates)
+    assert presentation_from_pipeline(pipeline_result(synthetic_world(products=RICH)),
+                                      output_dir=tmp_path / "o").paths.get("detailed_event_table") is None

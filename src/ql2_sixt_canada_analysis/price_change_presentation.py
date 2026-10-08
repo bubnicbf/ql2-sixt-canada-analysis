@@ -34,7 +34,15 @@ generic section/metric/value table: the final Vancouver decrease is one
 fixed-schema record whose provenance is four category counts. Unknown or
 malformed fields fail closed, and validation is repeated immediately before
 export. No product identity, rental dates, individual prices or changes, source
-provenance strings, raw job or row identifiers or file paths can pass. Magnitude summaries
+provenance strings, raw job or row identifiers or file paths can pass.
+
+Every magnitude statistic is governed by its own contributing population
+(:func:`magnitude_disclosable`, minimum :data:`MINIMUM_MAGNITUDE_CONTRIBUTORS`):
+decrease cents by all decreases, decrease percentages by percent-valid decreases,
+interval cents by changed offers and interval percentages by changed offers with
+a nonzero previous price. Total price-change counts are never a denominator for
+a narrower statistic. Suppressed values are absent (never zero) and are withheld
+before any table exists. Magnitude summaries
 of an interval with fewer than two changed offers are suppressed (they would
 equal one offer's change). Sanitized tables are still **confidential local
 artifacts**: they protect against product-level disclosure in the notebook; they
@@ -103,6 +111,7 @@ __all__ = [
     "HEATMAP_SOURCE_COLUMNS",
     "MANIFEST_FILENAME",
     "MATERIAL_SELECTION_RULE",
+    "MINIMUM_MAGNITUDE_CONTRIBUTORS",
     "PRESENTATION_OUTPUT_DIR_ENV_VAR",
     "RECONCILIATION_CHECKS",
     "SANITIZED_COLUMN_ALLOWLIST",
@@ -118,8 +127,11 @@ __all__ = [
     "build_detailed_event_table",
     "build_presentation_tables",
     "export_sanitized_tables",
+    "final_case_table",
     "heatmap_png",
     "heatmap_source_frame",
+    "magnitude_disclosable",
+    "magnitude_suppressed",
     "presentation_settings",
     "presentation_from_pipeline",
     "render_price_change_heatmap",
@@ -139,7 +151,34 @@ PRESENTATION_OUTPUT_DIR_ENV_VAR = "QL2_SIXT_PRICE_CHANGE_OUTPUT_DIR"
 DETAIL_EXPORT_ENV_VAR = "QL2_SIXT_PRICE_CHANGE_WRITE_DETAIL"
 #: The documented material-movement selection rule (descriptive contract; not an alert threshold).
 MATERIAL_SELECTION_RULE = "direction_synchronized: at least two changed offers, all in one direction"
-_MIN_CHANGES_FOR_MAGNITUDES = 2
+#: The approved minimum number of contributing observations behind any presented magnitude statistic.
+MINIMUM_MAGNITUDE_CONTRIBUTORS = 2
+
+
+def _validated_threshold(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+        raise ValueError("the magnitude contributor threshold is an integer of at least two")
+    return value
+
+
+_MIN_CONTRIBUTORS = _validated_threshold(MINIMUM_MAGNITUDE_CONTRIBUTORS)
+
+
+def magnitude_disclosable(contributors: object) -> bool:
+    """Whether a magnitude statistic over exactly ``contributors`` observations may be presented.
+
+    The count must be the statistic's own contributing population (for example
+    percent-valid decreases for a decrease percentage), never a broader total.
+    """
+    if isinstance(contributors, (bool, np.bool_)) or not isinstance(contributors, (int, np.integer)) \
+            or contributors < 0:
+        raise ValueError("a contributor count is a non-negative integer")
+    return int(contributors) >= _MIN_CONTRIBUTORS
+
+
+def magnitude_suppressed(contributors: object) -> bool:
+    """Contributors exist but are too few: the statistic exists and is withheld (zero contributors: no statistic)."""
+    return not magnitude_disclosable(contributors) and int(contributors) > 0  # type: ignore[call-overload]
 _OUTCOMES = tuple(o.value for o in TerminalOutcome)
 _PERSIST = tuple(f"persistence_{o.value}" for o in PersistenceOutcome)
 
@@ -177,7 +216,8 @@ _SUMMARY_SCHEMA = (*_INTERVAL_KEY, "candidates", *_OUTCOMES, "comparable", "pric
                    "assortment_event_count", "percent_valid", "zero_denominator", "previous_offers", "current_offers",
                    "changed_share_of_comparable", "movement_class", "direction_synchronized",
                    "exact_cent_synchronized", "exact_percent_synchronized", "largest_same_cent_cohort",
-                   "largest_same_percent_cohort", "magnitude_suppressed", "min_change_cents", "max_change_cents",
+                   "largest_same_percent_cohort", "magnitude_suppressed", "change_percent_contributor_count",
+                   "percent_magnitude_suppressed", "min_change_cents", "max_change_cents",
                    "median_abs_change_percent", "max_abs_change_percent", "multi_source_candidates",
                    "provenance_changed_candidates", *_PERSIST, "interval_flag", "material_synchronized",
                    "interpretation_status")
@@ -190,7 +230,9 @@ _FINAL_CASE_DERIVED = (
     PREV, CUR, "participating_locations", "airport_involved", "downtown_involved",
     "all_locations_end_at_final_capture", *_OUTCOMES, "comparable", "price_change_count", "assortment_event_count",
     "changed_share_of_comparable", "direction_synchronized", "exact_cent_synchronized",
-    "exact_percent_synchronized", "largest_same_cent_cohort", "largest_same_percent_cohort", "magnitude_suppressed",
+    "exact_percent_synchronized", "largest_same_cent_cohort", "largest_same_percent_cohort",
+    "decrease_cent_contributor_count", "decrease_percent_contributor_count", "decrease_zero_denominator_count",
+    "decrease_cent_magnitude_suppressed", "decrease_percent_magnitude_suppressed",
     "decrease_cents_min", "decrease_cents_median", "decrease_cents_max", "decrease_percent_min",
     "decrease_percent_median", "decrease_percent_max", *_CROSS_OUTCOMES, *_PROVENANCE_CATEGORIES,
     *(f"persistence_{o.value}" for o in PersistenceOutcome),
@@ -209,14 +251,20 @@ RECONCILIATION_CHECKS: tuple[str, ...] = (
     "heatmap_decreases_equal_interval_summary", "heatmap_interval_cells_equal_intervals",
     "final_case_price_changes_subset_of_intervals", "final_case_locations_subset_of_intervals",
     "final_case_assortment_events_equal_case", "final_case_persistence_partitions_case_changes",
-    "final_case_cross_location_equal_cross_table", "final_case_provenance_equal_case_candidates")
+    "final_case_cross_location_equal_cross_table", "final_case_provenance_equal_case_candidates",
+    "final_case_decreases_equal_outcome_counts", "final_case_cent_contributors_equal_decrease_rows",
+    "final_case_percent_contributors_equal_percent_valid_decreases",
+    "final_case_zero_denominator_decreases_equal_remaining_decreases",
+    "final_case_presented_magnitudes_equal_validated_case",
+    "interval_percent_contributors_equal_percent_valid_changes")
 #: Exact column order of every sanitized aggregate table.
 SANITIZED_TABLE_SCHEMAS: Mapping[str, tuple[str, ...]] = {
     "event_interval_summary": _SUMMARY_SCHEMA,
     "material_synchronized_movements": (
         *_INTERVAL_KEY, "selection_rule", "movement_class", "comparable", "price_change_count", "increase",
         "decrease", "changed_share_of_comparable", "exact_cent_synchronized", "exact_percent_synchronized",
-        "largest_same_cent_cohort", "largest_same_percent_cohort", "min_change_cents", "max_change_cents",
+        "largest_same_cent_cohort", "largest_same_percent_cohort", "magnitude_suppressed",
+        "change_percent_contributor_count", "percent_magnitude_suppressed", "min_change_cents", "max_change_cents",
         "median_abs_change_percent", "max_abs_change_percent", "assortment_event_count", "ambiguous",
         *_PERSIST, "interval_flag"),
     "material_selection_reconciliation": ("movement_class", "selected", "intervals", "price_change_count"),
@@ -279,7 +327,8 @@ _TABLE_ENUMS: Mapping[tuple[str, str], frozenset[str]] = {
     ("reconciliation_summary", "status"): frozenset({"reconciled", "failed"}),
 }
 _FLAGS = frozenset({"direction_synchronized", "exact_cent_synchronized", "exact_percent_synchronized",
-                    "magnitude_suppressed", "material_synchronized", "selected", "airport_involved",
+                    "magnitude_suppressed", "percent_magnitude_suppressed", "decrease_cent_magnitude_suppressed",
+                    "decrease_percent_magnitude_suppressed", "material_synchronized", "selected", "airport_involved",
                     "downtown_involved", "all_locations_end_at_final_capture", "persistence_testable",
                     *(f"indicator_{i.value}" for i in FinalDecreaseIndicator)})
 _SHARES = frozenset({"changed_share_of_comparable", "held_share_of_comparable_following",
@@ -398,8 +447,12 @@ def _semantic(name: str, frame: pd.DataFrame, approved: frozenset[tuple[str, str
         for column in _LOCATIONS & set(columns):
             if (city, row[column]) not in approved:
                 raise PrivacyViolationError(f"rule value_domain: column {column} is not an approved location")
+        if name in ("event_interval_summary", "material_synchronized_movements"):
+            _check_interval_suppression(row)
         if name == "final_vancouver_decrease":
             derived = row["status"] == FinalDecreaseStatus.DERIVED.value
+            if derived:
+                _check_final_suppression(row)
             if derived and any(_missing(row[c]) for c in _FINAL_CASE_DERIVED if c not in _SHARES | _SIGNED
                                | _PERCENTS):
                 raise PrivacyViolationError("rule status_fields: a derived case needs every derived field")
@@ -417,6 +470,42 @@ def _semantic(name: str, frame: pd.DataFrame, approved: frozenset[tuple[str, str
            "reconciliation_summary": ["check"]}.get(name)
     if key and frame.duplicated(key).any():
         raise PrivacyViolationError("rule duplicate_record: a sanitized record is repeated")
+
+
+def _present(row: dict, columns: Sequence[str]) -> bool:
+    values = [not _missing(row[c]) for c in columns]
+    if any(values) and not all(values):
+        raise PrivacyViolationError("rule magnitude_suppression: a magnitude summary is partially present")
+    return all(values)
+
+
+def _check_interval_suppression(row: dict) -> None:
+    """Interval magnitudes follow their own contributors: changes for cents, percent-valid changes for percents."""
+    changes, percents = row["price_change_count"], row["change_percent_contributor_count"]
+    if percents > changes:
+        raise PrivacyViolationError("rule magnitude_suppression: percent contributors exceed changed offers")
+    if _present(row, ("min_change_cents", "max_change_cents")) != magnitude_disclosable(changes) \
+            or bool(row["magnitude_suppressed"]) != magnitude_suppressed(changes):
+        raise PrivacyViolationError("rule magnitude_suppression: cent magnitudes disagree with their contributors")
+    if _present(row, ("median_abs_change_percent", "max_abs_change_percent")) != magnitude_disclosable(percents) \
+            or bool(row["percent_magnitude_suppressed"]) != magnitude_suppressed(percents):
+        raise PrivacyViolationError("rule magnitude_suppression: percent magnitudes disagree with their contributors")
+
+
+def _check_final_suppression(row: dict) -> None:
+    """Decrease magnitudes follow decrease contributors: all decreases for cents, percent-valid ones for percents."""
+    decreases = row["decrease"]
+    cents, percents = row["decrease_cent_contributor_count"], row["decrease_percent_contributor_count"]
+    if cents != decreases or percents + row["decrease_zero_denominator_count"] != decreases or percents > cents:
+        raise PrivacyViolationError("rule magnitude_suppression: contributor counts disagree with the decreases")
+    cent_columns = ("decrease_cents_min", "decrease_cents_median", "decrease_cents_max")
+    percent_columns = ("decrease_percent_min", "decrease_percent_median", "decrease_percent_max")
+    if _present(row, cent_columns) != magnitude_disclosable(cents) \
+            or bool(row["decrease_cent_magnitude_suppressed"]) != magnitude_suppressed(cents):
+        raise PrivacyViolationError("rule magnitude_suppression: cent magnitudes disagree with their contributors")
+    if _present(row, percent_columns) != magnitude_disclosable(percents) \
+            or bool(row["decrease_percent_magnitude_suppressed"]) != magnitude_suppressed(percents):
+        raise PrivacyViolationError("rule magnitude_suppression: percent magnitudes disagree with their contributors")
 
 
 def validate_sanitized_frame(name: str, frame: object, *,
@@ -513,16 +602,28 @@ def _interpretation(row: dict) -> str:
     return I.NO_MOVEMENT.value
 
 
-def _interval_summary(table: pd.DataFrame) -> pd.DataFrame:
+def _percent_contributors(candidates: pd.DataFrame) -> Counter:
+    """Changed candidates with a nonzero previous price per location interval (counts only)."""
+    changed = candidates["outcome"].isin([TerminalOutcome.INCREASE.value, TerminalOutcome.DECREASE.value]) \
+        & candidates["percent_valid"].astype(bool)
+    rows = candidates.loc[changed, ["canonical_city", "canonical_location", PREV, CUR]]
+    return Counter(tuple(r) for r in rows.itertuples(index=False, name=None))
+
+
+def _interval_summary(table: pd.DataFrame, candidates: pd.DataFrame) -> pd.DataFrame:
+    contributors = _percent_contributors(candidates)
     rows = []
     for record in table.to_dict("records"):
         out = {c: record[c] for c in EVENT_TABLE_COLUMNS}
-        suppress = record["price_change_count"] < _MIN_CHANGES_FOR_MAGNITUDES
-        out["magnitude_suppressed"] = bool(suppress and record["price_change_count"] > 0)
-        if suppress:
-            for column in ("min_change_cents", "max_change_cents", "median_abs_change_percent",
-                           "max_abs_change_percent"):
-                out[column] = None
+        changes = int(record["price_change_count"])
+        percents = contributors[(record["canonical_city"], record["canonical_location"], record[PREV], record[CUR])]
+        out["magnitude_suppressed"] = magnitude_suppressed(changes)
+        out["change_percent_contributor_count"] = percents
+        out["percent_magnitude_suppressed"] = magnitude_suppressed(percents)
+        if not magnitude_disclosable(changes):
+            out["min_change_cents"] = out["max_change_cents"] = None
+        if not magnitude_disclosable(percents):
+            out["median_abs_change_percent"] = out["max_abs_change_percent"] = None
         out["material_synchronized"] = bool(record["direction_synchronized"])
         out["interpretation_status"] = _interpretation(record)
         rows.append(out)
@@ -531,7 +632,7 @@ def _interval_summary(table: pd.DataFrame) -> pd.DataFrame:
         frame = pd.DataFrame(columns=list(_SUMMARY_SCHEMA))
     return frame.astype({c: bool for c in ("direction_synchronized", "exact_cent_synchronized",
                                            "exact_percent_synchronized", "magnitude_suppressed",
-                                           "material_synchronized")})
+                                           "percent_magnitude_suppressed", "material_synchronized")})
 
 
 def _material(summary: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -602,9 +703,9 @@ def _persistence_table(analysis: PriceChangeAnalysisResult) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=list(schema))
 
 
-def _provenance_categories(case, analysis: PriceChangeAnalysisResult) -> dict[str, int]:  # type: ignore[no-untyped-def]
+def _provenance_categories(case, authority: object) -> dict[str, int]:  # type: ignore[no-untyped-def]
     """Fixed aggregate provenance categories of the case (raw label sets never leave this function)."""
-    policy = getattr(analysis.location_authority, "policy", None)
+    policy = getattr(authority, "policy", None)
     primary = getattr(policy, "first", (None, None))[1]
     secondary = getattr(policy, "second", (None, None))[1]
     composition = dict.fromkeys(_PROVENANCE_CATEGORIES, 0)
@@ -622,17 +723,31 @@ def _provenance_categories(case, analysis: PriceChangeAnalysisResult) -> dict[st
 
 
 def _final_case(analysis: PriceChangeAnalysisResult) -> pd.DataFrame:
-    """One fixed-schema aggregate record of the derived final decrease (no free text, labels or values)."""
-    from ql2_sixt_canada_analysis.authority_decisions import LocationRoleDecision
+    return final_case_table(analysis.report.final_decrease, analysis.location_authority)
 
-    case = analysis.report.final_decrease
+
+def final_case_table(case: object, location_authority: object = None) -> pd.DataFrame:
+    """The sanitized one-record table of a validated ``FinalDecreaseCase`` (no free text, labels or values).
+
+    Each magnitude summary is governed by its own contributing population and
+    suppressed here, before the table exists: decrease cents by the decrease
+    cent contributors, decrease percentages by the percent-valid decreases.
+    ``location_authority`` supplies the governed alias labels for the provenance
+    categories (raw labels never leave this function).
+    """
+    from ql2_sixt_canada_analysis.authority_decisions import LocationRoleDecision
+    from ql2_sixt_canada_analysis.price_change_analysis import FinalDecreaseCase
+
+    if not isinstance(case, FinalDecreaseCase):
+        raise TypeError("case must be a FinalDecreaseCase")
     row: dict[str, object] = dict.fromkeys(SANITIZED_TABLE_SCHEMAS["final_vancouver_decrease"])
     row["status"] = case.status.value
     row["canonical_city"] = case.canonical_city
     if case.status is FinalDecreaseStatus.DERIVED:
         counts = dict(case.counts)
         roles = {role for _, role, _ in case.locations}
-        suppressed = counts.get(TerminalOutcome.DECREASE.value, 0) < _MIN_CHANGES_FOR_MAGNITUDES
+        cents_ok = magnitude_disclosable(case.decrease_cent_contributors)
+        percent_ok = magnitude_disclosable(case.decrease_percent_contributors)
         row.update({
             PREV: case.previous_period, CUR: case.current_period, "participating_locations": len(case.locations),
             "airport_involved": LocationRoleDecision.AIRPORT.value in roles,
@@ -646,11 +761,17 @@ def _final_case(analysis: PriceChangeAnalysisResult) -> pd.DataFrame:
             "exact_cent_synchronized": case.exact_cent_synchronized,
             "exact_percent_synchronized": case.exact_percent_synchronized,
             "largest_same_cent_cohort": case.largest_same_cent_cohort,
-            "largest_same_percent_cohort": case.largest_same_percent_cohort, "magnitude_suppressed": suppressed,
-            **{f"decrease_cents_{k}": (None if suppressed else float(v)) for k, v in case.decrease_cents},
-            **{f"decrease_percent_{k}": (None if suppressed else float(v)) for k, v in case.decrease_percent},
+            "largest_same_percent_cohort": case.largest_same_percent_cohort,
+            "decrease_cent_contributor_count": case.decrease_cent_contributors,
+            "decrease_percent_contributor_count": case.decrease_percent_contributors,
+            "decrease_zero_denominator_count": case.decrease_zero_denominator,
+            "decrease_cent_magnitude_suppressed": magnitude_suppressed(case.decrease_cent_contributors),
+            "decrease_percent_magnitude_suppressed": magnitude_suppressed(case.decrease_percent_contributors),
+            # Suppression happens here, before the table exists: withheld values are never emitted.
+            **{f"decrease_cents_{k}": float(v) for k, v in case.decrease_cents if cents_ok},
+            **{f"decrease_percent_{k}": float(v) for k, v in case.decrease_percent if percent_ok},
             **{f"cross_{o.value}": int(dict(case.cross_location).get(o.value, 0)) for o in CrossLocationOutcome},
-            **_provenance_categories(case, analysis),
+            **_provenance_categories(case, location_authority),
             **{f"persistence_{o.value}": int(dict(case.persistence).get(o.value, 0)) for o in PersistenceOutcome},
             **{f"not_testable_{r.value}": int(dict(case.not_testable_reasons).get(r.value, 0))
                for r in NotTestableReason},
@@ -666,7 +787,7 @@ def _check(rows: list, name: str, expected: int, observed: int) -> None:
     rows.append((name, int(expected), int(observed), "reconciled" if int(expected) == int(observed) else "failed"))
 
 
-def _reconciliation(analysis, summary, material, selection, cross, persistence, heat):  # type: ignore[no-untyped-def]
+def _reconciliation(analysis, summary, material, selection, cross, persistence, heat, final):  # type: ignore[no-untyped-def]
     overall = analysis.events.report.overall
     report = analysis.report
     rows: list = []
@@ -701,6 +822,9 @@ def _reconciliation(analysis, summary, material, selection, cross, persistence, 
            int(heat["increase"].fillna(0).sum()))
     _check(rows, "heatmap_decreases_equal_interval_summary", int(summary["decrease"].sum()),
            int(heat["decrease"].fillna(0).sum()))
+    contributors = _percent_contributors(analysis.events.candidates)
+    _check(rows, "interval_percent_contributors_equal_percent_valid_changes", sum(contributors.values()),
+           int(summary["change_percent_contributor_count"].sum()))
     _check(rows, "heatmap_interval_cells_equal_intervals", len(summary), int((heat["cell_state"] == "interval").sum()))
     case = report.final_decrease
     if case.status is FinalDecreaseStatus.DERIVED:
@@ -721,7 +845,27 @@ def _reconciliation(analysis, summary, material, selection, cross, persistence, 
         _check(rows, "final_case_cross_location_equal_cross_table", sum(n for _, n in case.cross_location),
                len(rows_cross))
         _check(rows, "final_case_provenance_equal_case_candidates", int(sub["candidates"].sum()),
-               sum(_provenance_categories(case, analysis).values()))
+               sum(_provenance_categories(case, analysis.location_authority).values()))
+        cand = analysis.events.candidates
+        decreases = cand[(cand["canonical_city"] == case.canonical_city) & (cand[PREV] == case.previous_period)
+                         & (cand[CUR] == case.current_period) & (cand["outcome"] == TerminalOutcome.DECREASE.value)]
+        _check(rows, "final_case_decreases_equal_outcome_counts", counts.get("decrease", 0), int(sub["decrease"].sum()))
+        _check(rows, "final_case_cent_contributors_equal_decrease_rows", case.decrease_cent_contributors,
+               int(decreases["change_cents"].notna().sum()))
+        _check(rows, "final_case_percent_contributors_equal_percent_valid_decreases",
+               case.decrease_percent_contributors, int(decreases["percent_valid"].astype(bool).sum()))
+        _check(rows, "final_case_zero_denominator_decreases_equal_remaining_decreases",
+               case.decrease_zero_denominator, int(decreases["zero_denominator"].astype(bool).sum()))
+        presented = final.iloc[0].to_dict()
+        expected_values = {**{f"decrease_cents_{k}": float(v) for k, v in case.decrease_cents
+                              if magnitude_disclosable(case.decrease_cent_contributors)},
+                           **{f"decrease_percent_{k}": float(v) for k, v in case.decrease_percent
+                              if magnitude_disclosable(case.decrease_percent_contributors)}}
+        magnitude_columns = [f"decrease_{kind}_{stat}" for kind in ("cents", "percent")
+                             for stat in ("min", "median", "max")]
+        agrees = all((presented[c] == expected_values[c]) if c in expected_values else _missing(presented[c])
+                     for c in magnitude_columns)
+        _check(rows, "final_case_presented_magnitudes_equal_validated_case", 1, int(agrees))
     return pd.DataFrame(rows, columns=list(SANITIZED_TABLE_SCHEMAS["reconciliation_summary"]))
 
 
@@ -768,18 +912,19 @@ def build_presentation_tables(analysis: PriceChangeAnalysisResult) -> Presentati
         PrivacyViolationError: A table breaches the sanitized allowlist.
     """
     analysis = _require_analysis(analysis)
-    summary = _interval_summary(analysis.event_table)
+    summary = _interval_summary(analysis.event_table, analysis.events.candidates)
     material, selection = _material(summary)
     cross = _airport_downtown(analysis)
     persistence = _persistence_table(analysis)
     heat = heatmap_source_frame(analysis)
-    recon = _reconciliation(analysis, summary, material, selection, cross, persistence, heat)
+    final = _final_case(analysis)
+    recon = _reconciliation(analysis, summary, material, selection, cross, persistence, heat, final)
     if not (recon["status"] == "reconciled").all():
         raise PriceChangeReconciliationError("rule reconciliation: a presentation table does not reconcile")
     return PresentationTables(
         event_interval_summary=summary, material_synchronized_movements=material,
         material_selection_reconciliation=selection, airport_downtown_summary=cross,
-        persistence_summary=persistence, final_vancouver_decrease=_final_case(analysis),
+        persistence_summary=persistence, final_vancouver_decrease=final,
         reconciliation_summary=recon, evidence_id=_evidence_id(analysis))
 
 

@@ -1657,7 +1657,8 @@ def test_price_change_notebook_delegates_to_package_functions_and_never_shows_ev
                     r"\.(head|tail|sample|info|to_string|to_markdown|to_html)\(", r"(?<!case)\.describe\(",
                     r"\bHTML\(", r"job_id", r"\bjobs\b", r"\bcars\b", r"run_pricing_pipeline", r"assess_price_change",
                     r"analyze_price_change_events", r"classify_price_change", r"capture_timelines",
-                    r"event_heatmap_source", r"savefig"):
+                    r"event_heatmap_source", r"savefig", r"magnitude_disclosable", r"magnitude_suppressed\(",
+                    r"MINIMUM_MAGNITUDE_CONTRIBUTORS", r"contributor_count\s*[<>=]", r"\.fillna\("):
         assert not re.search(pattern, code), f"notebook re-implements or exposes: {pattern}"
     assert re.search(r"OUTPUT_DIR\s*=\s*None", code) and re.search(r"WRITE_DETAIL\s*=\s*None", code)
     raw = PRICE_CHANGE_NOTEBOOK.read_text(encoding="utf-8")

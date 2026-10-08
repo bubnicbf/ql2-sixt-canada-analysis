@@ -445,6 +445,12 @@ class FinalDecreaseCase:
     largest_same_percent_cohort: int = 0
     decrease_cents: tuple[tuple[str, float], ...] = ()       # min / median / max of signed decrease cents
     decrease_percent: tuple[tuple[str, float], ...] = ()     # min / median / max exact percentage (as floats)
+    #: Decreases contributing to ``decrease_cents`` (every decrease has an exact integer cent change).
+    decrease_cent_contributors: int = 0
+    #: Decreases contributing to ``decrease_percent`` (nonzero previous price: an exact percentage exists).
+    decrease_percent_contributors: int = 0
+    #: Decreases with a zero previous price (no percentage; never a percentage contributor).
+    decrease_zero_denominator: int = 0
     cross_location: tuple[tuple[str, int], ...] = ()
     provenance: tuple[tuple[str, int], ...] = ()
     persistence: tuple[tuple[str, int], ...] = ()
@@ -459,6 +465,18 @@ class FinalDecreaseCase:
             raise PriceChangeReconciliationError("a derived final decrease holds at least one decrease")
         if sum(n for _, n in self.persistence) != self.price_change_count:
             raise PriceChangeReconciliationError("the case's persistence covers its changed events")
+        contributors = (self.decrease_cent_contributors, self.decrease_percent_contributors,
+                        self.decrease_zero_denominator)
+        if any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in contributors):
+            raise PriceChangeReconciliationError("decrease contributor counts are non-negative integers")
+        decreases = dict(self.counts).get(TerminalOutcome.DECREASE.value, 0)
+        if self.decrease_cent_contributors != decreases:
+            raise PriceChangeReconciliationError("every decrease contributes one exact cent change")
+        if self.decrease_percent_contributors + self.decrease_zero_denominator != decreases:
+            raise PriceChangeReconciliationError("percent-valid plus zero-denominator decreases equal all decreases")
+        if bool(self.decrease_cents) != bool(self.decrease_cent_contributors) \
+                or bool(self.decrease_percent) != bool(self.decrease_percent_contributors):
+            raise PriceChangeReconciliationError("magnitude statistics exist exactly when they have contributors")
 
     @property
     def persistence_testable(self) -> bool:
@@ -870,6 +888,9 @@ def _final_decrease(authority, order, roles, timelines, table, by_interval, pers
     final_flags = tuple((k, roles[k].value, latest[1] == timelines[k].periods(CaptureState.ELIGIBLE)[-1])
                         for k in involved)
     price, assortment = counts["increase"] + counts["decrease"], counts["appeared"] + counts["disappeared"]
+    cent_values = [r["change_cents"] for r in decreases if isinstance(r["change_cents"], int)]
+    percent_values = [p for r in decreases
+                      if (p := exact_change_percent(r["previous_price_cents"], r["change_cents"])) is not None]
     indicators = []
     if sync["direction_synchronized"]:
         indicators.append(I.DIRECTION_SYNCHRONIZED)
@@ -896,9 +917,9 @@ def _final_decrease(authority, order, roles, timelines, table, by_interval, pers
         exact_percent_synchronized=sync["exact_percent_synchronized"],
         largest_same_cent_cohort=sync["largest_same_cent_cohort"],
         largest_same_percent_cohort=sync["largest_same_percent_cohort"],
-        decrease_cents=_summary_stats([r["change_cents"] for r in decreases]),
-        decrease_percent=_summary_stats([p for r in decreases if (p := exact_change_percent(
-            r["previous_price_cents"], r["change_cents"])) is not None]),
+        decrease_cents=_summary_stats(cent_values), decrease_percent=_summary_stats(percent_values),
+        decrease_cent_contributors=len(cent_values), decrease_percent_contributors=len(percent_values),
+        decrease_zero_denominator=len(decreases) - len(percent_values),
         cross_location=tuple((o.value, cross_counts[o.value]) for o in CrossLocationOutcome
                              if cross_counts[o.value]),
         provenance=tuple(sorted(provenance.items())),
