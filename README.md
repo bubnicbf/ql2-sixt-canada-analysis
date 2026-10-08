@@ -2610,15 +2610,55 @@ thresholds, long-term baselines or production rules.
 - the event heatmap;
 - the event table.
 
-Visible assortment stability and monitoring work are not started here.
-
 ## Visible assortment stability
 
-- Offers per location and capture
-- Which products appear/disappear
-- Isolated/widespread changes
-- Consecutive product sets similarity
-- Falling assortment vs. price increases
+**Status: definitions contracted; calculations not implemented.** The
+definition phase of data-plan Section 5 is recorded in
+[`visible-assortment-contract-proposal-v1-2026-10-08.md`](docs/decisions/governance/visible-assortment-contract-proposal-v1-2026-10-08.md)
+and enforced by the immutable code contract
+[`src/ql2_sixt_canada_analysis/assortment_contract.py`](src/ql2_sixt_canada_analysis/assortment_contract.py)
+(`DEFAULT_ASSORTMENT_DEFINITION`). No existing authority record is changed.
+
+The contract settles these definitions:
+
+- **Population:** the pricing-eligible canonical offers of one validated
+  `run_pricing_pipeline` result.
+- **Location:** the canonical location, so Vancouver Downtown and Thurlow
+  are one location.
+- **Capture:** the authority-backed `scheduled_capture_period`.
+- **Consecutive captures:** `capture_timelines` intervals, with typed breaks
+  plus `rental_context_changed`.
+- **Product:** the approved five-attribute product identity. Rental dates
+  are the set's search context (exactly one per location capture), and
+  currency and price basis are not part of it.
+- **Formulas:**
+  - retention `|P∩C| / |P|`;
+  - Jaccard `|P∩C| / |P∪C|`;
+  - `net_change`, `absolute_drop` and `drop_rate`, each with explicit
+    `zero_denominator` statuses;
+  - coincidence with price-change increases and decreases in the same
+    location interval.
+- **Timeline:** the fixed aggregate timeline schema
+  `ASSORTMENT_TIMELINE_COLUMNS`.
+
+These items remain **PROPOSED - not approved** and fail closed:
+
+- the unusual-drop policy (`classify_unusual_drop` raises);
+- multi-context stratification;
+- timeline persistence.
+
+The calculation engine, the timeline rows, alerts, the notebook and the
+exports are not implemented yet. Section 5 is not complete.
+
+Data-plan coverage after the definition phase:
+
+- Offers per location and capture: defined, not yet calculated.
+- Which products appear/disappear: defined, not yet calculated.
+- Isolated/widespread changes: drop signals defined; the unusual-drop
+  policy is proposed.
+- Consecutive product sets similarity (retention, Jaccard): defined, not
+  yet calculated.
+- Falling assortment vs. price increases: defined, not yet calculated.
 
 ## QL2 controls
 
