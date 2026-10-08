@@ -16,7 +16,10 @@ central gate reports it as a blocker. The result keeps the proprietary frames
 and in-memory evidence for downstream analyses
 (:mod:`~ql2_sixt_canada_analysis.pricing_baseline`,
 :mod:`~ql2_sixt_canada_analysis.matched_location_pricing`); it is never
-printed (frames are excluded from ``repr``) and nothing is written.
+printed (frames are excluded from ``repr``) and nothing is written. The coverage
+and reconciliation reports that completeness was decided on are retained too,
+so the monitoring controls (:mod:`~ql2_sixt_canada_analysis.monitoring`) read
+them instead of recomputing them.
 """
 
 from __future__ import annotations
@@ -49,6 +52,10 @@ class PricingPipelineResult:
     canonical_offers: object = field(repr=False)
     location_authority: object = field(repr=False)
     pricing: object = field(repr=False)
+    #: The expected-location coverage report already computed for completeness (``None`` without a contract).
+    coverage: object = field(default=None, repr=False)
+    #: The per-job job/detail reconciliation report already computed for completeness (``None`` = unassessable).
+    reconciliation: object = field(default=None, repr=False)
 
     @property
     def pricing_analysis_ready(self) -> bool:
@@ -164,4 +171,5 @@ def run_pricing_pipeline(raw_dir: str | Path | None = None) -> PricingPipelineRe
         record=record, contract=contract, relationship=rel, jobs=jobs, cars=cars, job_linkage=linkage.report,
         unique_keys=keys, scheduled=scheduled, temporal=temporal, temporal_authority=temporal_authority,
         reporting_days=reporting_days, population=population, vehicle_stability=stability,
-        canonical_offers=offers, location_authority=location_authority, pricing=pricing)
+        canonical_offers=offers, location_authority=location_authority, pricing=pricing,
+        coverage=coverage, reconciliation=reconciliation)
