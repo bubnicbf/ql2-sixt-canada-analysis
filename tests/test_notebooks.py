@@ -55,7 +55,7 @@ def _step_output(result: object, marker: str) -> str:
     """Printed output of the one executed code cell whose source contains ``marker``."""
     cells = [c for c in _code_cells(result.executed) if marker in c.source]  # type: ignore[attr-defined]
     assert len(cells) == 1, marker
-    return "\n".join(o.get("text", "") for o in cells[0].outputs)
+    return "".join(o.get("text", "") for o in cells[0].outputs)
 
 
 def _code_source(notebook: nbformat.NotebookNode) -> str:
