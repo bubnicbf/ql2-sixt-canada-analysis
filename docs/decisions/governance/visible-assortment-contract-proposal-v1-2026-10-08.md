@@ -354,6 +354,14 @@ changes no definition, status or authority.
 - **Observed drops.** The observed-drop table lists **review candidates**,
   not unusual drops. `unusual_drop` stays empty while the unusual-drop policy
   remains **PROPOSED - not approved**.
+- **Policy wording.** The narrative and the figure footer take their policy
+  sentences from one summary of the validated tables. With the default
+  (unavailable) policy, nothing is classified. A result computed with an
+  explicitly supplied, approved and executable policy, as the engine API
+  permits, is reported as applied, with its validated classification count.
+  The presentation shows no method or threshold, and it creates, approves or
+  reruns no policy. This records the implementation (2026-10-08); the
+  repository still has no approved unusual-drop policy.
 - **Cross-location grouping.** Grouping by exact scheduled period describes
   drops as isolated or simultaneous *in this extract* only. It is never
   evidence of a common cause.

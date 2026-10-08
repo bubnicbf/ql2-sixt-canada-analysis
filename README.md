@@ -2820,9 +2820,9 @@ free text.
 
 | Table | Grain | Content |
 | --- | --- | --- |
-| `assortment_timeline` | approved canonical location × scheduled capture | The engine timeline unchanged (`ASSORTMENT_TIMELINE_COLUMNS`). It covers seeds, assessed intervals, eligible empty captures, governed exclusions, missing captures, typed breaks, denominator statuses and the unavailable `unusual_drop`. |
+| `assortment_timeline` | approved canonical location × scheduled capture | The engine timeline unchanged (`ASSORTMENT_TIMELINE_COLUMNS`). It covers seeds, assessed intervals, eligible empty captures, governed exclusions, missing captures, typed breaks, denominator statuses and `unusual_drop` (empty under the default unavailable policy). |
 | `location_summary` | approved canonical location | Capture partition, seeds, breaks, minimum, median and maximum returned-product counts (with contributors), addition, removal and observed-drop intervals and totals, retention and Jaccard medians (each with its contributor and zero-denominator counts), price and coincidence intervals, and the anomaly-policy status. |
-| `observed_drop_review` | assessed interval with `absolute_drop > 0` | Review candidates: counts, ratios with denominator statuses, the same-interval price counts, the drop pattern (`net_contraction`, `complete_turnover` or `empty_current_capture`), the number of locations with a drop in that period, simultaneity, the policy status, an empty `unusual_drop` and `review_status = observed_drop_review_candidate`. |
+| `observed_drop_review` | assessed interval with `absolute_drop > 0` | Review candidates: counts, ratios with denominator statuses, the same-interval price counts, the drop pattern (`net_contraction`, `complete_turnover` or `empty_current_capture`), the number of locations with a drop in that period, simultaneity, the policy status, `unusual_drop` (empty unless an explicitly approved policy classified the interval) and `review_status = observed_drop_review_candidate`. |
 | `cross_location_drops` | current scheduled period with an observed drop | Assessed locations, locations with an observed drop, the drop total, and `isolated_in_extract` or `simultaneous_in_extract`. |
 | `price_coincidence_summary` | approved canonical location | Assortment-change, price-change, increase, decrease, coincident, drop-with-increase, drop-with-decrease and falling-with-increase intervals. Shares are shown only with a non-zero denominator. |
 | `reconciliation_summary` | check | The fixed `ASSORTMENT_RECONCILIATION_CHECKS` (24 checks), each with expected value, observed value and status. Every check must reconcile before anything is returned. |
@@ -2853,7 +2853,11 @@ following, with messages that name only the rule (and at most a column):
   `simultaneous_in_extract`.
 - Canonical aliases (Vancouver Downtown and Thurlow) are one location and are
   never double-counted. Simultaneity is not evidence of a common cause.
-- No drop is called unusual, a collection failure or a supplier withdrawal.
+- Under the default (unavailable) policy no drop is called unusual. If a result
+  was computed with an explicitly supplied approved policy, the engine's
+  `unusual_drop` classifications are reported as they are; the presentation
+  never creates, approves or reruns a policy.
+- No drop is called a collection failure or a supplier withdrawal.
 
 **Price coincidence.** A price change counts only when it falls in the same
 canonical location and the same scheduled interval. Increases and decreases
@@ -2868,7 +2872,8 @@ lines never cross one.
 `assortment_timeline_png` renders one panel per canonical location on a
 shared scale, with UTC period labels, triangles for observed drops and rings
 for drops with a same-interval price increase. It renders in memory only
-and closes the figure.
+and closes the figure. Its footer states the policy status and, under an
+approved policy, how many assessed intervals were classified as unusual.
 
 **Narrative.** `build_assortment_narrative` builds the narrative
 deterministically from the validated tables. It has seven sections (scope
@@ -2878,7 +2883,12 @@ and next actions). Its language is bounded:
 
 - no claim that anything was proved, caused or statistically significant;
 - no anomaly or monitoring-rule language;
-- "unusual" appears only as the name of the unavailable unusual-drop policy;
+- "unusual" appears only as the name of the unusual-drop policy, or, when an
+  approved policy was supplied, in the validated count of classified intervals;
+- the policy sentences of the narrative and the figure footer come from one
+  summary of the validated tables, so they always match the tables `anomaly_policy_status` and `unusual_drop` values (the default reports the
+  policy as unavailable; an approved policy is reported as applied, with its
+  count, and never as unavailable);
 - no product identities, prices, identifiers or paths.
 
 **Persistence.** Timeline persistence and format are proposed, not approved.

@@ -34,10 +34,16 @@ explicit contributor count; unavailable values stay missing, never zero.
 
 Observed drops
 --------------
-No unusual-drop policy is approved. ``observed_drop_review`` lists every
-assessed interval with ``absolute_drop > 0`` as a **review candidate**, ordered
-for review only (largest drop first). It is not an alert table and no row is
-classified as unusual, as a collection failure or as a supplier withdrawal.
+The repository default has no approved unusual-drop policy, so default
+results carry no classification. ``observed_drop_review`` lists every assessed
+interval with ``absolute_drop > 0`` as a **review candidate**, ordered for
+review only (largest drop first). It is not an alert table and no row is
+classified as a collection failure or as a supplier withdrawal. If an
+explicitly approved, executable policy was supplied to the engine, its
+classifications (``unusual_drop``) are reported as they are; the presentation
+never creates, approves or reruns a policy. The narrative and the figure take
+their policy wording from one summary of the validated tables
+(:func:`_policy_wording`), so they cannot contradict the tables or each other.
 ``cross_location_drops`` groups candidates by exact current scheduled period:
 one location is *isolated in this extract*, several are *simultaneous in this
 extract*. Simultaneity is not proof of a common cause.
@@ -559,6 +565,7 @@ class AssortmentPresentationTables:
         recon = self.reconciliation_summary
         if tuple(recon["check"]) != ASSORTMENT_RECONCILIATION_CHECKS or not (recon["status"] == "reconciled").all():
             raise AssortmentReconciliationError("presentation tables are not reconciled")
+        _policy_summary(self)                                   # cross-table policy and classification agreement
 
     def items(self) -> tuple[tuple[str, pd.DataFrame], ...]:
         return tuple((name, getattr(self, name)) for name in ASSORTMENT_TABLE_SCHEMAS)
@@ -880,7 +887,7 @@ def assortment_timeline_source_frame(tables: AssortmentPresentationTables) -> pd
 _SERIES, _DROP, _INK, _MUTED, _BAND = "#2a78d6", "#eb6834", "#0b0b0b", "#52514e", "#ecebe8"
 
 
-def _render(source: pd.DataFrame, dpi: int):  # type: ignore[no-untyped-def]
+def _render(source: pd.DataFrame, dpi: int, footer: str):  # type: ignore[no-untyped-def]
     from matplotlib.figure import Figure
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
@@ -926,22 +933,114 @@ def _render(source: pd.DataFrame, dpi: int):  # type: ignore[no-untyped-def]
                label="Observed drop with a same-interval price increase"),
         Patch(color=_BAND, label="Governed exclusion or missing capture (no count)")],
         loc="upper center", ncol=2, fontsize=8, frameon=False)
-    fig.text(0.01, 0.005, "Unusual-drop classification: unavailable (no approved policy). Coincidence is not "
-             "causation.", fontsize=7, color=_MUTED)
+    fig.text(0.01, 0.005, footer, fontsize=7, color=_MUTED)
     fig.subplots_adjust(top=1 - 0.9 / fig.get_figheight(), bottom=0.9 / fig.get_figheight() + 0.02, hspace=0.45)
     return fig
 
 
+def _timeline_figure(tables: AssortmentPresentationTables, dpi: int):  # type: ignore[no-untyped-def]
+    """The reconciled figure object; its footer is the shared policy wording of the same tables."""
+    source = assortment_timeline_source_frame(tables)
+    return _render(source, dpi, _policy_wording(tables).figure_footer)
+
+
 def assortment_timeline_png(tables: AssortmentPresentationTables, *, dpi: int = 110) -> bytes:
     """The reconciled timeline figure as PNG bytes in memory (nothing is written; the figure is closed)."""
-    source = assortment_timeline_source_frame(tables)
-    fig = _render(source, dpi)
+    fig = _timeline_figure(tables, dpi)
     buffer = io.BytesIO()
     try:
         fig.savefig(buffer, format="png", dpi=dpi, metadata={"Software": None})
     finally:
         fig.clear()
     return buffer.getvalue()
+
+
+# ------------------------------------------------------------------ policy wording (narrative and figure)
+
+
+@dataclass(frozen=True)
+class _PolicySummary:
+    """Policy status and classification counts, computed only from validated, mutually consistent tables."""
+
+    status: AnomalyPolicyStatus
+    assessed_intervals: int
+    classified_intervals: int        # assessed rows carrying a boolean classification
+    unusual_intervals: int           # assessed rows classified ``unusual_drop = True``
+    review_rows: int                 # observed-drop review candidates
+    review_unusual: int              # review rows classified ``unusual_drop = True``
+
+
+def _policy_summary(tables: AssortmentPresentationTables) -> _PolicySummary:
+    """Summarize the engine's classifications (never re-applies a policy) and prove the tables agree.
+
+    One policy status across the timeline, location summary and review; every
+    review row equals the timeline's assessed drop row of the same key,
+    including its ``unusual_drop`` value; classifications exist exactly under
+    an approved policy (missing otherwise, never ``False``).
+
+    Raises:
+        AssortmentReconciliationError: The tables disagree.
+    """
+    R = AssortmentReconciliationError
+    rows = _records(tables.assortment_timeline)
+    statuses = ({r["anomaly_policy_status"] for r in rows}
+                | {r["anomaly_policy_status"] for r in _records(tables.location_summary)}
+                | {r["anomaly_policy_status"] for r in _records(tables.observed_drop_review)})
+    if len(statuses) != 1:
+        raise R("rule policy_status: the tables disagree on the anomaly-policy status")
+    status = AnomalyPolicyStatus(next(iter(statuses)))
+    assessed = [r for r in rows if r["assessability_status"] == AssessabilityStatus.ASSESSED.value]
+    drops = {(r["canonical_city"], r["canonical_location"], r[_CAPTURE]): r["unusual_drop"]
+             for r in assessed if r["absolute_drop"] > 0}
+    review = {(r["canonical_city"], r["canonical_location"], r[_CAPTURE]): r["unusual_drop"]
+              for r in _records(tables.observed_drop_review)}
+    if review != drops:
+        raise R("rule policy_status: review classifications differ from the timeline")
+    classified = [r["unusual_drop"] for r in assessed if r["unusual_drop"] is not None]
+    approved = status is AnomalyPolicyStatus.APPROVED
+    if len(classified) != (len(assessed) if approved else 0):
+        raise R("rule policy_status: classifications exist exactly under an approved policy")
+    return _PolicySummary(status, len(assessed), len(classified), sum(bool(v) for v in classified), len(review),
+                          sum(v is True or v is np.True_ for v in review.values()))
+
+
+@dataclass(frozen=True)
+class _PolicyWording:
+    """The policy sentences shared by the narrative and the figure (one source of truth)."""
+
+    summary: _PolicySummary
+    drop_sentences: tuple[str, ...]
+    limitation: str
+    figure_footer: str
+
+
+def _policy_wording(tables: AssortmentPresentationTables) -> _PolicyWording:
+    """Wording derived only from the validated policy status and classification counts (no method or threshold)."""
+    s = _policy_summary(tables)
+    causal = "the data alone does not establish a cause"
+    if s.status is AnomalyPolicyStatus.APPROVED:
+        drops = (f"An approved unusual-drop policy, supplied explicitly to the engine, was applied: "
+                 f"{s.unusual_intervals} of {s.assessed_intervals} assessed intervals were classified as unusual "
+                 f"({s.review_unusual} of {s.review_rows} observed drops).",
+                 "The classification reports the supplied policy's result only; its method and thresholds are not "
+                 f"shown here, and {causal}.")
+        limitation = ("Unusual-drop classification used the explicitly supplied approved policy; it is not the "
+                      "repository default, and no monitoring rule beyond that classification is established.")
+        footer = (f"Unusual-drop classification: approved policy applied; {s.unusual_intervals} of "
+                  f"{s.assessed_intervals} assessed intervals classified as unusual. Coincidence is not causation.")
+    else:
+        state = ("is unavailable" if s.status is AnomalyPolicyStatus.UNAVAILABLE
+                 else "is proposed but not approved")
+        reason = ("no approved policy" if s.status is AnomalyPolicyStatus.UNAVAILABLE
+                  else "policy proposed, not approved")
+        if s.review_rows:
+            drops = (f"The unusual-drop policy {state}, so no drop is classified; these are review candidates, "
+                     f"not classified events, and {causal}.",)
+        else:
+            drops = (f"The unusual-drop policy {state}, so no drop is classified in any case.",)
+        limitation = "Unusual-drop monitoring awaits an approved method, minimum history, grouping and thresholds."
+        footer = f"Unusual-drop classification: unavailable ({reason}). Coincidence is not causation."
+    return _PolicyWording(s, drops, limitation, footer)
 
 
 # ------------------------------------------------------------------ narrative
@@ -991,6 +1090,7 @@ def build_assortment_narrative(presentation: object) -> AssortmentNarrative:
         tables = presentation
     if not isinstance(tables, AssortmentPresentationTables):
         raise TypeError("expected an AssortmentPresentationResult or AssortmentPresentationTables")
+    wording = _policy_wording(tables)
     rows = _records(tables.assortment_timeline)
     summary = _records(tables.location_summary)
     review = _records(tables.observed_drop_review)
@@ -1062,11 +1162,9 @@ def build_assortment_narrative(presentation: object) -> AssortmentNarrative:
             f"Drop patterns: net contraction {patterns['net_contraction']}, complete turnover "
             f"{patterns['complete_turnover']}, empty current capture {patterns['empty_current_capture']}; "
             f"intervals that also had additions: {sum(1 for r in review if r['addition_count'] > 0)}.",
-            "The unusual-drop policy is unavailable, so no drop is classified; these are review candidates, not "
-            "classified events, and the data alone does not establish a cause.")
+            *wording.drop_sentences)
     else:
-        drops = ("No assessed interval shows an observed drop.",
-                 "The unusual-drop policy is unavailable, so no drop is classified in any case.")
+        drops = ("No assessed interval shows an observed drop.", *wording.drop_sentences)
     price = (
         f"Of {assessed} assessed intervals, {sum(c['assortment_change_intervals'] for c in coincidence)} "
         f"had an assortment change and {sum(c['price_change_intervals'] for c in coincidence)} had a price change "
@@ -1084,7 +1182,7 @@ def build_assortment_narrative(presentation: object) -> AssortmentNarrative:
         "captures are repeated measurements.",
         "Visible assortment is what the collection returned, not confirmation of what the supplier offered.",
         "Operational and source corroboration would be required before any causal interpretation.",
-        "Unusual-drop monitoring awaits an approved method, minimum history, grouping and thresholds.",
+        wording.limitation,
         "Timeline persistence is not approved, so these results stay in memory and nothing is written.")
     return AssortmentNarrative(True, tuple(zip(NARRATIVE_SECTIONS, (scope, over_time, stability, additions, drops,
                                                                       price, limits))))

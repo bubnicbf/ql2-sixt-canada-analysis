@@ -43,6 +43,7 @@ from ql2_sixt_canada_analysis.assortment_contract import (
     ASSORTMENT_TIMELINE_COLUMNS,
     AnomalyPolicyStatus as APS,
     AssessabilityStatus as AS,
+    UnusualDropPolicy,
 )
 from ql2_sixt_canada_analysis.assortment_presentation import (
     ASSORTMENT_COLUMN_ALLOWLIST,
@@ -530,6 +531,135 @@ def test_narrative_edge_cases_are_described_accurately(spec, phrases) -> None:  
         assert phrase in text, phrase
     assert "0 had a price change" in text and "not causation" in text
     assert not FORBIDDEN_WORDS.search(text) and "unusual" not in unusual_free(text)
+
+
+# ---------------------------------------------------------------------------- policy wording (narrative and figure)
+
+APPROVED_SPEC = {0: "ABCD", 1: "AB", 2: "A"}            # drops of 2 (rate 0.5) and 1 (rate 0.5)
+STALE_PHRASES = ("is unavailable", "no approved policy", "awaits an approved", "no drop is classified",
+                 "proposed but not approved", "policy proposed")
+
+
+def approved_tables(rule=None) -> AssortmentPresentationTables:  # type: ignore[no-untyped-def]
+    return tables_of(sets(APPROVED_SPEC), [timeline([0, 1, 2])],
+                     policy=approved(rule if rule is not None else synthetic_floor_rule(2, 0.5)))
+
+
+def footer_of(t: AssortmentPresentationTables) -> list[str]:
+    fig = ap._timeline_figure(t, 40)
+    try:
+        return [text.get_text() for text in fig.texts if text.get_text().startswith("Unusual-drop")]
+    finally:
+        fig.clear()
+
+
+def test_an_approved_policy_is_reported_as_applied_with_its_validated_count() -> None:
+    """Regression: an approved classification must not be described as unavailable by the narrative or figure."""
+    t = approved_tables()
+    review = records(t.observed_drop_review)
+    assert [r["unusual_drop"] for r in review] == [True, False]
+    assert set(t.assortment_timeline["anomaly_policy_status"]) == {APS.APPROVED.value}
+    text = build_assortment_narrative(t).text
+    assert ("An approved unusual-drop policy, supplied explicitly to the engine, was applied: 1 of 2 assessed "
+            "intervals were classified as unusual (1 of 2 observed drops).") in text
+    assert "is not the repository default" in text and "does not establish a cause" in text
+    assert "not causation" in text
+    for phrase in STALE_PHRASES:
+        assert phrase not in text, phrase
+    footer = footer_of(t)
+    assert footer == ["Unusual-drop classification: approved policy applied; 1 of 2 assessed intervals classified as "
+                      "unusual. Coincidence is not causation."]
+    assert not any(phrase in " ".join(footer) for phrase in STALE_PHRASES)
+    assert not FORBIDDEN_WORDS.search(text) and "SYNTH" not in text
+
+
+def test_an_approved_policy_that_classifies_nothing_reports_zero_not_unavailable() -> None:
+    t = approved_tables(lambda c: False)
+    assert [r["unusual_drop"] for r in records(t.observed_drop_review)] == [False, False]
+    text = build_assortment_narrative(t).text
+    assert "was applied: 0 of 2 assessed intervals were classified as unusual (0 of 2 observed drops)." in text
+    assert footer_of(t) == ["Unusual-drop classification: approved policy applied; 0 of 2 assessed intervals "
+                            "classified as unusual. Coincidence is not causation."]
+    quiet = tables_of(sets({0: "AB", 1: "AB"}), [timeline([0, 1])], policy=approved(lambda c: False))
+    quiet_text = build_assortment_narrative(quiet).text
+    assert "No assessed interval shows an observed drop." in quiet_text and "0 of 1 assessed intervals" in quiet_text
+    for phrase in STALE_PHRASES:
+        assert phrase not in quiet_text + " ".join(footer_of(t)), phrase
+
+
+def test_the_default_policy_keeps_its_fail_closed_wording(tables) -> None:  # type: ignore[no-untyped-def]
+    assert tables.assortment_timeline["unusual_drop"].isna().all()
+    assert tables.observed_drop_review["unusual_drop"].isna().all()               # null, never False
+    text = build_assortment_narrative(tables).text
+    assert ("The unusual-drop policy is unavailable, so no drop is classified; these are review candidates, not "
+            "classified events, and the data alone does not establish a cause.") in text
+    assert "Unusual-drop monitoring awaits an approved method, minimum history, grouping and thresholds." in text
+    assert "approved policy applied" not in text and "classified as unusual" not in text and "False" not in text
+    assert footer_of(tables) == ["Unusual-drop classification: unavailable (no approved policy). Coincidence is not "
+                                 "causation."]
+    empty = tables_of(sets({0: "A", 1: "A"}), [timeline([0, 1])])
+    assert "The unusual-drop policy is unavailable, so no drop is classified in any case." in \
+        build_assortment_narrative(empty).text
+
+
+def test_a_proposed_policy_is_described_as_not_approved() -> None:
+    t = tables_of(sets(APPROVED_SPEC), [timeline([0, 1, 2])],
+                  policy=UnusualDropPolicy(APS.PROPOSED, description="SYNTH candidate"))
+    text = build_assortment_narrative(t).text
+    assert "The unusual-drop policy is proposed but not approved, so no drop is classified" in text
+    assert footer_of(t) == ["Unusual-drop classification: unavailable (policy proposed, not approved). "
+                            "Coincidence is not causation."]
+    assert t.observed_drop_review["unusual_drop"].isna().all()
+
+
+@pytest.mark.parametrize("make", [lambda: approved_tables(), lambda: approved_tables(lambda c: False),
+                                  lambda: tables_of(sets(APPROVED_SPEC), [timeline([0, 1, 2])])])
+def test_narrative_and_figure_share_one_policy_summary(make) -> None:  # type: ignore[no-untyped-def]
+    t = make()
+    wording = ap._policy_wording(t)
+    assert footer_of(t) == [wording.figure_footer]
+    narrative = dict(build_assortment_narrative(t).sections)
+    assert narrative["Observed-drop review"][-len(wording.drop_sentences):] == wording.drop_sentences
+    assert wording.limitation in narrative["Limitations and next actions"]
+    s = wording.summary
+    assert s.unusual_intervals == int(t.assortment_timeline["unusual_drop"].fillna(False).astype(bool).sum())
+    assert s.review_rows == len(t.observed_drop_review)
+    assert (s.status is APS.APPROVED) == (s.classified_intervals == s.assessed_intervals > 0)
+    if s.status is APS.APPROVED:
+        assert f"{s.unusual_intervals} of {s.assessed_intervals}" in wording.figure_footer
+
+
+def test_inconsistent_policy_classifications_cannot_form_tables() -> None:
+    t = approved_tables()
+    flipped = t.observed_drop_review.copy()
+    flipped["unusual_drop"] = ~flipped["unusual_drop"]                              # disagrees with the timeline
+    with pytest.raises(AssortmentReconciliationError, match="rule policy_status"):
+        dataclasses.replace(t, observed_drop_review=flipped)
+    mixed = t.location_summary.copy()
+    mixed["anomaly_policy_status"] = APS.UNAVAILABLE.value                           # disagrees on the status
+    with pytest.raises(AssortmentReconciliationError, match="rule policy_status"):
+        dataclasses.replace(t, location_summary=mixed)
+    dropped = t.observed_drop_review.iloc[1:]                                       # a missing review candidate
+    with pytest.raises(AssortmentReconciliationError, match="rule policy_status"):
+        dataclasses.replace(t, observed_drop_review=dropped)
+
+
+def test_approved_policy_figures_render_in_memory_and_write_nothing(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import matplotlib.pyplot as plt
+
+    monkeypatch.chdir(tmp_path)
+    before = plt.get_fignums()
+    png = assortment_timeline_png(approved_tables(), dpi=50)
+    assert png[:4] == b"\x89PNG" and plt.get_fignums() == before and os.listdir(tmp_path) == []
+
+
+def test_blocked_presentations_make_no_policy_claim(world) -> None:  # type: ignore[no-untyped-def]
+    not_ready = readiness_for(world["cars"], world["scheduled"], world["canonical_offers"],
+                              (PricingBlocker.SCHEDULED_COVERAGE_INCOMPLETE,))
+    blocked = assortment_presentation_from_pipeline(dataclasses.replace(pipeline_result(world), pricing=not_ready))
+    text = build_assortment_narrative(blocked).text
+    for phrase in ("approved", "unusual", "classified", "policy", "review candidate"):
+        assert phrase not in text.lower(), phrase
 
 
 def test_narrative_rejects_unvalidated_input() -> None:
