@@ -240,7 +240,7 @@ def test_unusual_drop_classification_fails_closed_without_approved_authority() -
             classify_unusual_drop(c, policy)
     with pytest.raises(AssortmentContractError):
         UnusualDropPolicy(AnomalyPolicyStatus.APPROVED)                       # approval needs recorded authority
-    with pytest.raises(AnomalyPolicyUnavailableError):                        # even then: not this phase
+    with pytest.raises(AnomalyPolicyUnavailableError):                        # approved, but no executable rule
         classify_unusual_drop(c, UnusualDropPolicy(AnomalyPolicyStatus.APPROVED, "SYNTH-record", "SYNTH-ref"))
 
 

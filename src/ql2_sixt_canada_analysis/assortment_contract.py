@@ -3,9 +3,11 @@
 This module fixes, in code, the definitions the future visible-assortment
 engine must use. It computes no assortment from data: it holds an immutable
 :class:`VisibleAssortmentDefinition`, typed statuses, an evidence gate over one
-pipeline result and small pure helpers that pin the set formulas. The full
-engine, the unusual-drop detector, the timeline, notebooks and exports are out
-of scope (see ``docs/decisions/governance/visible-assortment-contract-proposal-v1-2026-10-08.md``).
+pipeline result and small pure helpers that pin the set formulas (see
+``docs/decisions/governance/visible-assortment-contract-proposal-v1-2026-10-08.md``).
+The calculation engine that implements these definitions is
+:mod:`ql2_sixt_canada_analysis.visible_assortment`; notebooks, exports and any
+approved unusual-drop rule are out of scope here.
 
 Definitions
 -----------
@@ -60,7 +62,7 @@ approved. Importing this module performs no I/O.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
@@ -160,6 +162,11 @@ class AssortmentBlocker(StrEnum):
     LOCATION_AUTHORITY_UNAVAILABLE = "location_authority_unavailable"
     PRODUCT_IDENTITY_INCOMPLETE = "product_identity_incomplete"
     MULTIPLE_RENTAL_CONTEXTS = "multiple_rental_contexts"
+    # Added with the calculation engine (implementation correspondence; no new business rule):
+    UNKNOWN_CANONICAL_LOCATION = "unknown_canonical_location"
+    CAPTURE_EVIDENCE_INCONSISTENT = "capture_evidence_inconsistent"
+    PRICE_CHANGE_EVIDENCE_INVALID = "price_change_evidence_invalid"
+    RECONCILIATION_FAILED = "reconciliation_failed"
 
 
 #: Interval break reasons of the assortment contract: every event-contract break plus a rental-context change.
@@ -393,18 +400,32 @@ def compare_assortment(previous: frozenset | None, current: frozenset, *, interv
 
 @dataclass(frozen=True)
 class UnusualDropPolicy:
-    """An unusual-drop policy. ``approved`` requires recorded authority provenance (none exists today)."""
+    """An unusual-drop policy. ``approved`` requires recorded authority provenance (none exists today).
+
+    ``rule`` is the injected, executable decision of an approved policy: it
+    receives the :class:`AssortmentComparison` of one valid interval and returns
+    ``True`` (unusual) or ``False``. The repository defines no rule, method or
+    threshold of its own; a rule is only ever evaluated under ``approved``.
+    """
 
     status: AnomalyPolicyStatus
     record_id: str | None = None
     reference: str | None = None
     description: str = ""
+    rule: Callable[[AssortmentComparison], bool] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, AnomalyPolicyStatus):
             raise AssortmentContractError("status must be an AnomalyPolicyStatus")
         if self.status is AnomalyPolicyStatus.APPROVED and not (self.record_id and self.reference):
             raise AssortmentContractError("an approved policy names its authority record and reference")
+        if self.rule is not None and not callable(self.rule):
+            raise AssortmentContractError("a policy rule must be callable")
+
+    @property
+    def executable(self) -> bool:
+        """Whether this policy may classify: approved with recorded authority and an injected rule."""
+        return self.status is AnomalyPolicyStatus.APPROVED and self.rule is not None
 
 
 #: No approved unusual-drop policy exists: classification fails closed.
@@ -413,17 +434,31 @@ DEFAULT_UNUSUAL_DROP_POLICY = UnusualDropPolicy(AnomalyPolicyStatus.UNAVAILABLE)
 
 def classify_unusual_drop(comparison: AssortmentComparison,
                           policy: UnusualDropPolicy = DEFAULT_UNUSUAL_DROP_POLICY) -> bool:
-    """Fail closed: there is no approved policy, so no drop is ever classified as unusual here.
+    """Classify one valid interval under an approved, executable policy; fail closed otherwise.
+
+    No approved policy exists in this repository, so with the default policy
+    (and with any proposed or rule-less policy) this always raises: an observed
+    drop is never called unusual, a collection failure or a supplier
+    withdrawal here.
 
     Raises:
-        AnomalyPolicyUnavailableError: Always unless an approved policy is supplied; even then the detector
-            itself is a later phase.
+        AnomalyPolicyUnavailableError: The policy is not approved or provides no executable rule.
+        AssortmentContractError: The comparison is not a valid interval, or the rule returned a non-boolean.
     """
     if not isinstance(comparison, AssortmentComparison):
         raise TypeError("comparison must be an AssortmentComparison")
+    if not isinstance(policy, UnusualDropPolicy):
+        raise TypeError("policy must be an UnusualDropPolicy")
     if policy.status is not AnomalyPolicyStatus.APPROVED:
         raise AnomalyPolicyUnavailableError("unusual-drop classification needs an approved policy")
-    raise AnomalyPolicyUnavailableError("the unusual-drop detector is not implemented in the definition phase")
+    if policy.rule is None:
+        raise AnomalyPolicyUnavailableError("the approved policy provides no executable rule")
+    if not comparison.assessable:
+        raise AssortmentContractError("only a valid interval can be classified")
+    verdict = policy.rule(comparison)
+    if not isinstance(verdict, bool):
+        raise AssortmentContractError("an unusual-drop rule returns True or False")
+    return verdict
 
 
 # ------------------------------------------------------------------ evidence gate

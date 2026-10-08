@@ -293,3 +293,37 @@ The detector, presentation and exports wait for the proposed decisions.
 | Identify unusual assortment drops | #10 signals defined; #11 policy | signals defined; alert policy **PROPOSED - not approved** |
 | Check whether assortment changes coincide with price changes | #12, section 7 | defined |
 | Produce an assortment timeline | #13, section 8 | schema defined; persistence **PROPOSED - not approved** |
+
+## 15. Implementation correspondence (calculation engine, added 2026-10-08)
+
+This section records how the engine in
+[`src/ql2_sixt_canada_analysis/visible_assortment.py`](../../../src/ql2_sixt_canada_analysis/visible_assortment.py)
+implements the definitions above. It does not change any definition, status
+or authority. The proposed items remain **PROPOSED - not approved**.
+
+- **Grid.** The engine reuses the capture timelines held by the validated
+  price-change result, so assortment and price coincidence share one grid
+  and the same interval keys. `LocationCaptureTimeline.adjacent_pairs` now
+  exposes the existing interval-or-break decision for each adjacent pair, in
+  order. Its rules are unchanged.
+- **Row semantics.** These follow the schema in section 8:
+  - A row that is not assessed has every interval field null and
+    `not_assessable` denominators.
+  - `interval_break_reason` names the break of the pair ending at that row.
+    This includes the ineligible capture's own row.
+  - `has_previous_interval` is true only on assessed rows.
+- **Membership detail.** The membership detail allowed by section 9 is an
+  in-memory frame (`MEMBERSHIP_COLUMNS`) with one `retained`, `added` or
+  `removed` row per product per assessed interval. It holds no price.
+- **Coincidence evidence.** For each interval, the price-change candidates
+  projected onto location, rental context and product must equal the union
+  of the two endpoint sets. Every increase or decrease must be a retained
+  product. Any disagreement fails closed.
+- **Blocker categories.** `AssortmentBlocker` gains four engine categories:
+  `unknown_canonical_location`, `capture_evidence_inconsistent`,
+  `price_change_evidence_invalid` and `reconciliation_failed`.
+- **Policy interface.** `UnusualDropPolicy` gains an optional injected
+  `rule`. `classify_unusual_drop` evaluates it only for an approved policy
+  that has recorded authority and a rule. The default policy stays
+  `unavailable`, with a null `unusual_drop`. The repository adds no method
+  or threshold, and only synthetic tests inject a rule.
