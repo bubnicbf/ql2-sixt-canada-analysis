@@ -2457,17 +2457,47 @@ reconciled before it is returned, rendered or written. The checks include:
 - the final-case subset matches its interval;
 - the heatmap source equals the interval summary.
 
-**Sanitized aggregate tables** are defined by an explicit allowlist
-(`SANITIZED_COLUMN_ALLOWLIST`) with exact schemas per table
-(`SANITIZED_TABLE_SCHEMAS`). `validate_sanitized_frame` rejects any of the
-following, and its messages name the rule only, never a value:
+**Sanitized aggregate tables** use fixed schemas and semantic validation;
+both levels are allowlists, so unknown or malformed fields fail closed.
+`SANITIZED_TABLE_SCHEMAS` gives the exact column order of every table,
+`SANITIZED_COLUMN_ALLOWLIST` is their union, and `SANITIZED_COLUMN_KINDS`
+assigns every allowed column exactly one value kind. `validate_sanitized_frame`
+checks both levels, and its messages name the rule (and at most a column),
+never a value.
 
-- unexpected columns;
+Structurally it rejects:
+
+- an unapproved table name or anything that is not a DataFrame;
+- detailed event frames;
 - product identity, rental dates or units;
 - individual prices or changes;
-- source-provenance columns or joined label text;
+- source-provenance columns;
 - raw job or row identifiers;
-- detailed event frames.
+- any other column outside the allowlist;
+- any deviation from the exact column order.
+
+Semantically every value must match its column's kind:
+
+- **count**: a non-negative integer, never a boolean;
+- **flag**: a boolean;
+- **share**: finite and between zero and one;
+- **aggregate cent or percentage statistic**: finite;
+- **scheduled period**: canonical `YYYYMMDDTHHMMSSZ` text;
+- **city or location**: an approved canonical city or canonical location;
+- **role**: an approved location role;
+- **enum** (movement class, interval flag, interpretation status, final-case
+  status, direction, reconciliation check or status): a member of its enum;
+- **selection rule**: exactly the documented selection rule.
+
+Missing values are allowed only where a column permits them. Pipe-joined
+source-label text is rejected everywhere, and repeated records are rejected.
+Free-form text cannot pass: every string must be an approved key, enum value
+or canonical period.
+
+`export_sanitized_tables` repeats the complete validation and the
+reconciliation check immediately before writing. A `PresentationTables`
+object mutated after construction is refused at export, and nothing is
+written.
 
 | Table | Grain and content |
 | --- | --- |
@@ -2476,12 +2506,14 @@ following, and its messages name the rule only, never a value:
 | `material_selection_reconciliation` | Intervals and price changes per movement class, with whether each class is selected. Selected plus excluded price changes equal all price changes. |
 | `airport_downtown_summary` | One row per city and shared eligible interval under the approved pairs. It holds matched products, airport-only and downtown-only products, the count of every `CrossLocationOutcome`, and the same-direction, same-cent and same-percent counts. |
 | `persistence_summary` | One row per location, role and direction. It holds changed events, testable events (with a following interval), comparable-following events (held + continued + reverted), each outcome, not-testable counts by reason, returns and overshoots, and shares with named denominators. Not-testable (right-censored or hard-break) events are never in a denominator. |
-| `final_vancouver_decrease` | Section, metric and value rows for the derived case. They cover the interval, roles and final-capture flags, outcome counts and changed share, synchronization, decrease magnitudes, assortment and cross-location counts, provenance composition (dual alias source, primary only, secondary only), persistence and censoring, indicators and the disciplined statement. |
+| `final_vancouver_decrease` | Exactly one fixed-schema aggregate record. It no longer accepts arbitrary section, metric or value rows. Its approved fields are: `status` (`derived`, `no_decrease` or `city_unavailable`); `canonical_city`; the previous and current scheduled capture periods; `participating_locations`; `airport_involved`, `downtown_involved` and `all_locations_end_at_final_capture`; the six outcome counts; `comparable`, `price_change_count`, `assortment_event_count` and `changed_share_of_comparable`; the three synchronization flags and the largest cohorts; `magnitude_suppressed` with the decrease cent and percentage minimum, median and maximum, suppressed below two decreases; one `cross_<outcome>` count per cross-location outcome; provenance as four fixed category counts (`provenance_dual_alias_source`, `provenance_primary_alias_only`, `provenance_secondary_alias_only`, `provenance_other_canonical_location`), never raw source labels; one `persistence_<outcome>` count per outcome and one `not_testable_<reason>` count per reason; `persistence_testable`; and one `indicator_<FinalDecreaseIndicator>` flag per indicator. Derived-case fields must be empty unless the status is `derived`, and only `city_unavailable` has no city. The descriptive sentence (`FinalDecreaseCase.describe()`) is printed separately by the notebook and never stored in the table. |
 | `reconciliation_summary` | Each check with its expected and observed totals and its status. |
 
 Sanitized means safe for the aggregate notebook presentation and protected
 against product-level disclosure. It does **not** mean approved for
-committing or distribution: these are confidential local artifacts.
+committing or distribution: these are confidential local artifacts. The
+detailed Parquet table below is the only local artifact that contains
+event-level fields.
 
 **Local detailed event table** (privacy class: local detail, confidential).
 `write_detailed_event_table` is an explicit opt-in, reached through

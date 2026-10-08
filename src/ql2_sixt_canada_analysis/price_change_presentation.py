@@ -24,11 +24,17 @@ Entry points
 
 Sanitized aggregate tables
 --------------------------
-"Sanitized" is defined by an explicit allowlist
-(:data:`SANITIZED_COLUMN_ALLOWLIST`, exact per-table schemas in
-:data:`SANITIZED_TABLE_SCHEMAS`) and enforced by :func:`validate_sanitized_frame`:
-no product identity, rental dates, individual prices or changes, source
-provenance strings, raw job or row identifiers or file paths. Magnitude summaries
+"Sanitized" is defined by allowlists at two levels and enforced by
+:func:`validate_sanitized_frame`. Structurally, every table has an exact fixed
+schema (:data:`SANITIZED_TABLE_SCHEMAS`, union :data:`SANITIZED_COLUMN_ALLOWLIST`);
+semantically, every column has one value kind (:data:`SANITIZED_COLUMN_KINDS`:
+counts, flags, shares, aggregate statistics, canonical periods, approved
+cities/locations/roles, enum members, the documented rule text). There is no
+generic section/metric/value table: the final Vancouver decrease is one
+fixed-schema record whose provenance is four category counts. Unknown or
+malformed fields fail closed, and validation is repeated immediately before
+export. No product identity, rental dates, individual prices or changes, source
+provenance strings, raw job or row identifiers or file paths can pass. Magnitude summaries
 of an interval with fewer than two changed offers are suppressed (they would
 equal one offer's change). Sanitized tables are still **confidential local
 artifacts**: they protect against product-level disclosure in the notebook; they
@@ -55,6 +61,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -62,12 +69,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ql2_sixt_canada_analysis.price_change_analysis import (
     CROSS_LOCATION_PRODUCT_COLUMNS,
     EVENT_TABLE_COLUMNS,
     CrossLocationOutcome,
+    FinalDecreaseIndicator,
     FinalDecreaseStatus,
     IntervalFlag,
     MovementClass,
@@ -95,7 +104,9 @@ __all__ = [
     "MANIFEST_FILENAME",
     "MATERIAL_SELECTION_RULE",
     "PRESENTATION_OUTPUT_DIR_ENV_VAR",
+    "RECONCILIATION_CHECKS",
     "SANITIZED_COLUMN_ALLOWLIST",
+    "SANITIZED_COLUMN_KINDS",
     "SANITIZED_TABLE_SCHEMAS",
     "InterpretationStatus",
     "PresentationTables",
@@ -171,6 +182,34 @@ _SUMMARY_SCHEMA = (*_INTERVAL_KEY, "candidates", *_OUTCOMES, "comparable", "pric
                    "provenance_changed_candidates", *_PERSIST, "interval_flag", "material_synchronized",
                    "interpretation_status")
 _CROSS_OUTCOMES = tuple(f"cross_{o.value}" for o in CrossLocationOutcome)
+_PROVENANCE_CATEGORIES = ("provenance_dual_alias_source", "provenance_primary_alias_only",
+                          "provenance_secondary_alias_only", "provenance_other_canonical_location")
+_FINAL_CASE_CORE = ("status", "canonical_city")
+#: Fixed aggregate fields of a derived final decrease (all missing unless the case is derived).
+_FINAL_CASE_DERIVED = (
+    PREV, CUR, "participating_locations", "airport_involved", "downtown_involved",
+    "all_locations_end_at_final_capture", *_OUTCOMES, "comparable", "price_change_count", "assortment_event_count",
+    "changed_share_of_comparable", "direction_synchronized", "exact_cent_synchronized",
+    "exact_percent_synchronized", "largest_same_cent_cohort", "largest_same_percent_cohort", "magnitude_suppressed",
+    "decrease_cents_min", "decrease_cents_median", "decrease_cents_max", "decrease_percent_min",
+    "decrease_percent_median", "decrease_percent_max", *_CROSS_OUTCOMES, *_PROVENANCE_CATEGORIES,
+    *(f"persistence_{o.value}" for o in PersistenceOutcome),
+    *(f"not_testable_{r.value}" for r in NotTestableReason), "persistence_testable",
+    *(f"indicator_{i.value}" for i in FinalDecreaseIndicator))
+#: Reconciliation checks a reconciliation summary may report (an explicit allowlist of check names).
+RECONCILIATION_CHECKS: tuple[str, ...] = (
+    "event_candidates_equal_outcome_sum", "candidate_frame_rows_equal_event_candidates",
+    "interval_candidates_equal_event_candidates", "intervals_equal_event_intervals",
+    "price_changes_equal_increase_plus_decrease", "assortment_events_equal_appeared_plus_disappeared",
+    "persistence_partitions_price_changes", "persistence_records_equal_price_changes",
+    "selected_plus_excluded_equal_price_changes", "selected_price_changes_equal_material_table",
+    "cross_location_matched_equal_analysis", "cross_location_rows_unique",
+    "cross_location_airport_only_equal_analysis", "cross_location_downtown_only_equal_analysis",
+    "canonical_events_unique_across_aliases", "heatmap_increases_equal_interval_summary",
+    "heatmap_decreases_equal_interval_summary", "heatmap_interval_cells_equal_intervals",
+    "final_case_price_changes_subset_of_intervals", "final_case_locations_subset_of_intervals",
+    "final_case_assortment_events_equal_case", "final_case_persistence_partitions_case_changes",
+    "final_case_cross_location_equal_cross_table", "final_case_provenance_equal_case_candidates")
 #: Exact column order of every sanitized aggregate table.
 SANITIZED_TABLE_SCHEMAS: Mapping[str, tuple[str, ...]] = {
     "event_interval_summary": _SUMMARY_SCHEMA,
@@ -191,7 +230,7 @@ SANITIZED_TABLE_SCHEMAS: Mapping[str, tuple[str, ...]] = {
         *(f"not_testable_{r.value}" for r in NotTestableReason), "returned_to_prior_price", "overshot_prior_price",
         "held_share_of_comparable_following", "continued_share_of_comparable_following",
         "reverted_share_of_comparable_following", "disappeared_share_of_testable", "ambiguous_share_of_testable"),
-    "final_vancouver_decrease": ("section", "metric", "value"),
+    "final_vancouver_decrease": (*_FINAL_CASE_CORE, *_FINAL_CASE_DERIVED),
     "reconciliation_summary": ("check", "expected", "observed", "status"),
 }
 #: Every column a sanitized aggregate table may contain (the union of the exact schemas).
@@ -207,14 +246,194 @@ FORBIDDEN_SANITIZED_COLUMNS: Mapping[str, frozenset[str]] = {
                                     "city", "location"}),
     "raw_identifier": frozenset({*FORBIDDEN_TIMESTAMP_SOURCES, "job_id", "row_index", "parent_key"}),
 }
-_FORBIDDEN_TEXT = ("|",)                    # joined provenance label sets never appear in an aggregate cell
 
 
-def validate_sanitized_frame(name: str, frame: object) -> None:
-    """Refuse a frame that is not exactly an allowlisted sanitized table (messages name the rule only).
+class _Kind(StrEnum):
+    """Semantic value kinds of sanitized columns (every allowlisted column has exactly one)."""
+
+    COUNT = "count"                  # non-negative integer, never a boolean
+    FLAG = "flag"                    # boolean
+    SHARE = "share"                  # finite, 0..1
+    PERIOD = "period"                # canonical YYYYMMDDTHHMMSSZ scheduled period
+    CITY = "city"                    # an approved canonical city
+    LOCATION = "location"            # an approved canonical location name (paired with its city)
+    ROLE = "role"                    # an approved location-role enum value
+    SIGNED_CENTS = "signed_cents"    # finite aggregate cent statistic (may be negative)
+    PERCENT = "percent"              # finite aggregate percentage statistic
+    ENUM = "enum"                    # a member of the column's enum
+    RULE_TEXT = "rule_text"          # exactly the documented selection rule
+
+
+def _enum_values(enum: type[StrEnum]) -> frozenset[str]:
+    return frozenset(m.value for m in enum)
+
+
+_ENUMS: Mapping[str, frozenset[str]] = {
+    "movement_class": _enum_values(MovementClass), "interval_flag": _enum_values(IntervalFlag),
+    "interpretation_status": _enum_values(InterpretationStatus), "status": frozenset(),   # per table, below
+    "direction": frozenset({TerminalOutcome.INCREASE.value, TerminalOutcome.DECREASE.value}),
+    "check": frozenset(RECONCILIATION_CHECKS),
+}
+_TABLE_ENUMS: Mapping[tuple[str, str], frozenset[str]] = {
+    ("final_vancouver_decrease", "status"): _enum_values(FinalDecreaseStatus),
+    ("reconciliation_summary", "status"): frozenset({"reconciled", "failed"}),
+}
+_FLAGS = frozenset({"direction_synchronized", "exact_cent_synchronized", "exact_percent_synchronized",
+                    "magnitude_suppressed", "material_synchronized", "selected", "airport_involved",
+                    "downtown_involved", "all_locations_end_at_final_capture", "persistence_testable",
+                    *(f"indicator_{i.value}" for i in FinalDecreaseIndicator)})
+_SHARES = frozenset({"changed_share_of_comparable", "held_share_of_comparable_following",
+                     "continued_share_of_comparable_following", "reverted_share_of_comparable_following",
+                     "disappeared_share_of_testable", "ambiguous_share_of_testable"})
+_SIGNED = frozenset({"min_change_cents", "max_change_cents", "decrease_cents_min", "decrease_cents_median",
+                     "decrease_cents_max"})
+_PERCENTS = frozenset({"median_abs_change_percent", "max_abs_change_percent", "decrease_percent_min",
+                       "decrease_percent_median", "decrease_percent_max"})
+_LOCATIONS = frozenset({"canonical_location", "airport_location", "downtown_location"})
+#: Columns that may be missing (``None``/``NaN``); every other value must be present.
+_NULLABLE = _SHARES | _SIGNED | _PERCENTS | frozenset(_FINAL_CASE_DERIVED)
+
+
+def _kind(column: str) -> _Kind:
+    if column in _FLAGS:
+        return _Kind.FLAG
+    if column in _SHARES:
+        return _Kind.SHARE
+    if column in _SIGNED:
+        return _Kind.SIGNED_CENTS
+    if column in _PERCENTS:
+        return _Kind.PERCENT
+    if column in (PREV, CUR):
+        return _Kind.PERIOD
+    if column == "canonical_city":
+        return _Kind.CITY
+    if column in _LOCATIONS:
+        return _Kind.LOCATION
+    if column == "role":
+        return _Kind.ROLE
+    if column in _ENUMS:
+        return _Kind.ENUM
+    if column == "selection_rule":
+        return _Kind.RULE_TEXT
+    return _Kind.COUNT
+
+
+#: The semantic kind of every allowlisted column (an explicit, complete type allowlist).
+SANITIZED_COLUMN_KINDS: Mapping[str, str] = {c: _kind(c).value for c in sorted(SANITIZED_COLUMN_ALLOWLIST)}
+
+
+def _missing(value: object) -> bool:
+    return value is None or value is pd.NA or (isinstance(value, float) and math.isnan(value))
+
+
+def _is_count(value: object) -> bool:
+    if isinstance(value, (bool, np.bool_)):
+        return False
+    if isinstance(value, (int, np.integer)):
+        return int(value) >= 0
+    return False
+
+
+def _is_number(value: object) -> bool:
+    return (not isinstance(value, (bool, np.bool_)) and isinstance(value, (int, float, np.integer, np.floating))
+            and math.isfinite(float(value)))
+
+
+def _approved_locations() -> frozenset[tuple[str, str]]:
+    from ql2_sixt_canada_analysis.location_authority import current_location_authority
+
+    authority = current_location_authority()
+    return frozenset(tuple(authority.canonical(k)) for k in authority.contract.expected_keys)
+
+
+def _value_ok(table: str, column: str, value: object, approved: frozenset[tuple[str, str]]) -> bool:
+    from ql2_sixt_canada_analysis.authority_decisions import LocationRoleDecision
+    from ql2_sixt_canada_analysis.price_change_events import parse_scheduled_period
+
+    kind = _kind(column)
+    if kind is _Kind.COUNT:
+        return _is_count(value)
+    if kind is _Kind.FLAG:
+        return isinstance(value, (bool, np.bool_))
+    if kind is _Kind.SHARE:
+        return _is_number(value) and 0.0 <= float(value) <= 1.0
+    if kind in (_Kind.SIGNED_CENTS, _Kind.PERCENT):
+        return _is_number(value) and (kind is _Kind.SIGNED_CENTS or column.startswith("decrease_")
+                                      or float(value) >= 0.0)
+    if not isinstance(value, str):
+        return False
+    if kind is _Kind.PERIOD:
+        try:
+            parse_scheduled_period(value)
+        except ValueError:
+            return False
+        return True
+    if kind is _Kind.CITY:
+        return value in {city for city, _ in approved}
+    if kind is _Kind.LOCATION:
+        return value in {location for _, location in approved}
+    if kind is _Kind.ROLE:
+        return value in _enum_values(LocationRoleDecision)
+    if kind is _Kind.RULE_TEXT:
+        return value == MATERIAL_SELECTION_RULE
+    return value in _TABLE_ENUMS.get((table, column), _ENUMS[column])
+
+
+def _semantic(name: str, frame: pd.DataFrame, approved: frozenset[tuple[str, str]]) -> None:
+    columns = list(frame.columns)
+    for record in frame.itertuples(index=False, name=None):
+        row = dict(zip(columns, record))
+        for column, value in row.items():
+            if isinstance(value, str) and "|" in value:
+                raise PrivacyViolationError("rule source_provenance: provenance label text in an aggregate cell")
+            if _missing(value):
+                if column not in _NULLABLE and not (name == "final_vancouver_decrease"
+                                                    and column == "canonical_city"):
+                    raise PrivacyViolationError(f"rule missing_value: column {column} requires a value")
+                continue
+            if not _value_ok(name, column, value, approved):
+                raise PrivacyViolationError(
+                    f"rule value_domain: column {column} holds a value outside its {_kind(column).value} domain")
+        city = row.get("canonical_city")
+        for column in _LOCATIONS & set(columns):
+            if (city, row[column]) not in approved:
+                raise PrivacyViolationError(f"rule value_domain: column {column} is not an approved location")
+        if name == "final_vancouver_decrease":
+            derived = row["status"] == FinalDecreaseStatus.DERIVED.value
+            if derived and any(_missing(row[c]) for c in _FINAL_CASE_DERIVED if c not in _SHARES | _SIGNED
+                               | _PERCENTS):
+                raise PrivacyViolationError("rule status_fields: a derived case needs every derived field")
+            if not derived and any(not _missing(row[c]) for c in _FINAL_CASE_DERIVED):
+                raise PrivacyViolationError("rule status_fields: a non-derived case holds derived-case fields")
+            if (row["status"] == FinalDecreaseStatus.CITY_UNAVAILABLE.value) != _missing(row["canonical_city"]):
+                raise PrivacyViolationError("rule status_fields: only an unavailable city has no canonical city")
+    if name == "final_vancouver_decrease" and len(frame) != 1:
+        raise PrivacyViolationError("rule cardinality: the final decrease table holds exactly one record")
+    key = {"event_interval_summary": ["canonical_city", "canonical_location", PREV, CUR],
+           "material_synchronized_movements": ["canonical_city", "canonical_location", PREV, CUR],
+           "material_selection_reconciliation": ["movement_class"],
+           "airport_downtown_summary": ["canonical_city", PREV, CUR],
+           "persistence_summary": ["canonical_city", "canonical_location", "direction"],
+           "reconciliation_summary": ["check"]}.get(name)
+    if key and frame.duplicated(key).any():
+        raise PrivacyViolationError("rule duplicate_record: a sanitized record is repeated")
+
+
+def validate_sanitized_frame(name: str, frame: object, *,
+                             approved_locations: Sequence[tuple[str, str]] | None = None) -> None:
+    """Refuse a frame that is not exactly an allowlisted, semantically valid sanitized table.
+
+    Structural: approved table name, a DataFrame, no detailed-frame schema, no
+    forbidden or unexpected columns, exactly the table's column order.
+    Semantic: every value has its column's kind (non-negative integer counts,
+    booleans, finite 0..1 shares, finite statistics, canonical periods,
+    approved cities/locations/roles, enum members, the documented rule text),
+    missing values only where allowed, no provenance label text, no duplicate
+    records and status-consistent final-case fields. Messages name the rule
+    (and at most a column name), never a value.
 
     Raises:
-        PrivacyViolationError: Unknown table, detailed frame, forbidden or unexpected columns, provenance text.
+        PrivacyViolationError: Any structural or semantic violation.
     """
     if name not in SANITIZED_TABLE_SCHEMAS:
         raise PrivacyViolationError("rule unknown_table: only allowlisted sanitized tables can be exported")
@@ -230,12 +449,9 @@ def validate_sanitized_frame(name: str, frame: object) -> None:
         raise PrivacyViolationError("rule allowlist: a column outside the sanitized allowlist is present")
     if tuple(map(str, frame.columns)) != SANITIZED_TABLE_SCHEMAS[name]:
         raise PrivacyViolationError("rule schema: columns differ from the table's exact sanitized schema")
-    if name != "final_vancouver_decrease":
-        for column in frame.columns:
-            values = frame[column]
-            if (values.dtype == object or pd.api.types.is_string_dtype(values)) and any(isinstance(v, str) and any(t in v for t in _FORBIDDEN_TEXT)
-                                              for v in values):
-                raise PrivacyViolationError("rule source_provenance: provenance label text in an aggregate cell")
+    approved = (frozenset(tuple(k) for k in approved_locations) if approved_locations is not None
+                else _approved_locations())
+    _semantic(name, frame, approved)
 
 
 # ------------------------------------------------------------------ tables
@@ -386,55 +602,67 @@ def _persistence_table(analysis: PriceChangeAnalysisResult) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=list(schema))
 
 
-def _final_case(analysis: PriceChangeAnalysisResult) -> pd.DataFrame:
-    case = analysis.report.final_decrease
+def _provenance_categories(case, analysis: PriceChangeAnalysisResult) -> dict[str, int]:  # type: ignore[no-untyped-def]
+    """Fixed aggregate provenance categories of the case (raw label sets never leave this function)."""
     policy = getattr(analysis.location_authority, "policy", None)
     primary = getattr(policy, "first", (None, None))[1]
     secondary = getattr(policy, "second", (None, None))[1]
-    rows: list[tuple[str, str, str]] = [("case", "status", case.status.value)]
+    composition = dict.fromkeys(_PROVENANCE_CATEGORIES, 0)
+    for labels, n in case.provenance:
+        parts = set(labels.split("|")) if labels else set()
+        if {primary, secondary} <= parts:
+            composition["provenance_dual_alias_source"] += n
+        elif parts == {primary}:
+            composition["provenance_primary_alias_only"] += n
+        elif parts == {secondary}:
+            composition["provenance_secondary_alias_only"] += n
+        else:
+            composition["provenance_other_canonical_location"] += n
+    return composition
+
+
+def _final_case(analysis: PriceChangeAnalysisResult) -> pd.DataFrame:
+    """One fixed-schema aggregate record of the derived final decrease (no free text, labels or values)."""
+    from ql2_sixt_canada_analysis.authority_decisions import LocationRoleDecision
+
+    case = analysis.report.final_decrease
+    row: dict[str, object] = dict.fromkeys(SANITIZED_TABLE_SCHEMAS["final_vancouver_decrease"])
+    row["status"] = case.status.value
+    row["canonical_city"] = case.canonical_city
     if case.status is FinalDecreaseStatus.DERIVED:
-        rows += [("case", "canonical_city", case.canonical_city), ("case", PREV, case.previous_period),
-                 ("case", CUR, case.current_period)]
-        for key, role, final in case.locations:
-            rows += [("location", f"{key[1]}:role", role), ("location", f"{key[1]}:ends_at_final_capture",
-                                                             str(bool(final)).lower())]
-        rows += [("outcomes", name, str(n)) for name, n in case.counts]
-        rows += [("movement", "comparable", str(case.comparable)),
-                 ("movement", "price_change_count", str(case.price_change_count)),
-                 ("movement", "changed_share_of_comparable",
-                  "" if case.changed_share_of_comparable is None else repr(case.changed_share_of_comparable)),
-                 ("synchronization", "direction_synchronized", str(case.direction_synchronized).lower()),
-                 ("synchronization", "exact_cent_synchronized", str(case.exact_cent_synchronized).lower()),
-                 ("synchronization", "exact_percent_synchronized", str(case.exact_percent_synchronized).lower()),
-                 ("synchronization", "largest_same_cent_cohort", str(case.largest_same_cent_cohort)),
-                 ("synchronization", "largest_same_percent_cohort", str(case.largest_same_percent_cohort))]
-        if case.price_change_count >= _MIN_CHANGES_FOR_MAGNITUDES:
-            rows += [("decrease_magnitude", f"cents_{k}", repr(v)) for k, v in case.decrease_cents]
-            rows += [("decrease_magnitude", f"percent_{k}", repr(v)) for k, v in case.decrease_percent]
-        rows += [("assortment", "assortment_event_count", str(case.assortment_event_count))]
-        rows += [("cross_location", name, str(n)) for name, n in case.cross_location]
-        composition: Counter = Counter()
-        for labels, n in case.provenance:
-            parts = set(labels.split("|")) if labels else set()
-            if {primary, secondary} <= parts:
-                composition["dual_alias_source"] += n
-            elif parts == {primary}:
-                composition["primary_alias_only"] += n
-            elif parts == {secondary}:
-                composition["secondary_alias_only"] += n
-            else:
-                composition["other_canonical_location"] += n
-        rows += [("provenance", name, str(composition[name])) for name in
-                 ("dual_alias_source", "primary_alias_only", "secondary_alias_only", "other_canonical_location")]
-        rows += [("persistence", name, str(n)) for name, n in case.persistence]
-        rows += [("persistence", f"not_testable_{name}", str(n)) for name, n in case.not_testable_reasons]
-        rows += [("persistence", "persistence_testable", str(case.persistence_testable).lower())]
-        rows += [("indicators", "indicator", i.value) for i in case.indicators]
-        rows += [("interpretation", "statement", case.describe())]
-    return pd.DataFrame(rows, columns=list(SANITIZED_TABLE_SCHEMAS["final_vancouver_decrease"]))
+        counts = dict(case.counts)
+        roles = {role for _, role, _ in case.locations}
+        suppressed = counts.get(TerminalOutcome.DECREASE.value, 0) < _MIN_CHANGES_FOR_MAGNITUDES
+        row.update({
+            PREV: case.previous_period, CUR: case.current_period, "participating_locations": len(case.locations),
+            "airport_involved": LocationRoleDecision.AIRPORT.value in roles,
+            "downtown_involved": LocationRoleDecision.DOWNTOWN.value in roles,
+            "all_locations_end_at_final_capture": all(bool(final) for _, _, final in case.locations),
+            **{o: int(counts.get(o, 0)) for o in _OUTCOMES},
+            "comparable": case.comparable, "price_change_count": case.price_change_count,
+            "assortment_event_count": case.assortment_event_count,
+            "changed_share_of_comparable": case.changed_share_of_comparable,
+            "direction_synchronized": case.direction_synchronized,
+            "exact_cent_synchronized": case.exact_cent_synchronized,
+            "exact_percent_synchronized": case.exact_percent_synchronized,
+            "largest_same_cent_cohort": case.largest_same_cent_cohort,
+            "largest_same_percent_cohort": case.largest_same_percent_cohort, "magnitude_suppressed": suppressed,
+            **{f"decrease_cents_{k}": (None if suppressed else float(v)) for k, v in case.decrease_cents},
+            **{f"decrease_percent_{k}": (None if suppressed else float(v)) for k, v in case.decrease_percent},
+            **{f"cross_{o.value}": int(dict(case.cross_location).get(o.value, 0)) for o in CrossLocationOutcome},
+            **_provenance_categories(case, analysis),
+            **{f"persistence_{o.value}": int(dict(case.persistence).get(o.value, 0)) for o in PersistenceOutcome},
+            **{f"not_testable_{r.value}": int(dict(case.not_testable_reasons).get(r.value, 0))
+               for r in NotTestableReason},
+            "persistence_testable": case.persistence_testable,
+            **{f"indicator_{i.value}": i in case.indicators for i in FinalDecreaseIndicator},
+        })
+    return pd.DataFrame([row], columns=list(SANITIZED_TABLE_SCHEMAS["final_vancouver_decrease"]), dtype=object)
 
 
 def _check(rows: list, name: str, expected: int, observed: int) -> None:
+    if name not in RECONCILIATION_CHECKS:
+        raise PriceChangeReconciliationError("an unregistered reconciliation check")
     rows.append((name, int(expected), int(observed), "reconciled" if int(expected) == int(observed) else "failed"))
 
 
@@ -481,6 +709,19 @@ def _reconciliation(analysis, summary, material, selection, cross, persistence, 
         _check(rows, "final_case_price_changes_subset_of_intervals", case.price_change_count,
                int(sub["price_change_count"].sum()))
         _check(rows, "final_case_locations_subset_of_intervals", len(case.locations), len(sub))
+        counts = dict(case.counts)
+        _check(rows, "final_case_assortment_events_equal_case",
+               counts.get("appeared", 0) + counts.get("disappeared", 0), int(sub["assortment_event_count"].sum()))
+        _check(rows, "final_case_persistence_partitions_case_changes", case.price_change_count,
+               sum(n for _, n in case.persistence))
+        rows_cross = analysis.cross_location[
+            (analysis.cross_location["canonical_city"] == case.canonical_city)
+            & (analysis.cross_location[PREV] == case.previous_period)
+            & (analysis.cross_location[CUR] == case.current_period)]
+        _check(rows, "final_case_cross_location_equal_cross_table", sum(n for _, n in case.cross_location),
+               len(rows_cross))
+        _check(rows, "final_case_provenance_equal_case_candidates", int(sub["candidates"].sum()),
+               sum(_provenance_categories(case, analysis).values()))
     return pd.DataFrame(rows, columns=list(SANITIZED_TABLE_SCHEMAS["reconciliation_summary"]))
 
 
@@ -640,10 +881,14 @@ def export_sanitized_tables(tables: PresentationTables, output_dir: str | os.Pat
     """Write every sanitized aggregate table as CSV into ``output_dir`` (validated again; atomic)."""
     if not isinstance(tables, PresentationTables):
         raise PrivacyViolationError("rule detailed_frame: only PresentationTables can be exported as sanitized")
+    for name, frame in tables.items():                    # complete validation immediately before export
+        validate_sanitized_frame(name, frame)
+    recon = tables.reconciliation_summary
+    if not (recon["status"] == "reconciled").all() or not (recon["expected"] == recon["observed"]).all():
+        raise PriceChangeReconciliationError("rule reconciliation: tables are not reconciled at export")
     directory = _output_directory(output_dir)
     paths = []
     for name, frame in tables.items():
-        validate_sanitized_frame(name, frame)
         path = directory / f"price_change_{name}.csv"
         _write(path, lambda p, f=frame: f.to_csv(p, index=False), mode=0o644)
         paths.append(path)

@@ -221,15 +221,30 @@ def test_vancouver_alias_never_creates_two_presentation_events(rich, tables) -> 
 
 def test_final_vancouver_table_is_a_subset_of_the_validated_case(rich, tables) -> None:  # type: ignore[no-untyped-def]
     case = rich.report.final_decrease
-    f = dict(zip(tables.final_vancouver_decrease["metric"], tables.final_vancouver_decrease["value"]))
+    frame = tables.final_vancouver_decrease
+    assert tuple(frame.columns) == SANITIZED_TABLE_SCHEMAS["final_vancouver_decrease"] and len(frame) == 1
+    f = frame.iloc[0].to_dict()
     assert f["status"] == "derived" and f[CUR] == case.current_period and f[PREV] == case.previous_period
-    assert int(f["decrease"]) == dict(case.counts)["decrease"] and int(f["price_change_count"]) == 2
-    assert f["persistence_testable"] == "false" and int(f["not_testable_right_censored_final_capture"]) == 2
-    assert int(f["dual_alias_source"]) == 2 and int(f["primary_alias_only"]) == 1   # filler + car A; car B
-    assert "not proof" in f["statement"]
+    assert f["decrease"] == dict(case.counts)["decrease"] and f["price_change_count"] == case.price_change_count == 2
+    assert f["assortment_event_count"] == case.assortment_event_count
+    assert f["persistence_testable"] is False and f["not_testable_right_censored_final_capture"] == 2
+    assert f["persistence_not_testable"] == 2 and f["indicator_persistence_not_testable_right_censored"] is True
+    assert (f["provenance_dual_alias_source"], f["provenance_primary_alias_only"]) == (2, 1)   # filler + A; B
+    assert sum(f[c] for c in ("provenance_dual_alias_source", "provenance_primary_alias_only",
+                              "provenance_secondary_alias_only", "provenance_other_canonical_location")) == sum(
+        n for _, n in case.counts)
+    assert (f["participating_locations"], f["airport_involved"], f["downtown_involved"]) == (2, True, True)
+    assert f["all_locations_end_at_final_capture"] is True
+    assert f["decrease_cents_min"] is not None and f["magnitude_suppressed"] is False
     s = tables.event_interval_summary
     sub = s[(s["canonical_city"] == "vancouver") & (s[CUR] == case.current_period)]
     assert int(sub["price_change_count"].sum()) == case.price_change_count
+    recon = tables.reconciliation_summary.set_index("check")
+    for check in ("final_case_assortment_events_equal_case", "final_case_persistence_partitions_case_changes",
+                  "final_case_cross_location_equal_cross_table", "final_case_provenance_equal_case_candidates"):
+        assert recon.loc[check, "status"] == "reconciled"
+    text = all_text(frame)
+    assert "|" not in text and "Thurlow" not in text and "SYNTH" not in text and "not proof" not in text
 
 
 # ============================================================================ heatmap
@@ -564,3 +579,161 @@ def test_readme_documents_privacy_and_data_plan_alignment() -> None:
                  "right-censored", "observed price-change candidates", "roughly 90 hours",
                  "reports/price_change_events/", "Clear All Outputs"):
         assert text in readme, text
+
+
+# ============================================================================ semantic allowlist (final case)
+
+SECRET = "SYNTH-SECRET-PRODUCT"
+FINAL = "final_vancouver_decrease"
+
+
+def final_row(tables, **changes):  # type: ignore[no-untyped-def]
+    """A copy of the generated final-case record with ``changes`` applied (object dtype keeps exact types)."""
+    frame = tables.final_vancouver_decrease.copy().astype(object)
+    for column, value in changes.items():
+        frame[column] = pd.Series([value], dtype=object)
+    return frame
+
+
+def rejected(name: str, frame: pd.DataFrame, rule: str) -> str:
+    with pytest.raises(PrivacyViolationError) as info:
+        validate_sanitized_frame(name, frame)
+    message = str(info.value)
+    assert f"rule {rule}" in message, message
+    assert SECRET not in message and "5500" not in message
+    return message
+
+
+def non_derived(tables, status: str, city: object) -> pd.DataFrame:  # type: ignore[no-untyped-def]
+    frame = tables.final_vancouver_decrease.copy().astype(object)
+    for column in frame.columns:
+        frame[column] = pd.Series([None], dtype=object)
+    frame["status"] = pd.Series([status], dtype=object)
+    frame["canonical_city"] = pd.Series([city], dtype=object)
+    return frame
+
+
+def test_the_generated_final_case_has_exactly_the_fixed_schema_and_passes(tables) -> None:  # type: ignore[no-untyped-def]
+    frame = tables.final_vancouver_decrease
+    assert tuple(frame.columns) == SANITIZED_TABLE_SCHEMAS[FINAL] and len(frame) == 1
+    assert {"section", "metric", "value"}.isdisjoint(frame.columns)
+    validate_sanitized_frame(FINAL, frame)
+    kinds = pcp.SANITIZED_COLUMN_KINDS
+    assert set(SANITIZED_TABLE_SCHEMAS[FINAL]) <= set(kinds) and set(kinds) == SANITIZED_COLUMN_ALLOWLIST
+
+
+def test_no_decrease_and_city_unavailable_cases_pass_with_only_their_fields(tables) -> None:  # type: ignore[no-untyped-def]
+    generated = build_presentation_tables(analyze(path(VAN_DOWN, (50.0, 55.0)))).final_vancouver_decrease
+    assert generated.iloc[0]["status"] == "no_decrease" and generated.iloc[0]["canonical_city"] == "vancouver"
+    assert all(v is None for c, v in generated.iloc[0].items() if c not in ("status", "canonical_city"))
+    validate_sanitized_frame(FINAL, generated)
+    validate_sanitized_frame(FINAL, non_derived(tables, "city_unavailable", None))
+    rejected(FINAL, non_derived(tables, "city_unavailable", "vancouver"), "status_fields")
+    rejected(FINAL, non_derived(tables, "no_decrease", None), "status_fields")
+    leaked = non_derived(tables, "no_decrease", "vancouver")
+    leaked["price_change_count"] = pd.Series([3], dtype=object)
+    rejected(FINAL, leaked, "status_fields")                                   # derived-only field on a non-derived case
+
+
+@pytest.mark.parametrize(("column", "rule"), [
+    ("car_name", "product_identity"), ("car_type", "product_identity"), ("transmission", "product_identity"),
+    ("previous_price_cents", "individual_price"), ("current_price", "individual_price"),
+    ("change_percent", "individual_price"), ("source_location_labels", "source_provenance"),
+    ("job_id", "raw_identifier"), ("row_index", "raw_identifier"), ("section", "allowlist"),
+    ("metric", "allowlist"), ("value", "allowlist"), ("free_text", "allowlist")])
+def test_forbidden_or_unknown_columns_are_rejected_from_the_final_case(tables, column, rule) -> None:  # type: ignore[no-untyped-def]
+    message = rejected(FINAL, final_row(tables, **{column: SECRET}), rule)
+    assert column not in message or rule == "allowlist"
+
+
+def test_missing_or_reordered_final_case_columns_are_rejected(tables) -> None:  # type: ignore[no-untyped-def]
+    frame = tables.final_vancouver_decrease
+    rejected(FINAL, frame.drop(columns="persistence_testable"), "schema")
+    rejected(FINAL, frame[list(reversed(frame.columns))], "schema")
+
+
+@pytest.mark.parametrize(("column", "value", "rule"), [
+    # The demonstrated vulnerability: approved schema, product- or price-level content in its fields.
+    ("status", "car_name", "value_domain"),
+    ("status", SECRET, "value_domain"),
+    ("canonical_city", SECRET, "value_domain"),
+    (CUR, SECRET, "value_domain"),
+    (PREV, "20300304T0800Z", "value_domain"),                                 # malformed scheduled period
+    ("price_change_count", 5500.0, "value_domain"),                           # a price in a count field
+    ("comparable", "previous_price_cents", "value_domain"),
+    ("decrease_cents_min", "5500", "value_domain"),
+    ("airport_involved", "true", "value_domain"),                             # non-boolean flag
+    ("airport_involved", 1, "value_domain"),
+    ("price_change_count", -1, "value_domain"),                               # negative count
+    ("price_change_count", True, "value_domain"),                             # boolean used as a count
+    ("changed_share_of_comparable", 1.5, "value_domain"),
+    ("changed_share_of_comparable", -0.1, "value_domain"),
+    ("changed_share_of_comparable", float("inf"), "value_domain"),
+    ("decrease_percent_max", float("-inf"), "value_domain"),
+    ("status", "proven_repricing", "value_domain"),                           # unknown enum value
+    ("provenance_dual_alias_source", "Vancouver Downtown|Vancouver Thurlow", "source_provenance"),
+    ("comparable", None, "status_fields"),                                    # a derived case needs its fields
+])
+def test_product_price_and_malformed_values_in_approved_fields_are_rejected(tables, column, value, rule) -> None:  # type: ignore[no-untyped-def]
+    rejected(FINAL, final_row(tables, **{column: value}), rule)
+
+
+def test_nan_shares_are_missing_values_never_valid_numbers(tables) -> None:  # type: ignore[no-untyped-def]
+    validate_sanitized_frame(FINAL, final_row(tables, changed_share_of_comparable=float("nan")))  # optional share
+    summary = tables.event_interval_summary.copy().astype(object)
+    summary.loc[summary.index[0], "candidates"] = float("nan")
+    rejected("event_interval_summary", summary, "missing_value")
+    summary = tables.event_interval_summary.copy().astype(object)
+    summary.loc[summary.index[0], "changed_share_of_comparable"] = float("inf")
+    rejected("event_interval_summary", summary, "value_domain")
+
+
+def test_duplicate_records_and_extra_final_rows_are_rejected(tables) -> None:  # type: ignore[no-untyped-def]
+    rejected(FINAL, pd.concat([tables.final_vancouver_decrease] * 2, ignore_index=True), "cardinality")
+    summary = tables.event_interval_summary
+    rejected("event_interval_summary", pd.concat([summary, summary.iloc[:1]], ignore_index=True), "duplicate_record")
+    recon = tables.reconciliation_summary
+    rejected("reconciliation_summary", pd.concat([recon, recon.iloc[:1]], ignore_index=True), "duplicate_record")
+
+
+@pytest.mark.parametrize(("table", "column", "value"), [
+    ("event_interval_summary", "canonical_location", SECRET),                 # unapproved location label
+    ("event_interval_summary", "role", "Airport"),
+    ("event_interval_summary", "movement_class", SECRET),
+    ("event_interval_summary", "interval_flag", "car_name"),
+    ("persistence_summary", "direction", "unchanged"),
+    ("reconciliation_summary", "check", "previous_price_cents"),
+    ("reconciliation_summary", "status", "ok"),
+    ("material_selection_reconciliation", "selected", "yes"),
+    ("airport_downtown_summary", "airport_location", "Vancouver Thurlow"),     # a source alias, not canonical
+])
+def test_every_sanitized_table_is_semantically_validated(tables, table, column, value) -> None:  # type: ignore[no-untyped-def]
+    frame = getattr(tables, table).copy().astype(object)
+    frame.loc[frame.index[0], column] = value
+    rejected(table, frame, "value_domain")
+
+
+def test_tables_mutated_after_construction_are_rejected_at_export(tables, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    mutated = build_presentation_tables(analyze(RICH))
+    mutated.final_vancouver_decrease.loc[0, "canonical_city"] = SECRET          # in-place, after validation
+    with pytest.raises(PrivacyViolationError) as info:
+        export_sanitized_tables(mutated, tmp_path / "out")
+    assert SECRET not in str(info.value) and not (tmp_path / "out").exists()
+    priced = build_presentation_tables(analyze(RICH))
+    priced.event_interval_summary.loc[0, "interval_flag"] = SECRET
+    with pytest.raises(PrivacyViolationError):
+        export_sanitized_tables(priced, tmp_path / "out")
+    unreconciled = build_presentation_tables(analyze(RICH))
+    unreconciled.reconciliation_summary.loc[0, "observed"] = 10 ** 6
+    with pytest.raises(PriceChangeReconciliationError):
+        export_sanitized_tables(unreconciled, tmp_path / "out")
+    assert not (tmp_path / "out").exists()                                     # nothing is written on refusal
+
+
+def test_exported_final_case_csv_holds_only_the_fixed_aggregate_fields(tables, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    paths = export_sanitized_tables(tables, tmp_path / "out")
+    final = next(p for p in paths if p.name == f"price_change_{FINAL}.csv")
+    frame = pd.read_csv(final)
+    assert tuple(frame.columns) == SANITIZED_TABLE_SCHEMAS[FINAL] and len(frame) == 1
+    text = final.read_text(encoding="utf-8")
+    assert "SYNTH" not in text and "|" not in text and "Thurlow" not in text and "not proof" not in text
