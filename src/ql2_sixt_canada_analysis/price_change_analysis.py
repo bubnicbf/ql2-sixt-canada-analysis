@@ -1114,7 +1114,7 @@ def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 1
     periods, labels = source["periods"], source["labels"]
     peak = max(1.0, float(np.nanmax(np.concatenate([source["increase"].ravel(), source["decrease"].ravel(),
                                                      [0.0]]))))
-    width = min(4.0 + 0.16 * len(periods), 30.0)
+    width = min(max(11.0, 4.0 + 0.16 * len(periods)), 30.0)
     fig = Figure(figsize=(width, 2.2 + 0.9 * len(labels)), dpi=dpi, facecolor="white", layout="constrained")
     axes = fig.subplots(2, 1, sharex=True)
     panels = ((axes[0], source["increase"], "#2a78d6", "Increases per interval (observed candidates)"),
@@ -1133,15 +1133,34 @@ def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 1
                     ax.text(j, i, str(int(matrix[i, j])), ha="center", va="center", fontsize=6,
                             color="#0b0b0b" if matrix[i, j] < 0.6 * peak else "white")
         ax.set_yticks(range(len(labels)), labels, fontsize=8)
+        ax.set_yticks([i + 0.5 for i in range(len(labels) - 1)], minor=True)
+        ax.grid(which="minor", axis="y", color="white", linewidth=2.0)
+        ax.tick_params(which="minor", left=False)
         ax.set_title(title, loc="left", fontsize=11, color="#0b0b0b")
-        fig.colorbar(image, ax=ax, shrink=0.8, label="count")
+        from matplotlib.ticker import MaxNLocator
+
+        bar = fig.colorbar(image, ax=ax, shrink=0.8, label="count")
+        bar.locator = MaxNLocator(integer=True)
+        bar.update_ticks()
     axes[1].set_xticks(range(0, len(periods), step), [periods[j] for j in range(0, len(periods), step)],
                        rotation=60, ha="right", fontsize=7)
     axes[1].set_xlabel("Interval current scheduled capture period (UTC)", color="#52514e")
     fig.suptitle("Observed price-change candidates by approved location and eligible interval", x=0.01,
                  ha="left", fontsize=12)
-    fig.supxlabel("Hatched grey: no eligible interval (hard break or outside the schedule) - not zero activity.",
-                  fontsize=8, color="#52514e", x=0.01, ha="left")
+    # (the legend is placed outside the axes, above the panels, by the constrained layout)
+    from matplotlib.patches import Patch
+
+    fig.legend(handles=[Patch(facecolor="#d9d8d4", edgecolor="#9a9994", hatch="///",
+                              label="No eligible interval (masked break)"),
+                        Patch(facecolor="#f7f6f3", edgecolor="#9a9994", label="Eligible interval, zero changes")],
+               loc="outside upper right", ncols=2, fontsize=8, frameon=False)
+    import textwrap
+
+    note = ("Both panels share one count scale. Hatched grey: no eligible interval ending at that capture "
+            "(governed exclusion, missing capture, non-one-hour gap, source-stream change, first capture or "
+            "outside the schedule) - not zero activity.")
+    fig.supxlabel("\n".join(textwrap.wrap(note, int(width * 14))), fontsize=8, color="#52514e", x=0.01,
+                  ha="left")
     return fig, (axes[0], axes[1])
 
 
@@ -1152,12 +1171,16 @@ def _hatch(j: int, i: int):  # type: ignore[no-untyped-def]
                      linewidth=0)
 
 
-def _atomic_write(path: Path, write) -> None:  # type: ignore[no-untyped-def]
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _atomic_write(path: Path, write, *, mode: int | None = None, create_parents: bool = True) -> None:  # type: ignore[no-untyped-def]
+    """Write through a temporary file in the target directory, then replace atomically (optional ``chmod``)."""
+    if create_parents:
+        path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     os.close(handle)
     try:
         write(Path(temporary))
+        if mode is not None:
+            os.chmod(temporary, mode)
         os.replace(temporary, path)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)

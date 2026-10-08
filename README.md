@@ -1847,7 +1847,9 @@ from a restarted kernel; `notebooks/README.md` lists the order and rules.
 Committed notebooks must have no outputs. `01_data_ingestion.ipynb` runs the
 foundational controls; `02_matched_location_pricing.ipynb` presents the
 matched location pricing (see below) and stops unless pricing readiness is
-true. Validate structure and execution (against synthetic temporary data) with:
+true; `03_price_change_events.ipynb` presents the price-change events (see
+"Price-change presentation") from one pipeline run and stops on any blocker.
+Validate structure and execution (against synthetic temporary data) with:
 
 ```bash
 python -m pytest tests/test_notebooks.py
@@ -2187,8 +2189,9 @@ order.
 > approved configuration keys only. This section is metric-free and contains
 > no real results.
 
-**Still deferred** to later phases: notebook 03, presentation narrative,
-anomaly conclusions, alert thresholds, monitoring rules and any commercial
+**Still deferred** to later phases (notebook 03 and the presentation tables
+are described under "Price-change presentation" below): anomaly
+conclusions, alert thresholds, monitoring rules and any commercial
 conclusion. The higher-order layer below covers synchronized movement,
 airport/downtown comparison, persistence, the final Vancouver decrease, the
 reconciled event table and the event heatmap.
@@ -2421,6 +2424,136 @@ The data-plan questions this phase answers:
 - New price persistence
 - Simultaneous assortment change
 - Duplicated large moves across aliased locations
+
+### Price-change presentation (notebook 03)
+
+`src/ql2_sixt_canada_analysis/price_change_presentation.py` and
+`notebooks/03_price_change_events.ipynb` complete the presentation
+deliverables of the Price-change events story. Both are enforced by
+`tests/test_price_change_presentation.py` and `tests/test_notebooks.py`
+(fabricated data only). The presentation layer is subordinate to the
+validated chain: it never rebuilds events, never redefines a population and
+calculates nothing the event engine and higher-order analysis do not already
+establish. Everything it shows describes **observed price-change
+candidates**, not proven repricing or proven extraction anomalies.
+
+**One-pipeline-run evidence flow.** `run_price_change_presentation(raw_dir,
+output_dir=None, write_detail=False)` calls `run_pricing_pipeline` exactly
+once. The same `PricingPipelineResult` then passes through
+`price_change_candidates_from_pipeline`, `price_change_analysis_from_pipeline`
+and `build_presentation_tables`. The frame binding and the location-authority
+object are verified at each step, and evidence from another run is blocked.
+A blocked upstream step returns `analysis_not_completed` with the upstream
+blocker categories and produces no table, figure or file. Every table is
+reconciled before it is returned, rendered or written. The checks include:
+
+- outcomes against the event report, and interval totals against candidates;
+- price changes equal increases plus decreases;
+- assortment events equal appearances plus disappearances;
+- persistence partitions every price change exactly once;
+- selected plus excluded movements equal all price changes;
+- cross-location rows are unique;
+- canonical events are unique across Vancouver aliases;
+- the final-case subset matches its interval;
+- the heatmap source equals the interval summary.
+
+**Sanitized aggregate tables** are defined by an explicit allowlist
+(`SANITIZED_COLUMN_ALLOWLIST`) with exact schemas per table
+(`SANITIZED_TABLE_SCHEMAS`). `validate_sanitized_frame` rejects any of the
+following, and its messages name the rule only, never a value:
+
+- unexpected columns;
+- product identity, rental dates or units;
+- individual prices or changes;
+- source-provenance columns or joined label text;
+- raw job or row identifiers;
+- detailed event frames.
+
+| Table | Grain and content |
+| --- | --- |
+| `event_interval_summary` | One row per approved canonical location and eligible interval. It holds the authority role, the six outcome counts, the comparable, price-change and assortment counts, the movement class, the three synchronization flags, the largest cohorts and magnitude summaries. Magnitudes are suppressed when an interval has a single change, because they would equal that offer's change. It also holds provenance counts, persistence counts for changes originating in the interval, the interval flag, `material_synchronized` and `interpretation_status`. |
+| `material_synchronized_movements` | The intervals selected by `MATERIAL_SELECTION_RULE`: direction-synchronized, meaning at least two changed offers, all in one direction. This is a descriptive rule, not an alert threshold. Rows carry the rule and every denominator. |
+| `material_selection_reconciliation` | Intervals and price changes per movement class, with whether each class is selected. Selected plus excluded price changes equal all price changes. |
+| `airport_downtown_summary` | One row per city and shared eligible interval under the approved pairs. It holds matched products, airport-only and downtown-only products, the count of every `CrossLocationOutcome`, and the same-direction, same-cent and same-percent counts. |
+| `persistence_summary` | One row per location, role and direction. It holds changed events, testable events (with a following interval), comparable-following events (held + continued + reverted), each outcome, not-testable counts by reason, returns and overshoots, and shares with named denominators. Not-testable (right-censored or hard-break) events are never in a denominator. |
+| `final_vancouver_decrease` | Section, metric and value rows for the derived case. They cover the interval, roles and final-capture flags, outcome counts and changed share, synchronization, decrease magnitudes, assortment and cross-location counts, provenance composition (dual alias source, primary only, secondary only), persistence and censoring, indicators and the disciplined statement. |
+| `reconciliation_summary` | Each check with its expected and observed totals and its status. |
+
+Sanitized means safe for the aggregate notebook presentation and protected
+against product-level disclosure. It does **not** mean approved for
+committing or distribution: these are confidential local artifacts.
+
+**Local detailed event table** (privacy class: local detail, confidential).
+`write_detailed_event_table` is an explicit opt-in, reached through
+`write_detail=True` or `QL2_SIXT_PRICE_CHANGE_WRITE_DETAIL=1` together with
+an output directory. It writes `price_change_event_detail.local.parquet`:
+one row per validated candidate, with the candidate columns, interval
+synchronization attributes, cross-location attributes, persistence and its
+censoring reason, final-case membership and a non-reversible evidence id.
+The export follows these rules:
+
+- It refuses the project raw-data directory, the configured raw-data
+  override, any `data/raw` path and the raw directory the pipeline read.
+- It creates only the requested directory, never its parents.
+- It writes atomically with owner-only permissions, and returns only the
+  path and the row count.
+- The table is never displayed, printed, included in `repr`, equality or
+  reports, documented with values, or committed.
+
+**Heatmap.** `heatmap_source_frame` provides long-form cells for every
+approved location and scheduled period. Interval cells carry counts; `break`
+and `outside` cells are `NaN`, never zero. A break is a governed exclusion,
+missing capture, non-one-hour gap, source-stream change or first capture.
+`render_price_change_heatmap(analysis, output_dir)` runs every reconciliation
+gate immediately before rendering and refuses to render if any fails. It
+writes `price_change_event_heatmap.png` with separate increase and decrease
+panels on one common scale (so mixed intervals never cancel), hatched masked
+breaks with a legend and a note, canonical UTC period labels and
+authority-role location labels. It closes its figure. `heatmap_png` renders
+the same figure in memory for the notebook.
+
+**Running locally.** Write the artifacts only into the Git-ignored
+`reports/price_change_events/` directory or another explicit directory:
+
+```bash
+QL2_SIXT_PRICE_CHANGE_OUTPUT_DIR=reports/price_change_events jupyter lab notebooks/03_price_change_events.ipynb
+python -c "from ql2_sixt_canada_analysis import run_price_change_presentation as r; \
+print(r(output_dir='reports/price_change_events').report.status.value)"
+```
+
+Add `QL2_SIXT_PRICE_CHANGE_WRITE_DETAIL=1` (or `write_detail=True`) for the
+detailed table. The outputs are the seven `price_change_<table>.csv` files,
+the heatmap, the optional detail Parquet file and
+`price_change_presentation_manifest.json`. The manifest lists artifact names,
+file names, schemas, row counts and reconciliation status, but no values or
+absolute paths. `.gitignore` covers `reports/price_change_events/`,
+`*price_change_event_detail*`, `*price_change_presentation_manifest*` and the
+heatmap file name; never force-add them. Before committing the notebook,
+clear its outputs with Edit ▸ Clear All Outputs (or `jupyter nbconvert
+--clear-output --inplace notebooks/03_price_change_events.ipynb`). The tests
+reject outputs, execution counts, embedded images and local paths.
+
+**Interpretation and limitations.** The collection spans roughly 90 hours.
+Findings are descriptive. Synchronized observations are candidates, not
+proof of intentional repricing. Right-censored events provide no persistence
+evidence. Distinguishing genuine repricing from extraction anomalies would
+require source and operational corroboration. Nothing here sets monitoring
+thresholds, long-term baselines or production rules.
+
+**Data-plan bullets completed by notebook 03:**
+
+- ordering by the canonical timestamp;
+- matching each offer to the immediately preceding scheduled capture;
+- absolute and percentage changes;
+- separating price changes from appearances and disappearances;
+- synchronized movements;
+- the final Vancouver decrease;
+- persistence when a following eligible capture exists;
+- right-censored final captures;
+- the event heatmap;
+- the event table.
+
+Visible assortment stability and monitoring work are not started here.
 
 ## Visible assortment stability
 

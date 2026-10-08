@@ -1621,3 +1621,102 @@ def test_matched_pricing_notebook_runs_clean_and_stops_when_not_ready(synthetic_
                   if "outside_repository" not in p.parts) == before
     assert not any(workdir.iterdir()), "notebook wrote files"
     assert _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------- price-change events (03)
+
+PRICE_CHANGE_NOTEBOOK = NOTEBOOKS_DIR / "03_price_change_events.ipynb"
+PRICE_CHANGE_SECTIONS = ("# 03 — Price-change events", "## Data-plan scope", "## Pipeline and readiness",
+                         "## Event population and reconciliation", "## Synchronized movements",
+                         "## Airport/downtown comparisons", "## Persistence", "## Final Vancouver decrease",
+                         "## Event heatmap", "## Limitations and interpretation", "## Local detailed export")
+
+
+def test_price_change_notebook_has_the_required_sections_in_order() -> None:
+    notebook = read_notebook(PRICE_CHANGE_NOTEBOOK)
+    headings = [c.source.splitlines()[0] for c in notebook.cells if c.cell_type == "markdown"]
+    positions = [next(i for i, h in enumerate(headings) if h.startswith(s)) for s in PRICE_CHANGE_SECTIONS]
+    assert positions == sorted(positions)
+    text = " ".join("\n".join(c.source for c in notebook.cells if c.cell_type == "markdown").split())
+    for phrase in ("observed price-change candidates", "roughly 90 hours", "not proof of intentional repricing",
+                   "Right-censored events provide no persistence evidence", "Visible assortment stability",
+                   "Monitoring and actionability", "Clear all outputs", "operational corroboration"):
+        assert phrase in text, phrase
+
+
+def test_price_change_notebook_delegates_to_package_functions_and_never_shows_event_rows() -> None:
+    notebook = read_notebook(PRICE_CHANGE_NOTEBOOK)
+    code = _code_source(notebook)
+    for name in ("run_price_change_presentation", "presentation_settings", "heatmap_png", "resolve_raw_data_dir"):
+        assert f"{name}(" in code, name
+    assert code.count("run_price_change_presentation(") == 1, "the pipeline runs once"
+    for pattern in (r"\.merge\(", r"\.groupby\(", r"\.pivot", r"\.sum\(", r"\.median\(", r"\.mean\(",
+                    r"\.quantile\(", r"Fraction", r"pyplot", r"plt\.", r"imshow", r"\.candidates\b",
+                    r"\.event_table\b", r"\.cross_location\b", r"analysis\.persistence\b", r"\.offers\b",
+                    r"build_detailed_event_table", r"write_detailed_event_table", r"read_parquet",
+                    r"\.(head|tail|sample|info|to_string|to_markdown|to_html)\(", r"(?<!case)\.describe\(",
+                    r"\bHTML\(", r"job_id", r"\bjobs\b", r"\bcars\b", r"run_pricing_pipeline", r"assess_price_change",
+                    r"analyze_price_change_events", r"classify_price_change", r"capture_timelines",
+                    r"event_heatmap_source", r"savefig"):
+        assert not re.search(pattern, code), f"notebook re-implements or exposes: {pattern}"
+    assert re.search(r"OUTPUT_DIR\s*=\s*None", code) and re.search(r"WRITE_DETAIL\s*=\s*None", code)
+    raw = PRICE_CHANGE_NOTEBOOK.read_text(encoding="utf-8")
+    assert "image/png" not in raw and "attachments" not in raw and "base64" not in raw
+
+
+def test_price_change_notebook_stops_clearly_on_blocked_synthetic_data(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    repo_before = _snapshot(PROJECT_ROOT)
+    workdir = tmp_path / "outside_repository"
+    workdir.mkdir()
+    result = execute_notebook_copy(PRICE_CHANGE_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)}, timeout_seconds=300)
+    assert result.execution_counts == tuple(range(1, len(_code_cells(result.executed)) + 1))
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "Price-change presentation status: blocked" in outputs and "analysis_not_completed" in outputs
+    assert "Skipped: the presentation is blocked." in outputs and "No files written." in outputs
+    assert "synthetic_" not in outputs and str(synthetic_raw_dir) not in outputs and str(tmp_path) not in outputs
+    assert not any(o.get("output_type") in {"execute_result", "display_data"}
+                   for c in _code_cells(result.executed) for o in c.outputs), "no tables or figures when blocked"
+    assert not any(workdir.iterdir()) and _snapshot(PROJECT_ROOT) == repo_before
+
+
+def test_price_change_notebook_runs_top_to_bottom_on_synthetic_ready_data(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The committed cells, in order, against a ready synthetic pipeline result (in process; nothing written)."""
+    import pandas as pd
+    from test_price_change_events import pipeline_result, synthetic_world
+    from test_price_change_presentation import RICH
+
+    from ql2_sixt_canada_analysis import pricing_pipeline
+    from ql2_sixt_canada_analysis.price_change_presentation import validate_sanitized_frame
+
+    world = synthetic_world(products=RICH)
+    calls: list[object] = []
+    monkeypatch.setattr(pricing_pipeline, "run_pricing_pipeline",
+                        lambda raw_dir=None: calls.append(raw_dir) or pipeline_result(world))
+    monkeypatch.delenv("QL2_SIXT_PRICE_CHANGE_OUTPUT_DIR", raising=False)
+    monkeypatch.setenv(paths.RAW_DATA_DIR_ENV_VAR, str(tmp_path / "synthetic_raw"))
+    monkeypatch.chdir(tmp_path)
+    repo_before = _snapshot(PROJECT_ROOT)
+    shown: list[object] = []
+    printed: list[str] = []
+    namespace = {"__name__": "__main__", "print": lambda *a, **k: printed.append(" ".join(map(str, a)))}
+    import IPython.display
+
+    monkeypatch.setattr(IPython.display, "display", lambda obj, *a, **k: shown.append(obj))
+    for cell in _code_cells(read_notebook(PRICE_CHANGE_NOTEBOOK)):
+        exec(compile(cell.source, "<notebook-cell>", "exec"), namespace)   # noqa: S102 - the committed cells
+    assert len(calls) == 1
+    text = "\n".join(printed)
+    assert "Price-change presentation status: completed" in text and "No files written." in text
+    assert "SYNTH" not in text and str(tmp_path) not in text
+    frames = [o for o in shown if isinstance(o, pd.DataFrame)]
+    names = [n for n, f in namespace["tables"].items()]
+    assert len(frames) == 7 and len(names) == 7
+    for frame in frames:
+        name = next(n for n, f in namespace["tables"].items() if f is frame)
+        validate_sanitized_frame(name, frame)                                # only sanitized tables are shown
+        assert "SYNTH" not in frame.to_csv(index=False)
+    images = [o for o in shown if type(o).__name__ == "Image"]
+    assert len(images) == 1 and images[0].data[:4] == b"\x89PNG"
+    assert os.listdir(tmp_path) == [] and _snapshot(PROJECT_ROOT) == repo_before
