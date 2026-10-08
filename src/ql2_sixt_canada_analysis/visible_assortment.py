@@ -635,8 +635,18 @@ def _validate_membership(membership: pd.DataFrame, assessed: dict[tuple[Key, str
 class VisibleAssortmentResult:
     """The aggregate report, the fixed-schema timeline and the proprietary membership detail.
 
-    Every frame is ``None`` unless the report completed; a completed result is
-    validated on construction (:func:`validate_assortment_timeline`).
+    State-dependent invariant, enforced on construction:
+
+    * **blocked** - no timeline, membership, capture timelines, price-change
+      evidence, binding or location authority (every field ``None``);
+    * **completed** - the capture timelines and the completed, validated
+      :class:`~ql2_sixt_canada_analysis.price_change_events.PriceChangeCandidateResult`
+      on the same grid are mandatory, and both the aggregate accounting
+      (:func:`validate_assortment_timeline`) and the candidate-level price proof
+      (:func:`validate_price_coincidence`) always run. Price counts are
+      candidate-level and may exceed ``retained_count`` (several unit-specific
+      candidates of one retained product), so the attached candidates are the
+      only proof of those counts; ``completed`` is never true without them.
     """
 
     report: AssortmentReport
@@ -644,7 +654,8 @@ class VisibleAssortmentResult:
     #: Proprietary product-level membership (in memory only; never printed or written).
     membership: pd.DataFrame | None = field(default=None, repr=False, compare=False)
     timelines: tuple[LocationCaptureTimeline, ...] | None = field(default=None, repr=False, compare=False)
-    #: The validated price-change result the coincidence counts were reconciled to.
+    #: The validated price-change result the coincidence counts were reconciled to (mandatory when completed;
+    #: ``None`` only for a blocked result).
     price_changes: PriceChangeCandidateResult | None = field(default=None, repr=False, compare=False)
     binding: object = field(default=None, repr=False, compare=False)
     location_authority: object = field(default=None, repr=False, compare=False)
@@ -658,15 +669,17 @@ class VisibleAssortmentResult:
             if any(v is not None for v in held):
                 raise AssortmentReconciliationError("a blocked result holds no calculations")
             return
-        if not isinstance(self.timelines, tuple):
+        if not isinstance(self.timelines, tuple) or not all(isinstance(t, LocationCaptureTimeline)
+                                                             for t in self.timelines):
             raise AssortmentReconciliationError("a completed result holds its capture timelines")
-        if self.price_changes is not None and (not isinstance(self.price_changes, PriceChangeCandidateResult)
-                                               or not self.price_changes.completed
-                                               or self.price_changes.timelines != self.timelines):
+        if not isinstance(self.price_changes, PriceChangeCandidateResult):
+            raise AssortmentReconciliationError("a completed result holds its validated price-change evidence")
+        if not self.price_changes.completed or self.price_changes.candidates is None:
+            raise AssortmentReconciliationError("a completed result needs completed price-change evidence")
+        if self.price_changes.timelines != self.timelines:
             raise AssortmentReconciliationError("the price-change evidence shares the assortment capture grid")
         validate_assortment_timeline(self.timeline, self.membership, self.report, self.timelines)
-        if self.price_changes is not None:
-            validate_price_coincidence(self.timeline, self.membership, self.price_changes)
+        validate_price_coincidence(self.timeline, self.membership, self.price_changes)
 
     @property
     def completed(self) -> bool:

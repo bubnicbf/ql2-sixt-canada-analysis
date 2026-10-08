@@ -691,6 +691,68 @@ def test_completed_results_prove_price_counts_from_candidate_identities() -> Non
     validate_price_coincidence(result.timeline, result.membership, result.price_changes)
 
 
+MULTI_UNIT = [car(0, "SYNTH Car A", 5000, currency="CA$"), car(0, "SYNTH Car A", 4000, currency="US$"),
+              car(1, "SYNTH Car A", 5500, currency="CA$"), car(1, "SYNTH Car A", 4400, currency="US$")]
+
+
+def test_a_completed_result_cannot_omit_its_price_change_evidence() -> None:
+    """Regression: without the candidates, nothing proves price counts that exceed ``retained_count``."""
+    result = build(MULTI_UNIT, [timeline([0, 1])])
+    r = row(result, 1)
+    assert r["price_increase_count"] > r["retained_count"]                     # aggregate bounds cannot prove it
+    with pytest.raises(AssortmentReconciliationError, match="validated price-change evidence"):
+        dataclasses.replace(result, price_changes=None)
+    with pytest.raises(AssortmentReconciliationError, match="validated price-change evidence"):
+        VisibleAssortmentResult(result.report, result.timeline, result.membership, result.timelines)
+    with pytest.raises(AssortmentReconciliationError, match="validated price-change evidence"):
+        VisibleAssortmentResult(result.report, result.timeline, result.membership, result.timelines,
+                                result.price_changes.candidates)                # wrong type: a bare frame
+    with pytest.raises(AssortmentReconciliationError, match="validated price-change evidence"):
+        VisibleAssortmentResult(result.report, result.timeline, result.membership, result.timelines,
+                                object())                                       # type: ignore[arg-type]
+
+
+def test_completed_results_reject_blocked_or_differently_gridded_price_evidence() -> None:
+    result = build(MULTI_UNIT, [timeline([0, 1])])
+    blocked = pce._blocked([PB.PRICING_NOT_READY])
+    with pytest.raises(AssortmentReconciliationError, match="completed price-change evidence"):
+        dataclasses.replace(result, price_changes=blocked)
+    incomplete = dataclasses.replace(result.price_changes)
+    object.__setattr__(incomplete, "candidates", None)
+    with pytest.raises(AssortmentReconciliationError, match="completed price-change evidence"):
+        dataclasses.replace(result, price_changes=incomplete)
+    other_grid = classify(MULTI_UNIT, [timeline([0, 1, 2])])                    # a different capture grid
+    with pytest.raises(AssortmentReconciliationError, match="capture grid"):
+        dataclasses.replace(result, price_changes=other_grid)
+    stale = classify([*MULTI_UNIT[:2], car(1, "SYNTH Car A", 5000, currency="CA$"),
+                      car(1, "SYNTH Car A", 4000, currency="US$")], [timeline([0, 1])])   # same grid, other prices
+    with pytest.raises(AssortmentReconciliationError, match="price counts differ"):
+        dataclasses.replace(result, price_changes=stale)
+    with pytest.raises(AssortmentReconciliationError, match="capture timelines"):
+        dataclasses.replace(result, timelines=("SYNTH",))
+
+
+def test_candidate_validation_runs_for_every_completed_result(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls = []
+    real = va.validate_price_coincidence
+    monkeypatch.setattr(va, "validate_price_coincidence",
+                        lambda *args: calls.append(len(args)) or real(*args))
+    result = build(MULTI_UNIT, [timeline([0, 1])])
+    dataclasses.replace(result)
+    assess(synthetic_world(products=grow("SYNTH Car A", 0, 1)))
+    assert len(calls) == 3                                                      # pure, replaced and gated results
+    o = result.report.overall
+    assert (o.price_increases, o.retained) == (2, 1)                             # multi-unit result still completes
+
+
+def test_blocked_results_hold_no_price_evidence() -> None:
+    blocked = AssortmentReport(AssortmentStatus.BLOCKED, blockers=(B.PRICE_CHANGE_EVIDENCE_INVALID,))
+    assert not VisibleAssortmentResult(blocked).completed and VisibleAssortmentResult(blocked).price_changes is None
+    evidence = build(MULTI_UNIT, [timeline([0, 1])]).price_changes
+    with pytest.raises(AssortmentReconciliationError, match="a blocked result holds no calculations"):
+        VisibleAssortmentResult(blocked, price_changes=evidence)
+
+
 @UNIT_VARIANTS
 def test_a_unit_specific_change_on_a_non_retained_product_still_fails_closed(unit) -> None:  # type: ignore[no-untyped-def]
     first, second = unit

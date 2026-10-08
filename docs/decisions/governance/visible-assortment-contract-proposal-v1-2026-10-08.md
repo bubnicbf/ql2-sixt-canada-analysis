@@ -330,6 +330,11 @@ or authority. The proposed items remain **PROPOSED - not approved**.
   evidence is attached to a result). The aggregate row check only requires a
   retained product whenever a price change is counted. This is an
   implementation correction (2026-10-08), not a new rule.
+- **Mandatory price evidence.** A completed `VisibleAssortmentResult` must
+  carry its completed price-change result on the same capture grid.
+  `validate_price_coincidence` runs on every completed result. A blocked
+  result carries no price evidence. This ensures that "completed" always
+  means the candidate-level proof ran (2026-10-08 implementation correction).
 - **Blocker categories.** `AssortmentBlocker` gains four engine categories:
   `unknown_canonical_location`, `capture_evidence_inconsistent`,
   `price_change_evidence_invalid` and `reconciliation_failed`.

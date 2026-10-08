@@ -207,6 +207,17 @@ def test_a_failed_reconciliation_blocks_the_presentation(world, monkeypatch) -> 
     assert result.report.blockers == (PB.RECONCILIATION_FAILED,) and result.tables is None
 
 
+def test_presentation_receives_only_results_with_validated_price_evidence(presentation) -> None:  # type: ignore[no-untyped-def]
+    result = presentation.assortment
+    assert result.completed and result.price_changes is not None and result.price_changes.completed
+    with pytest.raises(AssortmentReconciliationError, match="validated price-change evidence"):
+        dataclasses.replace(result, price_changes=None)                       # rejected before any presentation
+    altered = dataclasses.replace(result)
+    object.__setattr__(altered, "price_changes", None)                         # bypasses construction checks
+    with pytest.raises(AssortmentReconciliationError, match="lacks its price evidence"):
+        build_assortment_presentation_tables(altered)
+
+
 def test_inputs_are_not_mutated_and_output_is_deterministic(presentation) -> None:  # type: ignore[no-untyped-def]
     result = presentation.assortment
     before = result.timeline.copy(deep=True)

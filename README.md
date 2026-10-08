@@ -2657,11 +2657,19 @@ A completed `VisibleAssortmentResult` holds:
 - `timeline`: the fixed-schema aggregate timeline;
 - `membership`: proprietary product-level detail;
 - the capture timelines and the validated price-change result it was
-  reconciled to.
+  reconciled to (mandatory).
 
-Results are validated on construction (`validate_assortment_timeline`), so
-inconsistent counts or malformed frames cannot form a completed result. A
-blocked result holds no frames.
+Results are validated on construction, so inconsistent counts or malformed
+frames cannot form a completed result. The validation depends on the status:
+
+- **Completed:** the completed price-change evidence on the same capture grid
+  is required. Both checks always run: `validate_assortment_timeline` for the
+  aggregate accounting and `validate_price_coincidence` for the
+  candidate-level proof. Price counts may exceed `retained_count` when one
+  retained product has several units, so only the attached candidates prove
+  them. A completed result without that evidence, or with blocked,
+  incomplete or differently gridded evidence, cannot be constructed.
+- **Blocked:** the result holds no frames and no price-change evidence.
 
 ### Semantics
 

@@ -576,6 +576,12 @@ def _require(result: object) -> VisibleAssortmentResult:
         raise TypeError("expected a VisibleAssortmentResult")
     if not result.completed:
         raise AssortmentReconciliationError("rule reconciliation: the assortment result is not completed")
+    # A completed result is validated on construction and always carries its price-change evidence; this guards
+    # against an object altered after construction (defence in depth, not the primary check).
+    from ql2_sixt_canada_analysis.price_change_events import PriceChangeCandidateResult
+
+    if not isinstance(result.price_changes, PriceChangeCandidateResult) or not result.price_changes.completed:
+        raise AssortmentReconciliationError("rule reconciliation: the assortment result lacks its price evidence")
     return result
 
 
