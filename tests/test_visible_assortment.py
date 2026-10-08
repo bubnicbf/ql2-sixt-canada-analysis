@@ -980,4 +980,4 @@ def test_the_readme_documents_the_engine_and_the_data_plan_reconciliation() -> N
                    "location and interval reconciliation",
                    "Produce an assortment timeline: implemented as the fixed-schema in-memory aggregate timeline"):
         assert phrase in readme, phrase
-    assert "Section 5 is not complete" in readme or "not yet presented" in readme
+    assert "Production monitoring and assortment drop alerts are not established" in readme

@@ -1721,3 +1721,108 @@ def test_price_change_notebook_runs_top_to_bottom_on_synthetic_ready_data(
     images = [o for o in shown if type(o).__name__ == "Image"]
     assert len(images) == 1 and images[0].data[:4] == b"\x89PNG"
     assert os.listdir(tmp_path) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------- visible assortment (04)
+
+ASSORTMENT_NOTEBOOK = NOTEBOOKS_DIR / "04_visible_assortment.ipynb"
+ASSORTMENT_SECTIONS = ("# 04 — Visible assortment", "## Question and scope", "## Definitions", "## Confidentiality",
+                       "## Readiness and evidence", "## Assortment timeline",
+                       "## Additions, removals, retention, and Jaccard", "## Observed-drop review",
+                       "## Price-change coincidence", "## Interpretation and limitations",
+                       "## Monitoring and actionability", "## Data-plan reconciliation",
+                       "## Clear all outputs before committing")
+
+
+def test_assortment_notebook_has_the_required_sections_and_limitations() -> None:
+    notebook = read_notebook(ASSORTMENT_NOTEBOOK)
+    headings = [c.source.splitlines()[0] for c in notebook.cells if c.cell_type == "markdown"]
+    positions = [next(i for i, h in enumerate(headings) if h == s) for s in ASSORTMENT_SECTIONS]
+    assert positions == sorted(positions)
+    text = " ".join("\n".join(c.source for c in notebook.cells if c.cell_type == "markdown").split())
+    for phrase in ("unusual-drop policy is unavailable", "review candidates, not proven anomalies",
+                   "price coincidence is not causation", "Timeline persistence is not approved",
+                   "roughly 90 hours", "previous set as denominator", "zero_denominator", "Clear all outputs",
+                   "Count returned products by location and capture: presented in the aggregate timeline",
+                   "Produce an assortment timeline: implemented as a validated in-memory aggregate table",
+                   "statistical unusualness and alerting remain unavailable pending approved policy"):
+        assert phrase in text, phrase
+
+
+def test_assortment_notebook_delegates_to_package_functions_only() -> None:
+    notebook = read_notebook(ASSORTMENT_NOTEBOOK)
+    code = _code_source(notebook)
+    for name in ("run_assortment_presentation", "build_assortment_narrative", "assortment_timeline_png",
+                 "resolve_raw_data_dir"):
+        assert f"{name}(" in code, name
+    assert code.count("run_assortment_presentation(") == 1, "the pipeline runs once"
+    for pattern in (r"\bdef\b", r"\.merge\(", r"\.groupby\(", r"\.pivot", r"\.sum\(", r"\.median\(", r"\.mean\(",
+                    r"\.quantile\(", r"\.std\(", r"pyplot", r"plt\.", r"savefig", r"\.membership\b", r"\.offers\b",
+                    r"\.candidates\b", r"\.assortment\b", r"compare_assortment", r"calculate_visible_assortment",
+                    r"run_pricing_pipeline", r"visible_assortment_from_pipeline", r"to_csv", r"to_parquet",
+                    r"to_json", r"output_dir", r"OUTPUT_DIR", r"open\(", r"\.(head|tail|sample|info|to_string|"
+                    r"to_markdown|to_html)\(", r"job_id", r"\bjobs\b", r"\bcars\b", r"\.fillna\(", r"threshold"):
+        assert not re.search(pattern, code), f"notebook re-implements or exposes: {pattern}"
+    raw = ASSORTMENT_NOTEBOOK.read_text(encoding="utf-8")
+    assert "image/png" not in raw and "attachments" not in raw and "base64" not in raw
+
+
+def test_assortment_notebook_stops_clearly_on_blocked_synthetic_data(synthetic_raw_dir: Path, tmp_path: Path) -> None:
+    repo_before = _snapshot(PROJECT_ROOT)
+    workdir = tmp_path / "outside_repository"
+    workdir.mkdir()
+    result = execute_notebook_copy(ASSORTMENT_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)}, timeout_seconds=300)
+    assert result.execution_counts == tuple(range(1, len(_code_cells(result.executed)) + 1))
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    assert "Visible-assortment presentation status: blocked" in outputs and "assortment_not_completed" in outputs
+    assert "Skipped: the presentation is blocked." in outputs and "No files written." in outputs
+    assert "No tables, figure or findings are produced" in outputs
+    assert not re.search(r"\d", outputs), "a blocked notebook shows no numbers"
+    assert "synthetic_" not in outputs and str(synthetic_raw_dir) not in outputs and str(tmp_path) not in outputs
+    assert not any(o.get("output_type") in {"execute_result", "display_data"}
+                   for c in _code_cells(result.executed) for o in c.outputs), "no tables or figures when blocked"
+    assert not any(workdir.iterdir()) and _snapshot(PROJECT_ROOT) == repo_before
+
+
+def test_assortment_notebook_runs_top_to_bottom_on_synthetic_ready_data(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The committed cells, in order, against a ready synthetic pipeline result (in process; nothing written)."""
+    import pandas as pd
+    from test_assortment_presentation import RICH
+    from test_price_change_events import TOR_AIR, pipeline_result, synthetic_world
+
+    from ql2_sixt_canada_analysis import pricing_pipeline
+    from ql2_sixt_canada_analysis.assortment_presentation import validate_assortment_table
+
+    world = synthetic_world(products=RICH, withheld={(TOR_AIR, 1)})
+    calls: list[object] = []
+    monkeypatch.setattr(pricing_pipeline, "run_pricing_pipeline",
+                        lambda raw_dir=None: calls.append(raw_dir) or pipeline_result(world))
+    monkeypatch.setenv(paths.RAW_DATA_DIR_ENV_VAR, str(tmp_path / "synthetic_raw"))
+    monkeypatch.chdir(tmp_path)
+    repo_before = _snapshot(PROJECT_ROOT)
+    shown: list[object] = []
+    printed: list[str] = []
+    namespace = {"__name__": "__main__", "print": lambda *a, **k: printed.append(" ".join(map(str, a)))}
+    import IPython.display
+
+    monkeypatch.setattr(IPython.display, "display", lambda obj, *a, **k: shown.append(obj))
+    for cell in _code_cells(read_notebook(ASSORTMENT_NOTEBOOK)):
+        exec(compile(cell.source, "<notebook-cell>", "exec"), namespace)   # noqa: S102 - the committed cells
+    assert len(calls) == 1
+    text = "\n".join(printed)
+    assert "Visible-assortment presentation status: completed" in text and "No files written." in text
+    assert "Unusual-drop policy status: unavailable" in text and "Timeline persistence approved: False" in text
+    assert "Observed-drop review" in text and "not causation" in text
+    assert "SYNTH" not in text and str(tmp_path) not in text and "$" not in text
+    frames = [o for o in shown if isinstance(o, pd.DataFrame)]
+    tables = dict(namespace["tables"].items())
+    assert len(frames) == len(tables) == 6
+    for frame in frames:
+        name = next(n for n, f in tables.items() if f is frame)
+        validate_assortment_table(name, frame)                              # only sanitized tables are shown
+        assert "SYNTH" not in frame.to_csv(index=False)
+    images = [o for o in shown if type(o).__name__ == "Image"]
+    assert len(images) == 1 and images[0].data[:4] == b"\x89PNG"
+    assert os.listdir(tmp_path) == [] and _snapshot(PROJECT_ROOT) == repo_before

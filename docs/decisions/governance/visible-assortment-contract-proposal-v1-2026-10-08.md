@@ -327,3 +327,26 @@ or authority. The proposed items remain **PROPOSED - not approved**.
   that has recorded authority and a rule. The default policy stays
   `unavailable`, with a null `unusual_drop`. The repository adds no method
   or threshold, and only synthetic tests inject a rule.
+
+## 16. Presentation correspondence (added 2026-10-08)
+
+This section records how
+[`src/ql2_sixt_canada_analysis/assortment_presentation.py`](../../../src/ql2_sixt_canada_analysis/assortment_presentation.py)
+and `notebooks/04_visible_assortment.ipynb` present the engine result. It
+changes no definition, status or authority.
+
+- **What the presentation does.** It validates, selects, aggregates, formats
+  and narrates one completed engine result. It never rebuilds product sets,
+  recalculates ratios or price outcomes, or builds a second grid. Each table
+  has an exact schema, a semantic kind for every column and 24 reconciliation
+  checks to the engine.
+- **Observed drops.** The observed-drop table lists **review candidates**,
+  not unusual drops. `unusual_drop` stays empty while the unusual-drop policy
+  remains **PROPOSED - not approved**.
+- **Cross-location grouping.** Grouping by exact scheduled period describes
+  drops as isolated or simultaneous *in this extract* only. It is never
+  evidence of a common cause.
+- **Persistence.** Timeline persistence remains **PROPOSED - not approved**.
+  The presentation writes nothing, and an output directory returns the
+  `persistence_not_approved` blocker before any directory is touched. Ignore
+  rules for assortment outputs are defence in depth and authorize nothing.
