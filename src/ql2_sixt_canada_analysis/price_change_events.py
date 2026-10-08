@@ -97,9 +97,10 @@ proprietary event-level values: it stays in memory, is excluded from ``repr``
 and equality and is never written. :class:`PriceChangeCandidateReport` holds
 counts, enum values and approved configuration keys only.
 
-Deliberately deferred to later issue #4 phases: synchronized-movement detection,
-persistence, the Vancouver decrease case study, anomaly review and conclusions,
-alert thresholds, monitoring rules, heatmaps, presentation tables and notebook 03.
+Synchronized movement, airport/downtown comparison, persistence, the final
+Vancouver decrease, the event table and the heatmap are built on this result by
+:mod:`ql2_sixt_canada_analysis.price_change_analysis`. Anomaly conclusions, alert
+thresholds, monitoring rules and notebook 03 remain out of scope.
 """
 
 from __future__ import annotations
@@ -732,12 +733,17 @@ class PriceChangeCandidateResult:
     report: PriceChangeCandidateReport
     candidates: pd.DataFrame | None = field(default=None, repr=False, compare=False)
     timelines: tuple[LocationCaptureTimeline, ...] | None = field(default=None, repr=False, compare=False)
+    #: Non-proprietary binding to the exact analysis-stage frames the candidates were built from (gated runs).
+    binding: object = field(default=None, repr=False, compare=False)
+    #: The exact location-authority report the gated assessment validated (identity-checked downstream).
+    location_authority: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.report, PriceChangeCandidateReport):
             raise TypeError("report must be a PriceChangeCandidateReport")
         if not self.report.completed:
-            if self.candidates is not None or self.timelines is not None:
+            if (self.candidates is not None or self.timelines is not None or self.binding is not None
+                    or self.location_authority is not None):
                 raise PriceChangeContractError("a blocked result holds no candidates")
             return
         if not isinstance(self.timelines, tuple):
@@ -801,7 +807,8 @@ def classify_price_change_candidates(
     the timelines' locations in key order); it must name exactly the timelines'
     locations, and every location gets a summary, with zero counts if it has no
     candidates. An eligible capture without offers is a valid empty capture
-    (the gated assessment separately proves no pipeline capture is empty).
+    (the gated assessment still requires every eligible capture to be an
+    eligible population parent).
     Inputs are never modified.
 
     Raises:
@@ -883,7 +890,13 @@ def _blocked(blockers: Sequence[PriceChangeBlocker], readiness_blockers: Sequenc
 def _population_agrees(jobs: pd.DataFrame, cars: pd.DataFrame, population, scheduled,  # type: ignore[no-untyped-def]
                        timelines: Sequence[LocationCaptureTimeline], offers: pd.DataFrame,
                        city_column: str) -> bool:
-    """Eligible captures are eligible population parents with offers; excluded ones are its governed exclusions."""
+    """Eligible captures are eligible population parents; excluded captures are its governed exclusions.
+
+    An eligible location capture may hold zero canonical offers: it stays a
+    valid capture (its offers disappear and later reappear across its adjacent
+    intervals) and is reported downstream as an observed empty capture, never
+    assumed to be a genuine assortment withdrawal.
+    """
     from ql2_sixt_canada_analysis.pricing_population import DetailEligibility
 
     if city_column not in jobs.columns:
@@ -898,12 +911,9 @@ def _population_agrees(jobs: pd.DataFrame, cars: pd.DataFrame, population, sched
                 eligible.add((city, period))
             elif status == DetailEligibility.GOVERNED_EXCLUSION.value:
                 excluded.add((city, period))
-    offered = set(zip(offers["canonical_city"].astype(object), offers["canonical_location"].astype(object),
-                      offers[EVENT_TIMESTAMP_COLUMN].astype(object)))
     for timeline in timelines:
-        city, location = timeline.canonical_location
-        if any((city, p) not in eligible or (city, location, p) not in offered
-               for p in timeline.periods(CaptureState.ELIGIBLE)):
+        city = timeline.canonical_location[0]
+        if any((city, p) not in eligible for p in timeline.periods(CaptureState.ELIGIBLE)):
             return False
         if any((city, p) not in excluded for p in timeline.periods(CaptureState.GOVERNED_EXCLUSION)):
             return False
@@ -989,7 +999,8 @@ def assess_price_change_candidates(jobs: pd.DataFrame, cars: pd.DataFrame, *, re
     report = PriceChangeCandidateReport(
         status=PriceChangeStatus.COMPLETED, offers_assessed=len(offers), locations=summaries,
         overall=sum((s.counts for s in summaries), OutcomeCounts()))
-    return PriceChangeCandidateResult(report=report, candidates=frame, timelines=timelines)
+    return PriceChangeCandidateResult(report=report, candidates=frame, timelines=timelines, binding=binding,
+                                      location_authority=location_authority)
 
 
 def price_change_candidates_from_pipeline(run: object) -> PriceChangeCandidateResult:

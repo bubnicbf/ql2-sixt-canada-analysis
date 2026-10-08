@@ -618,10 +618,11 @@ def local_hour(city: str, h: int) -> tuple[dt.datetime, dt.timedelta, str]:
     return local, aware.utcoffset(), format_utc_instant(aware)
 
 
-def synthetic_schedule(hours: int, exceptions=None) -> PerStreamSchedule:  # type: ignore[no-untyped-def]
+def synthetic_schedule(hours: int, exceptions=None, short=()) -> PerStreamSchedule:  # type: ignore[no-untyped-def]
+    """The synthetic window; streams in ``short`` end one hour before the others."""
     schedules = tuple(StreamSchedule(
         schedule_version=VERSION, stream=s, city=s[0], timezone=ZONES[s[0]], local_start=START,
-        local_end=START + dt.timedelta(hours=hours - 1), end_inclusive=True, cadence="PT1H",
+        local_end=START + dt.timedelta(hours=hours - (2 if s in short else 1)), end_inclusive=True, cadence="PT1H",
         phase="LOCAL_TOP_OF_HOUR", capture_field="jobs.finished_at", record_id="pricing-authorities-synthetic",
         references=("SYNTH-REFERENCE",)) for s in STREAMS)
     return PerStreamSchedule(
@@ -639,13 +640,18 @@ def car_row(stream, job, finished, name, price, currency="CA$", basis="day"):  #
             "return_date": "2030-04-03", "price_num": price, "price_per_day": f"{currency}{price:,.2f}/{basis}"}
 
 
-def synthetic_world(hours=3, products=None, absent_jobs=(), excluded=None, excused=None, drop_streams=()):  # type: ignore[no-untyped-def]
+def synthetic_world(hours=3, products=None, absent_jobs=(), excluded=None, excused=None, drop_streams=(),  # type: ignore[no-untyped-def]
+                    withheld=(), authority=None, short=()):
     """Fabricated frames through the real schedule, exclusion, canonical-offer and readiness objects.
 
     ``products`` maps ``(stream, hour)`` to extra ``(name, price[, (field, value)...])``
     offers; every present stream-period also carries a constant filler product.
+    ``withheld`` ``(stream, hour)`` captures keep their coverage and eligible
+    parent but their detail rows contribute no canonical offer (a valid empty
+    location capture). ``authority`` replaces the project location authority.
     """
-    jobs, cars = [], []
+    authority = authority if authority is not None else AUTHORITY
+    jobs, cars, held = [], [], []
     for city in dict.fromkeys(s[0] for s in STREAMS):
         for h in range(hours):
             if (city, h) in absent_jobs:
@@ -654,11 +660,12 @@ def synthetic_world(hours=3, products=None, absent_jobs=(), excluded=None, excus
             finished = (START + dt.timedelta(hours=h, minutes=7, seconds=13)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             jobs.append({"job_id": job, "city": city, "finished_at": finished})
             for stream in STREAMS:
-                if stream[0] != city or (stream, h) in drop_streams:
+                if stream[0] != city or (stream, h) in drop_streams or (stream in short and h == hours - 1):
                     continue
                 cars.append(car_row(stream, job, finished, "SYNTH Filler", 10.0))
                 for name, price, *unit in (products or {}).get((stream, h), ()):
                     cars.append(car_row(stream, job, finished, name, price, **dict(unit)))
+                held += [(stream, h) in withheld] * (len(cars) - len(held))
     exclusions, stream_exceptions = (), ()
     if excluded is not None:
         city, h = excluded
@@ -679,7 +686,7 @@ def synthetic_world(hours=3, products=None, absent_jobs=(), excluded=None, excus
                                      parent_capture_exclusions=exclusions)
                   if exclusions or stream_exceptions else None)
     jobs_df, cars_df = pd.DataFrame(jobs), pd.DataFrame(cars)
-    scheduled = assess_per_stream_scheduled_coverage(jobs_df, cars_df, schedule=synthetic_schedule(hours, exceptions),
+    scheduled = assess_per_stream_scheduled_coverage(jobs_df, cars_df, schedule=synthetic_schedule(hours, exceptions, short),
                                                      contract=CONTRACT, relationship=REL)
 
     def status(excluded_mask: np.ndarray, assigned: pd.Series) -> tuple[str, ...]:
@@ -690,19 +697,20 @@ def synthetic_world(hours=3, products=None, absent_jobs=(), excluded=None, excus
         binding=frame_binding(jobs_df, cars_df),
         parent_status=status(scheduled.capture_exclusions.parent_mask(jobs_df),
                              scheduled.capture_periods.parent_periods(jobs_df)),
-        detail_status=status(scheduled.capture_exclusions.detail_mask(cars_df),
+        detail_status=status(scheduled.capture_exclusions.detail_mask(cars_df) | np.array(held, dtype=bool),
                              scheduled.capture_periods.detail_periods(cars_df)))
     offers = assess_canonical_offers(jobs_df, cars_df, population=population, scheduled=scheduled, policy=POLICY)
-    readiness = readiness_for(cars_df, scheduled, offers)
+    readiness = readiness_for(cars_df, scheduled, offers, authority=authority)
     return dict(jobs=jobs_df, cars=cars_df, readiness=readiness, population=population, scheduled=scheduled,
-                canonical_offers=offers, location_authority=AUTHORITY)
+                canonical_offers=offers, location_authority=authority)
 
 
-def readiness_for(cars, scheduled, offers, blockers=()):  # type: ignore[no-untyped-def]
+def readiness_for(cars, scheduled, offers, blockers=(), authority=None):  # type: ignore[no-untyped-def]
     return PricingReadinessReport(
         blocking_reasons=tuple(blockers), location_policy=assess_location_policy(
             VANCOUVER_LOCATION_POLICY, None, apply_location_policy(cars, VANCOUVER_LOCATION_POLICY)),
-        scheduled_coverage=scheduled, location_authority=AUTHORITY, canonical_offers=offers)
+        scheduled_coverage=scheduled, location_authority=authority if authority is not None else AUTHORITY,
+        canonical_offers=offers)
 
 
 def run(w: dict, **overrides) -> PriceChangeCandidateResult:  # type: ignore[no-untyped-def]
@@ -806,6 +814,25 @@ def test_an_excused_missing_capture_breaks_and_a_returning_product_is_never_a_ch
     s = result.report.location(TOR_DOWN)
     assert (s.missing_periods, s.intervals) == (1, 1) and s.breaks == ((IB.MISSING_CAPTURE.value, 2),)
     assert outcomes(result) == [(at("toronto", 2), at("toronto", 3), "unchanged")]
+
+
+def test_a_valid_empty_middle_capture_completes_with_disappearances_then_appearances() -> None:
+    """Regression: an eligible location capture with zero canonical offers is valid, not inconsistent evidence."""
+    products = {(TOR_DOWN, h): [("SYNTH Car A", 50.0), ("SYNTH Car B", 70.0)] for h in range(3)}
+    w = synthetic_world(products=products, withheld={(TOR_DOWN, 1)})
+    assert w["scheduled"].is_valid and w["canonical_offers"].ready
+    result = run(w)
+    assert result.completed and result.report.blockers == ()
+    check_invariants(result)
+    s = result.report.location(TOR_DOWN)
+    assert (s.eligible_periods, s.intervals, s.missing_periods, s.excluded_periods) == (3, 2, 0, 0)
+    assert (s.counts.disappeared, s.counts.appeared, s.counts.comparable) == (3, 3, 0)      # car A, car B, filler
+    rows = result.candidates[result.candidates["canonical_location"] == TOR_DOWN[1]]
+    for name in ("SYNTH Car A", "SYNTH Car B", "SYNTH Filler"):
+        mine = rows[rows["car_name"] == name]
+        assert list(zip(mine[PREV], mine[CUR], mine["outcome"])) == [
+            (at("toronto", 0), at("toronto", 1), "disappeared"), (at("toronto", 1), at("toronto", 2), "appeared")]
+    assert result.report.location(TOR_AIR).counts.comparable == 2 * 1                      # other location intact
 
 
 def test_unit_changes_end_to_end_are_never_price_movements() -> None:

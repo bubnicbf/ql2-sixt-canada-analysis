@@ -2045,8 +2045,8 @@ canonical location.
   the approved configuration. It is never inferred.
 - `capture_evidence_inconsistent`: coverage, resolved exclusions, population
   and offers disagree. Examples: an offer outside an eligible capture, an
-  eligible capture that is not an eligible population parent or has no
-  offers, or an excluded capture that is not a governed exclusion.
+  eligible capture that is not an eligible population parent, or an excluded
+  capture that is not a governed exclusion.
 - `offer_contract_invalid`: an offer is malformed.
 
 **Offer identity** (`EVENT_IDENTITY_COLUMNS`), which must be exactly equal at
@@ -2078,8 +2078,13 @@ of product presence. Every scheduled period is one of:
 - `missing_capture`: excused or not.
 
 The gated assessment also proves that every eligible capture is an eligible
-parent capture of the pricing population with offers, and that every excluded
-capture is a governed exclusion. Locations are reported in authority order:
+parent capture of the pricing population, and that every excluded capture is
+a governed exclusion. An eligible capture may hold zero canonical offers: it
+stays valid, its offers disappear and later reappear across its adjacent
+intervals, and the higher-order analysis flags it as an observed empty
+capture (a possible extraction anomaly), never as a proven assortment
+withdrawal. Missing captures and governed exclusions stay hard breaks with no
+appearances or disappearances. Locations are reported in authority order:
 the contract's stream order, with aliases merged. Every approved location is
 reported, including one with zero candidates.
 
@@ -2182,11 +2187,232 @@ order.
 > approved configuration keys only. This section is metric-free and contains
 > no real results.
 
-**Deliberately deferred** to later issue #4 phases: synchronized-movement
-detection, persistence measurement, the Vancouver decrease case study,
-anomaly review and conclusions, alert thresholds, monitoring rules, heatmaps,
-presentation tables, notebook 03 and any commercial conclusion. These later
-phases will address the following questions:
+**Still deferred** to later phases: notebook 03, presentation narrative,
+anomaly conclusions, alert thresholds, monitoring rules and any commercial
+conclusion. The higher-order layer below covers synchronized movement,
+airport/downtown comparison, persistence, the final Vancouver decrease, the
+reconciled event table and the event heatmap.
+
+### Higher-order price-change analysis
+
+`src/ql2_sixt_canada_analysis/price_change_analysis.py`, enforced by
+`tests/test_price_change_analysis.py` (fabricated data only), describes
+**synchronized observed movements** of the observed price-change candidates.
+Its results are descriptive evidence. A pattern may be *consistent with* a
+repricing candidate or with an extraction anomaly, but it is never proof of
+either and never a causal conclusion. It sets no thresholds or alerts.
+
+**Population and evidence binding.** The layer works only on a completed,
+validated `PriceChangeCandidateResult` and its capture timelines. Events are
+never rebuilt from raw rows, offers or matched-location pairs. A gated event
+result carries the non-proprietary frame binding and the exact
+location-authority report it was validated with. The layer refuses any
+other authority (by identity, not equality) and refuses events whose binding
+differs from the pipeline's frames. A mismatch returns `BLOCKED` with typed
+`PriceChangeAnalysisBlocker` values: `events_not_completed`,
+`event_evidence_unbound`, `evidence_mismatch`, `role_authority_unavailable`
+or `reconciliation_failed`. The entry points are:
+
+- `run_price_change_analysis(raw_dir)` calls `run_pricing_pipeline` exactly
+  once.
+- `price_change_analysis_from_pipeline(run)` builds the events and the
+  analysis from the same pipeline object.
+- `analyze_price_change_events(events, location_authority=...)` is the pure
+  analysis.
+
+**Within-location grain.** The event table has one row per eligible
+`CaptureInterval` of every approved canonical location, taken from the
+timelines. Quiet intervals stay visible, and hard breaks never appear as
+rows. Each row reconciles to the candidate table:
+
+- the six outcome counts, comparable, percent-valid and zero-denominator
+- `price_change_count = increase + decrease`
+- `assortment_event_count = appeared + disappeared` (ambiguous candidates
+  are neither)
+- the offers at each endpoint
+
+**Movement classes** (`MovementClass`) come from the increase and decrease
+counts only:
+
+- `no_price_movement`: zero increases and zero decreases
+- `isolated_increase`: exactly one increase and no decreases
+- `isolated_decrease`: exactly one decrease and no increases
+- `synchronized_increase`: at least two price changes, all increases
+- `synchronized_decrease`: at least two price changes, all decreases
+- `mixed_direction`: at least two price changes in both directions
+
+**Synchronization.** There are three separate flags, each requiring at least
+two changed offers. There is no combined "synchronized" flag.
+
+- **Direction:** every changed offer moved the same way. Unchanged offers do
+  not prevent it and remain in the comparable denominator
+  (`changed_share_of_comparable`).
+- **Exact cent:** every changed offer has the same signed `change_cents`.
+- **Exact percentage:** every changed offer has a nonzero previous price and
+  the same exact rational `100 * change_cents / previous_price_cents`. This
+  is compared as a reduced `Fraction`, never as float equality. A zero
+  denominator excludes the interval from this flag.
+
+The largest same-cent and same-percentage cohorts keep partial
+synchronization visible.
+
+**Interval flag** (`IntervalFlag`, descriptive; the first applicable value
+wins):
+
+- `empty_endpoint`: a valid capture holds no offers, a possible extraction
+  anomaly
+- `ambiguity_present`
+- `price_and_assortment_change`
+- `assortment_change_only`
+- `price_change_only`
+- `quiet`
+
+**Cross-location comparison.** Roles and pairs come only from the approved
+location authority: its effective comparison pairs and canonical roles. They
+are never inferred from words such as "Airport" or "Downtown" in a label. A
+city without both roles is `role_unavailable`, and no counterpart is
+fabricated. Within one city and one exact scheduled interval, airport and
+downtown candidates join on `CROSS_LOCATION_PRODUCT_COLUMNS`: the event
+identity without canonical city and location. Rental dates, product fields,
+currency and price basis must therefore match. Each matched product gets one
+`CrossLocationOutcome`:
+
+- `both_unchanged`
+- `airport_only_change` / `downtown_only_change`
+- `same_direction` / `opposite_direction`
+- `one_sided_assortment`
+- `mixed_assortment`
+- `simultaneous_appearance` / `simultaneous_disappearance`
+- `ambiguous`
+
+`same_direction`, `same_cent_change` and `same_percent_change` are separate
+flags: a direction match implies neither exact match. A unit change stays a
+disappearance plus an appearance and is never a cross-location price
+comparison. Products seen at only one location are counted, not compared.
+
+**Persistence** (`PersistenceOutcome`). Every increase or decrease gets
+exactly one record, so the persistence population equals the event report's
+changed count. The follow-up is the candidate of the same full identity in
+the immediately following eligible interval of the same timeline, whose
+previous period is the event's current period. Nothing is searched beyond
+that interval.
+
+- `held`: the next price equals the changed price.
+- `continued`: the price moves further in the original direction.
+- `reverted`: the price moves back, including partial reversals. Flags
+  `returned_to_prior_price` and `overshot_prior_price` keep full returns and
+  overshoots distinct.
+- `disappeared`: the identity is absent at the next valid capture, including
+  a valid empty capture.
+- `ambiguous`: the next endpoint has several offers.
+- `not_testable`: there is no immediately following eligible interval, with
+  a `NotTestableReason`:
+  - `right_censored_final_capture`
+  - `governed_exclusion_break`
+  - `missing_capture_break`
+  - `not_one_hour_break`
+  - `source_streams_changed`
+
+Hard breaks and the end of the collection window are never bridged. Right
+censoring is not testable: it is never held, reverted, disappeared or a
+failure. The following conditions raise `PriceChangeReconciliationError`
+rather than being classified:
+
+- a missing follow-up candidate
+- an appearance of an identity that was present at the shared capture
+- a follow-up previous price that differs from the changed price (a broken
+  chain)
+
+Rates name their denominators. Held, continued and reverted shares use
+`held + continued + reverted` (disappeared and ambiguous excluded). Held,
+disappeared and ambiguous shares of testable events use events with a
+following interval. Not-testable events are never in a denominator.
+
+**Missing offers and hard breaks.** A valid eligible capture may hold zero
+canonical offers. Its offers disappear and later reappear across its
+adjacent intervals, and the interval is flagged `empty_endpoint` as an
+observed condition, never assumed to be an assortment withdrawal. Missing
+scheduled captures, governed exclusions such as the Calgary
+`INCOMPLETE_PARENT_CAPTURE`, non-one-hour gaps and source-stream changes are
+hard breaks. They produce no interval, no appearance or disappearance and no
+persistence result.
+
+**Vancouver alias provenance.** Vancouver `Downtown`/`Thurlow` is one
+canonical location. `previous_source_labels` and `current_source_labels` are
+provenance only. Dual-source provenance means one canonical event was
+observed on both source aliases, never two events. Candidates,
+synchronization counts, denominators and comparisons are never duplicated.
+Multi-source and provenance-changed candidates are counted. A provenance
+change may be relevant to anomaly review, but it is not a price movement.
+
+**Final Vancouver decrease** (`FinalDecreaseCase`). The case is derived, with
+no hard-coded timestamp or product. It is the latest exact eligible interval
+of the governed alias city (from the location authority's identity policy)
+with at least one decrease. It reports:
+
+- each involved location with its authority role, and whether the interval
+  ends at that location's final eligible capture
+- the outcome counts and the changed share of comparable offers
+- the three synchronization flags and the largest cohorts
+- decrease magnitude summaries
+- airport/downtown outcomes and assortment events
+- provenance composition
+- persistence outcomes and not-testable reasons
+
+`FinalDecreaseIndicator` values and `describe()` stay descriptive. A broad,
+directionally synchronized movement with stable assortment may be described
+as more consistent with an observed repricing candidate than with an
+isolated extraction error, without claiming proof. Assortment
+discontinuity, empty endpoints, ambiguity or provenance changes are possible
+anomaly indicators. A decrease at the terminal capture is "not testable due
+to right censoring"; persistence is never inferred from the absence of later
+data.
+
+**Reconciliation invariants** (enforced in the module, not by callers):
+
+- Every candidate belongs to exactly one location interval.
+- Each interval's outcome counts sum to its candidates.
+- Interval increases plus decreases equal the event report's changed count.
+- Interval appearances plus disappearances equal its assortment events.
+- Adjacent intervals agree at their shared capture: same identities, offer
+  counts and prices.
+- Persistence partitions every changed event exactly once.
+- Cross-location rows use each source event at most once.
+- Aliases never duplicate a canonical event.
+- The final-decrease case is a subset of the interval and persistence tables.
+- The heatmap source equals the event table before plotting.
+
+`PriceChangeAnalysisResult` re-derives every table on construction and
+rejects any tampered table or report.
+
+**Event table and heatmap.** `EVENT_TABLE_COLUMNS` is the aggregate table:
+interval identity, authority role, outcome counts, denominators, movement
+class, the three synchronization flags, cohorts, magnitude summaries,
+provenance counts, persistence counts for changes originating in the
+interval, and the interval flag. It has no product values or event-level
+prices. `plot_price_change_heatmap` draws separate increase and decrease
+panels, so the directions never cancel, for every approved location and
+scheduled period. Cells without an eligible interval (hard breaks, or
+outside the schedule) are hatched grey, never zero. The figure uses
+canonical UTC capture labels and object-oriented Matplotlib with no pyplot
+state. `write_price_change_analysis_outputs(result, output_dir)` writes
+`price_change_event_table.csv` and `price_change_event_heatmap.png`
+atomically, and only into an explicitly supplied directory. Analysis
+functions write nothing.
+
+> **Confidentiality.** The candidate, cross-location and persistence frames
+> are proprietary event-level data. They stay in memory, excluded from
+> `repr` and equality. The generated table and heatmap are proprietary local
+> artifacts: write them only to a Git-ignored location such as `reports/`,
+> and never commit them or copy their values into documentation.
+
+**Limitations.** The collection window is roughly 90 hours, so many changes
+near its end are right-censored. Persistence is observed over one following
+hour only, and short-window patterns are not evidence of stable long-term
+behaviour, seasonality or predictive rules. Hourly captures of one product
+are repeated measurements, not independent observations.
+
+The data-plan questions this phase answers:
 
 - Matched offer frequency from one hour to the next
 - Typical increase/decrease
