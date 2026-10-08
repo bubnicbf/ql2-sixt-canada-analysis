@@ -425,3 +425,19 @@ reports/price_change_events/
 *price_change_event_detail*
 *price_change_presentation_manifest*
 price_change_event_heatmap.png
+
+# --- Visible-assortment outputs (local, confidential; persistence is NOT approved) ---
+# The presentation writes nothing while timeline persistence is proposed, not
+# approved. These rules are defence in depth only and never authorize writing.
+reports/visible_assortment/
+reports/assortment/
+*assortment_timeline*.csv
+*assortment_timeline*.json
+*assortment_timeline*.parquet
+*assortment_timeline*.html
+*assortment_timeline*.md
+*assortment_timeline*.png
+*assortment_detail*
+*assortment_membership*
+*assortment_presentation_manifest*
+*observed_drop_review*

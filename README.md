@@ -2610,15 +2610,337 @@ thresholds, long-term baselines or production rules.
 - the event heatmap;
 - the event table.
 
-Visible assortment stability and monitoring work are not started here.
-
 ## Visible assortment stability
 
-- Offers per location and capture
-- Which products appear/disappear
-- Isolated/widespread changes
-- Consecutive product sets similarity
-- Falling assortment vs. price increases
+**Status: calculation engine and validated in-memory presentation
+implemented; operational monitoring not established.** The definitions of data-plan Section 5 are fixed by
+[`visible-assortment-contract-proposal-v1-2026-10-08.md`](docs/decisions/governance/visible-assortment-contract-proposal-v1-2026-10-08.md)
+and the immutable code contract
+[`src/ql2_sixt_canada_analysis/assortment_contract.py`](src/ql2_sixt_canada_analysis/assortment_contract.py)
+(`DEFAULT_ASSORTMENT_DEFINITION`). They are calculated by
+[`src/ql2_sixt_canada_analysis/visible_assortment.py`](src/ql2_sixt_canada_analysis/visible_assortment.py).
+They are presented by
+[`src/ql2_sixt_canada_analysis/assortment_presentation.py`](src/ql2_sixt_canada_analysis/assortment_presentation.py)
+and `notebooks/04_visible_assortment.ipynb`. The engine and the presentation
+redefine nothing, and no authority record is changed.
+
+### Running the engine
+
+```python
+from ql2_sixt_canada_analysis import run_visible_assortment, visible_assortment_from_pipeline
+
+result = run_visible_assortment()           # runs run_pricing_pipeline once, then every gate
+# or, reusing one existing PricingPipelineResult without rerunning it:
+# result = visible_assortment_from_pipeline(run)
+print(result.report.status, result.report.blockers)   # aggregate, print-safe
+```
+
+The engine has four layers, following the price-change implementation:
+
+- `run_visible_assortment(raw_dir=None)` runs the pricing pipeline exactly
+  once and writes nothing.
+- `visible_assortment_from_pipeline(run)` consumes one
+  `PricingPipelineResult`. It applies the Prompt 1 evidence gate
+  (`assortment_evidence_blockers`), derives the price-change candidates
+  from the same object and runs the gated assessment.
+- `assess_visible_assortment(jobs, cars, *, readiness, population, scheduled,
+  canonical_offers, location_authority, price_changes, policy=...)` is the
+  gated assessment of supplied evidence.
+- `calculate_visible_assortment(offers, price_changes, *, policy=...)` is the
+  pure, deterministic engine. It reads no files or global state and never
+  mutates its inputs.
+
+A completed `VisibleAssortmentResult` holds:
+
+- `report` (`AssortmentReport`): status, typed blockers, per-location
+  `LocationAssortmentSummary` objects and overall `AssortmentCounts`;
+- `timeline`: the fixed-schema aggregate timeline;
+- `membership`: proprietary product-level detail;
+- the capture timelines and the validated price-change result it was
+  reconciled to (mandatory).
+
+Results are validated on construction, so inconsistent counts or malformed
+frames cannot form a completed result. The validation depends on the status:
+
+- **Completed:** the completed price-change evidence on the same capture grid
+  is required. Both checks always run: `validate_assortment_timeline` for the
+  aggregate accounting and `validate_price_coincidence` for the
+  candidate-level proof. Price counts may exceed `retained_count` when one
+  retained product has several units, so only the attached candidates prove
+  them. A completed result without that evidence, or with blocked,
+  incomplete or differently gridded evidence, cannot be constructed.
+- **Blocked:** the result holds no frames and no price-change evidence.
+
+### Semantics
+
+- **Population:** only the pricing-eligible canonical offers. The governed
+  Calgary exclusion and ineligible rows never enter.
+- **Location:** the canonical location, so Vancouver Downtown and Thurlow
+  are one location and alias provenance never splits a product.
+- **Capture:** `scheduled_capture_period` on the schedule-derived grid of
+  the price-change result (`capture_timelines`). The grid is never built
+  from observed offers, so an eligible capture with no offers is an
+  empty set with `returned_product_count = 0`.
+- **Product:** the exact approved identity (`car_name`, `car_type`,
+  `transmission`, `seats`, `bags`). There is no normalization, imputation
+  or sentinel, and missing or malformed values fail closed. Price,
+  currency, price basis, identifiers, offer position, raw timestamps,
+  source labels and provenance never enter.
+- **Rental dates:** the search context of a set. Exactly one is allowed
+  per location capture, otherwise the result is blocked with
+  `multiple_rental_contexts`. A context change between consecutive
+  captures is the break `rental_context_changed`.
+- **Returned-product count:** the cardinality of the distinct product set,
+  not the number of offer rows. Duplicates, several prices and several
+  units of one product count once.
+- **Additions and removals:** for a valid interval with previous set `P`
+  and current set `C`, retained products are `P∩C`, additions `C−P` and
+  removals `P−C`. The membership detail gives each product one terminal
+  membership (`retained`, `added` or `removed`).
+- **Retention:** `|P∩C| / |P|`, directional. An empty previous set gives a
+  null value with `zero_denominator`, never 100 percent.
+- **Jaccard:** `|P∩C| / |P∪C|`, symmetric. An empty union gives a null
+  value with `zero_denominator`.
+- **Drop metrics:** `net_change = |C| − |P|`,
+  `absolute_drop = max(|P| − |C|, 0)` and
+  `drop_rate = absolute_drop / |P|` (`zero_denominator` when `|P| = 0`).
+  Ratios are exact, finite, between 0 and 1, and never rounded.
+- **Intervals and breaks:** only schedule-adjacent eligible captures one
+  hour apart with the same contributing streams are compared. Governed
+  exclusions, missing captures, non-hourly adjacency, stream changes and
+  rental-context changes are typed breaks that carry
+  `interval_break_reason`, and nothing is attributed across them. The
+  first capture of a location is a `seed_capture`.
+- **Unusual drops:** no approved policy exists. Every row reports
+  `anomaly_policy_status = unavailable`, and `unusual_drop` is null, never
+  `False`. Only an explicitly supplied approved `UnusualDropPolicy` with
+  recorded authority and an injected rule fills `unusual_drop` on
+  assessed rows; the synthetic tests do this. No threshold is estimated
+  from the data, and no drop is labelled a collection failure or a
+  supplier withdrawal.
+- **Price coincidence:** from the validated price-change candidates of the
+  same evidence, never from raw prices. Per assessed interval (same
+  canonical city, location, previous and current scheduled period) the
+  engine counts `price_increase_count` and `price_decrease_count`. It
+  also sets `price_change`, `assortment_change`,
+  `assortment_price_coincidence` and
+  `falling_assortment_with_price_increase` (`net_change < 0` with at least
+  one increase).
+  - `unchanged`, `appeared`, `disappeared` and `ambiguous` are never price
+    changes.
+  - The candidate identities must equal the union of the two endpoint
+    sets, and every increase or decrease must belong to a retained
+    product. Any disagreement blocks with `price_change_evidence_invalid`.
+  - Price counts are candidate-level: they count price-comparison
+    identities (product plus currency and price basis). One retained product
+    with several units can contribute several increases or decreases, so
+    `price_increase_count + price_decrease_count` may exceed
+    `retained_count`. The assortment counts remain distinct visible
+    products. `validate_price_coincidence` proves each changed candidate
+    projects to a retained product of its interval.
+  - A coincidence is temporal association, not causation.
+- **Timeline grain:** one row per approved canonical location and
+  scheduled capture, in authority and period order, with the exact
+  `ASSORTMENT_TIMELINE_COLUMNS` schema and fixed dtypes. This covers
+  seeds, empty captures, assessed intervals, governed exclusions, missing
+  captures and breaks.
+
+### Confidentiality and blockers
+
+The aggregate timeline holds canonical keys, scheduled periods, counts,
+ratios and enum statuses only: no product values, prices, units, rental
+dates, identifiers or source labels. The membership detail is
+proprietary. It stays in memory, is excluded from `repr` and equality, and
+is never printed or written. The module writes no files, and its timeline
+is not persisted, because timeline persistence is still proposed.
+
+Blocked results carry typed `AssortmentBlocker` values:
+
+- `pricing_not_ready`
+- `evidence_binding_mismatch`
+- `canonical_offers_not_ready`
+- `schedule_evidence_invalid`
+- `location_authority_unavailable`
+- `product_identity_incomplete`
+- `multiple_rental_contexts`
+- `unknown_canonical_location`
+- `capture_evidence_inconsistent`
+- `price_change_evidence_invalid`
+- `reconciliation_failed`
+
+Upstream readiness or price-change categories are listed in
+`upstream_blockers`.
+
+### Data-plan reconciliation (engine)
+
+- Count returned products by location and capture: implemented as distinct product-set cardinality.
+- Identify additions and removals: implemented as consecutive-set differences.
+- Calculate consecutive-capture retention: implemented with the previous set as denominator.
+- Calculate Jaccard similarity: implemented using intersection divided by union.
+- Identify unusual assortment drops: drop measurements implemented; final flag gated by approved policy.
+- Check whether assortment changes coincide with price changes: implemented by exact canonical location and interval reconciliation.
+- Produce an assortment timeline: implemented as the fixed-schema in-memory aggregate timeline; it is presented, with the narrative, by `assortment_presentation` (below).
+
+These items remain **PROPOSED - not approved** and fail closed:
+
+- the unusual-drop policy;
+- multi-context stratification;
+- timeline persistence.
+
+### Presentation (timeline, review and narrative)
+
+```python
+from ql2_sixt_canada_analysis import (
+    assortment_timeline_png, build_assortment_narrative, run_assortment_presentation)
+
+presentation = run_assortment_presentation()   # run_pricing_pipeline once; nothing is written
+if presentation.completed:
+    tables = presentation.tables                # validated, sanitized, in memory
+    print(build_assortment_narrative(presentation).text)
+```
+
+**Evidence flow.** `run_assortment_presentation(raw_dir=None)` runs
+`run_pricing_pipeline` exactly once. `assortment_presentation_from_pipeline(run)`
+then passes that one result through the price-change engine
+(`price_change_candidates_from_pipeline`), the visible-assortment engine
+(`visible_assortment_from_pipeline`) and `build_assortment_presentation_tables`.
+
+The presentation never rebuilds product sets, recalculates additions,
+removals or ratios, reclassifies price outcomes or builds a second capture
+grid. It only validates, selects, aggregates, formats and narrates the
+engine's result. It blocks with a typed `AssortmentPresentationBlocker` in
+these cases:
+
+- `assortment_not_completed`, with the upstream categories in
+  `upstream_blockers`;
+- `evidence_mismatch`, when the result is from another run;
+- `reconciliation_failed`;
+- `persistence_not_approved`.
+
+A blocked presentation holds no tables, figure or findings. Its narrative
+names only the blocker categories.
+
+**Sanitized tables.** Each table has an exact ordered schema
+(`ASSORTMENT_TABLE_SCHEMAS`), and every column has one semantic kind
+(`ASSORTMENT_COLUMN_KINDS`): count, signed count, flag, share, statistic,
+canonical period, approved city or location, or enum member. No column takes
+free text.
+
+| Table | Grain | Content |
+| --- | --- | --- |
+| `assortment_timeline` | approved canonical location × scheduled capture | The engine timeline unchanged (`ASSORTMENT_TIMELINE_COLUMNS`). It covers seeds, assessed intervals, eligible empty captures, governed exclusions, missing captures, typed breaks, denominator statuses and `unusual_drop` (empty under the default unavailable policy). |
+| `location_summary` | approved canonical location | Capture partition, seeds, breaks, minimum, median and maximum returned-product counts (with contributors), addition, removal and observed-drop intervals and totals, retention and Jaccard medians (each with its contributor and zero-denominator counts), price and coincidence intervals, and the anomaly-policy status. |
+| `observed_drop_review` | assessed interval with `absolute_drop > 0` | Review candidates: counts, ratios with denominator statuses, the same-interval price counts, the drop pattern (`net_contraction`, `complete_turnover` or `empty_current_capture`), the number of locations with a drop in that period, simultaneity, the policy status, `unusual_drop` (empty unless an explicitly approved policy classified the interval) and `review_status = observed_drop_review_candidate`. |
+| `cross_location_drops` | current scheduled period with an observed drop | Assessed locations, locations with an observed drop, the drop total, and `isolated_in_extract` or `simultaneous_in_extract`. |
+| `price_coincidence_summary` | approved canonical location | Assortment-change, price-change, increase, decrease, coincident, drop-with-increase, drop-with-decrease and falling-with-increase intervals. Shares are shown only with a non-zero denominator. |
+| `reconciliation_summary` | check | The fixed `ASSORTMENT_RECONCILIATION_CHECKS` (24 checks), each with expected value, observed value and status. Every check must reconcile before anything is returned. |
+
+**Privacy validation.** `validate_assortment_table` rejects any of the
+following, with messages that name only the rule (and at most a column):
+
+- product identity, rental dates, currency or price basis;
+- prices or price changes;
+- identifiers, provenance labels or raw timestamps;
+- membership detail or paths;
+- unknown columns or schema-order changes;
+- free text or malformed periods;
+- unapproved cities or locations;
+- negative or boolean counts, or shares outside 0..1;
+- invalid missingness or duplicate keys;
+- ratio values that disagree with their denominator status;
+- interval metrics on break or ineligible rows;
+- a non-empty `unusual_drop` without an approved policy.
+
+**Observed drops and cross-location review.**
+
+- Observed drops are review candidates. They are ordered by largest drop,
+  then drop rate, then location and period. This order is for review only
+  and is not a statistical ranking.
+- Candidates are grouped by exact current scheduled period. One location in
+  a period is `isolated_in_extract`; several locations are
+  `simultaneous_in_extract`.
+- Canonical aliases (Vancouver Downtown and Thurlow) are one location and are
+  never double-counted. Simultaneity is not evidence of a common cause.
+- Under the default (unavailable) policy no drop is called unusual. If a result
+  was computed with an explicitly supplied approved policy, the engine's
+  `unusual_drop` classifications are reported as they are; the presentation
+  never creates, approves or reruns a policy.
+- No drop is called a collection failure or a supplier withdrawal.
+
+**Price coincidence.** A price change counts only when it falls in the same
+canonical location and the same scheduled interval. Increases and decreases
+stay separate, and `unchanged`, `appeared`, `disappeared` and `ambiguous`
+outcomes are excluded. Coincidence is temporal association, not causation.
+
+**Timeline view.** `assortment_timeline_source_frame` is the plotting source,
+reconciled to the timeline. Ineligible captures have no count (never zero),
+and eligible empty captures are zero. Segments restart at every break, so
+lines never cross one.
+
+`assortment_timeline_png` renders one panel per canonical location on a
+shared scale, with UTC period labels, triangles for observed drops and rings
+for drops with a same-interval price increase. It renders in memory only
+and closes the figure. Its footer states the policy status and, under an
+approved policy, how many assessed intervals were classified as unusual.
+
+**Narrative.** `build_assortment_narrative` builds the narrative
+deterministically from the validated tables. It has seven sections (scope
+and readiness, visible assortment over time, consecutive-capture stability,
+additions and removals, observed-drop review, price coincidence, limitations
+and next actions). Its language is bounded:
+
+- no claim that anything was proved, caused or statistically significant;
+- no anomaly or monitoring-rule language;
+- "unusual" appears only as the name of the unusual-drop policy, or, when an
+  approved policy was supplied, in the validated count of classified intervals;
+- the policy sentences of the narrative and the figure footer come from one
+  summary of the validated tables, so they always match the tables `anomaly_policy_status` and `unusual_drop` values (the default reports the
+  policy as unavailable; an approved policy is reported as applied, with its
+  count, and never as unavailable);
+- no product identities, prices, identifiers or paths.
+
+**Persistence.** Timeline persistence and format are proposed, not approved.
+
+- Nothing is written.
+- An `output_dir` passed to either entry point returns
+  `persistence_not_approved` before any directory is touched.
+- No environment variable enables export.
+- The `.gitignore` rules for assortment outputs are defence in depth and do
+  not authorize writing.
+
+**Notebook.** Run `notebooks/04_visible_assortment.ipynb` top to bottom after
+restarting the kernel. It shows status and blockers first, then the
+validated tables, the in-memory figure and the narrative.
+
+Clear all outputs and execution counts before committing.
+`tests/test_notebooks.py` fails otherwise.
+
+**Interpretation limits.**
+
+- About 90 hourly captures per location are too few for seasonal or
+  long-term baselines.
+- Visible assortment is what the collection returned, not proof of supplier
+  availability.
+- Causal claims need operational and source corroboration.
+
+### Data-plan reconciliation (presentation)
+
+- Count returned products by location and capture: presented in the aggregate timeline.
+- Identify additions and removals: presented for every valid consecutive interval and summarized by location.
+- Calculate consecutive-capture retention: presented with the previous set as denominator and explicit zero-denominator status.
+- Calculate Jaccard similarity: presented as intersection divided by union with explicit empty-union status.
+- Identify unusual assortment drops: observed drop metrics and review candidates are presented; statistical unusualness and alerting remain unavailable pending approved policy.
+- Check whether assortment changes coincide with price changes: presented by exact canonical location and interval, with increases and decreases separate and no causal claim.
+- Produce an assortment timeline: implemented as a validated in-memory aggregate table and an in-memory visualization. Persistence remains unavailable until approved.
+
+**Before operational monitoring.** Production monitoring and assortment drop
+alerts are not established. They need the following:
+
+- an approved unusual-drop policy (method, minimum history, grouping and
+  thresholds) from the business owner;
+- an approved persistence decision;
+- a multi-context rental policy;
+- operational corroboration channels with the collection owner.
 
 ## QL2 controls
 

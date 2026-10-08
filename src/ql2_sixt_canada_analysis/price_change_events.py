@@ -392,22 +392,31 @@ class LocationCaptureTimeline:
             raise PriceChangeContractError("a canonical location combines source streams of its own city only")
 
     @cached_property
-    def _pairs(self) -> tuple[tuple[CaptureInterval, ...], tuple[IntervalBreak, ...]]:
-        intervals: list[CaptureInterval] = []
-        breaks: list[IntervalBreak] = []
+    def adjacent_pairs(self) -> tuple[CaptureInterval | IntervalBreak, ...]:
+        """One entry per schedule-adjacent pair, in time order: its interval or its typed break.
+
+        Entry ``i`` describes the pair ending at ``captures[i + 1]``.
+        """
+        pairs: list[CaptureInterval | IntervalBreak] = []
         for a, b in zip(self.captures, self.captures[1:]):
             states = {a.state, b.state}
             if CaptureState.GOVERNED_EXCLUSION in states:
-                breaks.append(IntervalBreak.GOVERNED_EXCLUSION)
+                pairs.append(IntervalBreak.GOVERNED_EXCLUSION)
             elif CaptureState.MISSING_CAPTURE in states:
-                breaks.append(IntervalBreak.MISSING_CAPTURE)
+                pairs.append(IntervalBreak.MISSING_CAPTURE)
             elif parse_scheduled_period(b.period) - parse_scheduled_period(a.period) != CAPTURE_STEP:
-                breaks.append(IntervalBreak.NOT_ONE_HOUR)
+                pairs.append(IntervalBreak.NOT_ONE_HOUR)
             elif a.source_streams != b.source_streams:
-                breaks.append(IntervalBreak.SOURCE_STREAMS_CHANGED)
+                pairs.append(IntervalBreak.SOURCE_STREAMS_CHANGED)
             else:
-                intervals.append(CaptureInterval(self.canonical_location, a.period, b.period))
-        return tuple(intervals), tuple(breaks)
+                pairs.append(CaptureInterval(self.canonical_location, a.period, b.period))
+        return tuple(pairs)
+
+    @cached_property
+    def _pairs(self) -> tuple[tuple[CaptureInterval, ...], tuple[IntervalBreak, ...]]:
+        pairs = self.adjacent_pairs
+        return (tuple(p for p in pairs if isinstance(p, CaptureInterval)),
+                tuple(p for p in pairs if isinstance(p, IntervalBreak)))
 
     @property
     def intervals(self) -> tuple[CaptureInterval, ...]:
