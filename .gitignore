@@ -417,3 +417,11 @@ reports/*
 reports/figures/*
 !reports/figures/README.md
 !reports/figures/.gitkeep
+
+# --- Price-change presentation outputs (local, confidential) ---
+# Sanitized aggregate tables, the event heatmap, the manifest and the local-only
+# detailed event table. Never commit or force-add them.
+reports/price_change_events/
+*price_change_event_detail*
+*price_change_presentation_manifest*
+price_change_event_heatmap.png

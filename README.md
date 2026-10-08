@@ -1847,7 +1847,9 @@ from a restarted kernel; `notebooks/README.md` lists the order and rules.
 Committed notebooks must have no outputs. `01_data_ingestion.ipynb` runs the
 foundational controls; `02_matched_location_pricing.ipynb` presents the
 matched location pricing (see below) and stops unless pricing readiness is
-true. Validate structure and execution (against synthetic temporary data) with:
+true; `03_price_change_events.ipynb` presents the price-change events (see
+"Price-change presentation") from one pipeline run and stops on any blocker.
+Validate structure and execution (against synthetic temporary data) with:
 
 ```bash
 python -m pytest tests/test_notebooks.py
@@ -1993,15 +1995,622 @@ pricing-readiness baseline.
 Planned extensions of the matched premium: capture time (hour of day) and
 price-percentile views.
 
-## Genuine pricing events
+## Price-change events
+
+Issue #4 (price-change events: sequential matching, change calculation,
+synchronized event detection, anomaly review) follows matched location
+pricing in the data plan. Its first two phases are implemented in
+`src/ql2_sixt_canada_analysis/price_change_events.py` and enforced by
+`tests/test_price_change_events.py` (fabricated data only): the locked event
+contract, and the event-construction engine that applies it. The engine
+produces **observed price-change candidates**, never proven genuine market
+repricings or extraction anomalies. Telling those apart requires source and
+operational corroboration that is outside this module. It is a derived
+analysis under the already approved authorities (record v8) and adds no
+authority decision.
+
+**Relationship to `run_pricing_pipeline`.** `run_price_change_events(raw_dir)`
+runs `run_pricing_pipeline` once and hands the result to
+`price_change_candidates_from_pipeline`, which calls the gated
+`assess_price_change_candidates`. The pure engine,
+`classify_price_change_candidates`, runs only after every gate passes. Nothing
+is written.
+
+**Population: canonical offers, not matched pairs.** The engine uses only the
+pricing-eligible canonical offers (`run_pricing_pipeline().canonical_offers`).
+The governed Calgary exclusion and every ineligible row never enter, and the
+Vancouver `Downtown`/`Thurlow` aliases are already one canonical location, so
+an offer seen on both is counted once. It never uses
+`MatchedLocationPricingResult.pairs`, raw detail rows, raw job identifiers,
+row order or generated files. The matched pair table holds only the
+airport/downtown shared assortment and would drop one-sided products, while
+event analysis needs the complete offer population of every approved
+canonical location.
+
+**Gates** (any failure returns a `BLOCKED` report with typed
+`PriceChangeBlocker` values and no event frame):
+
+- `pricing_not_ready`: `PricingReadinessReport.ready` is false, or a required
+  assessment is missing. The readiness blockers are kept by value.
+- `readiness_evidence_mismatch`: readiness was not assessed on exactly the
+  supplied schedule, canonical-offer and location-authority reports.
+- `frame_binding_mismatch`: the population or the canonical offers are bound
+  to other frames, or the schedule was assessed on other frames.
+- `canonical_offers_not_ready`: the canonical offers are not ready, or have
+  unassessable rows.
+- `schedule_evidence_invalid`: the per-stream schedule assessment is invalid,
+  or lacks its capture-period or governed-exclusion evidence.
+- `location_authority_unavailable`: no exact approved role map, or the
+  canonical-offer policy, location authority and schedule disagree on the
+  approved streams or their canonical locations.
+- `unknown_canonical_location`: an offer names a canonical location outside
+  the approved configuration. It is never inferred.
+- `capture_evidence_inconsistent`: coverage, resolved exclusions, population
+  and offers disagree. Examples: an offer outside an eligible capture, an
+  eligible capture that is not an eligible population parent, or an excluded
+  capture that is not a governed exclusion.
+- `offer_contract_invalid`: an offer is malformed.
+
+**Offer identity** (`EVENT_IDENTITY_COLUMNS`), which must be exactly equal at
+both endpoints before prices are compared:
+`canonical_city, canonical_location, pickup_date, return_date, car_name, car_type, transmission, seats, bags, currency, price_basis`.
+The product fields come from `APPROVED_PRODUCT_COLUMNS`. The values are the
+canonical-offer assessment's parsed values; nothing is trimmed, recased,
+fuzzy-matched, imputed or inferred. Price is never part of the identity. Raw
+source location labels are kept for each endpoint as provenance
+(`previous_source_labels`, `current_source_labels`, for later alias
+diagnostics) and never split the canonical identity.
+
+**Canonical timestamp.** `scheduled_capture_period` from the authority-backed
+`CapturePeriodIndex`: the trusted UTC start of the scheduled hourly capture,
+exact `YYYYMMDDTHHMMSSZ` text, parsed strictly by `parse_scheduled_period`.
+Missing, non-string, malformed or non-canonical values fail closed. Raw
+`job_id`, row order, `scrape_date`, `date_clean`, raw scrape or finish
+timestamps, the reporting day and the last time a product happened to appear
+are never used (`FORBIDDEN_TIMESTAMP_SOURCES`).
+
+**Interval grid.** `capture_timelines` builds one timeline per canonical
+location from the per-stream schedule, its assessed coverage and the resolved
+governed exclusions. It never reads offers, so the grid exists independently
+of product presence. Every scheduled period is one of:
+
+- `eligible`: every contributing source stream is covered.
+- `governed_exclusion`: the excluded periods must equal the scheduled periods
+  of the resolved excluded parent captures.
+- `missing_capture`: excused or not.
+
+The gated assessment also proves that every eligible capture is an eligible
+parent capture of the pricing population, and that every excluded capture is
+a governed exclusion. An eligible capture may hold zero canonical offers: it
+stays valid, its offers disappear and later reappear across its adjacent
+intervals, and the higher-order analysis flags it as an observed empty
+capture (a possible extraction anomaly), never as a proven assortment
+withdrawal. Missing captures and governed exclusions stay hard breaks with no
+appearances or disappearances. Locations are reported in authority order:
+the contract's stream order, with aliases merged. Every approved location is
+reported, including one with zero candidates.
+
+**Baseline and exact one-hour adjacency.** A `CaptureInterval` joins two
+schedule-adjacent eligible periods exactly one hour apart that have the same
+contributing source streams. Every other adjacent pair is a typed
+`IntervalBreak`: `governed_exclusion`, `missing_capture`, `not_one_hour` or
+`source_streams_changed`. The first eligible capture of a run seeds state
+only: it has no preceding interval and creates no appearances. The previous
+capture is the immediately preceding scheduled capture, not the last
+earlier capture where the same product was visible. A product seen at `t-2`
+and `t` but absent at `t-1` disappeared at `t-1` and appeared at `t`; it is
+never a price change from `t-2`. A valid capture with no offers produces
+disappearances and later appearances only across its own adjacent intervals.
+
+**Calgary break.** The governed Calgary `INCOMPLETE_PARENT_CAPTURE`
+exclusion is analytically null and a hard break. It is never an interval
+endpoint, the captures on either side are never compared with each other, no
+two-hour change is labelled hourly, and no product appears or disappears
+because of it. The behaviour comes from the pipeline's scheduled-coverage
+report and its resolved exclusion; no timestamp is hard-coded.
+
+**Terminal outcomes** (`TerminalOutcome`). For every eligible interval and
+every identity present at either endpoint, exactly one outcome is assigned.
+The first applicable rule wins:
+
+| Outcome | Rule |
+| --- | --- |
+| `ambiguous` | more than one canonical offer for the identity at either endpoint |
+| `appeared` | absent previously, exactly one offer currently |
+| `disappeared` | exactly one offer previously, absent currently |
+| `unchanged` | exactly one offer at both endpoints, zero-cent difference |
+| `increase` | exactly one offer at both endpoints, current cents greater |
+| `decrease` | exactly one offer at both endpoints, current cents lower |
+
+`ambiguous` never exposes a selected price or a change. It is never resolved
+by row order, minimum, maximum, mean, median, first or last value, or a
+Cartesian product.
+
+**Units.** Currency and price basis are part of the identity. A change of
+either is never an increase, decrease or unchanged price: the old unit
+disappears and the new unit appears. Nothing is converted or normalized, and
+mixed units across different identities never block other events.
+
+**Event frame** (`CANDIDATE_COLUMNS`, in this order; one row per interval and
+identity; unique key `EVENT_KEY_COLUMNS`):
+`EVENT_IDENTITY_COLUMNS`, then `previous_scheduled_capture_period`,
+`current_scheduled_capture_period`, `previous_offer_count`,
+`current_offer_count`, `outcome`, `previous_price_cents`,
+`current_price_cents`, `change_cents`, `previous_price`, `current_price`,
+`change_dollars`, `change_percent`, `percent_valid`, `zero_denominator`,
+`previous_source_labels` and `current_source_labels`. A price or change field
+the outcome does not support is `None`. An appearance keeps only its current
+price and a disappearance only its previous price. Rows are ordered by
+authority location order, previous period, current period and the exact
+identity fields, never by source row order.
+
+**Exact-cent changes and percentages.** Comparable outcomes (unchanged,
+increase, decrease) use the canonical offers' exact non-negative integer
+cents:
+
+- `change_cents = current - previous`, and its sign is the outcome.
+- `change_dollars = change_cents / 100`.
+- `change_percent = 100 * change_cents / previous_price_cents`, evaluated
+  exactly with `fractions.Fraction` and stored once as a finite float. The
+  denominator is always the previous price, and nothing is rounded.
+
+A zero previous price has no percentage. Such a row is marked
+`zero_denominator` and `change_percent` is `None`, never infinity or NaN. A
+zero-to-positive change is still an increase in cents, and zero-to-zero is
+still unchanged. `percent_valid` and `zero_denominator` are mutually
+exclusive and partition the comparable candidates.
+
+**Aggregate accounting** (`PriceChangeCandidateReport`, one
+`LocationPriceChangeSummary` per approved canonical location plus overall
+`OutcomeCounts`): eligible intervals, candidate comparisons, the six outcomes,
+comparable, changed, percent-valid and zero-denominator counts. Scheduled,
+eligible, excluded and missing periods and the typed breaks are reported for
+each location. The following are enforced on construction:
+
+- Candidates equal the sum of the six outcomes.
+- Comparable equals unchanged plus increase plus decrease, and also equals
+  percent-valid plus zero-denominator.
+- Changed equals increase plus decrease.
+- Location totals sum to the overall totals.
+- Every adjacent scheduled pair is an interval or a break.
+- The event frame has exactly the contract columns, unique keys and one-hour
+  intervals on the timelines, and its arithmetic agrees with the exact cents.
+  Its row count and per-location outcome counts equal the report's.
+- A blocked result holds no frame; a completed result holds a validated
+  frame.
+
+Input frames are never modified, and results are identical for any input row
+order.
+
+> **Confidentiality.** The event frame
+> (`PriceChangeCandidateResult.candidates`) holds proprietary event-level
+> values. It stays in memory, is excluded from `repr` and equality and is
+> never written. `PriceChangeCandidateReport` holds counts, enum values and
+> approved configuration keys only. This section is metric-free and contains
+> no real results.
+
+**Still deferred** to later phases (notebook 03 and the presentation tables
+are described under "Price-change presentation" below): anomaly
+conclusions, alert thresholds, monitoring rules and any commercial
+conclusion. The higher-order layer below covers synchronized movement,
+airport/downtown comparison, persistence, the final Vancouver decrease, the
+reconciled event table and the event heatmap.
+
+### Higher-order price-change analysis
+
+`src/ql2_sixt_canada_analysis/price_change_analysis.py`, enforced by
+`tests/test_price_change_analysis.py` (fabricated data only), describes
+**synchronized observed movements** of the observed price-change candidates.
+Its results are descriptive evidence. A pattern may be *consistent with* a
+repricing candidate or with an extraction anomaly, but it is never proof of
+either and never a causal conclusion. It sets no thresholds or alerts.
+
+**Population and evidence binding.** The layer works only on a completed,
+validated `PriceChangeCandidateResult` and its capture timelines. Events are
+never rebuilt from raw rows, offers or matched-location pairs. A gated event
+result carries the non-proprietary frame binding and the exact
+location-authority report it was validated with. The layer refuses any
+other authority (by identity, not equality) and refuses events whose binding
+differs from the pipeline's frames. A mismatch returns `BLOCKED` with typed
+`PriceChangeAnalysisBlocker` values: `events_not_completed`,
+`event_evidence_unbound`, `evidence_mismatch`, `role_authority_unavailable`
+or `reconciliation_failed`. The entry points are:
+
+- `run_price_change_analysis(raw_dir)` calls `run_pricing_pipeline` exactly
+  once.
+- `price_change_analysis_from_pipeline(run)` builds the events and the
+  analysis from the same pipeline object.
+- `analyze_price_change_events(events, location_authority=...)` is the pure
+  analysis.
+
+**Within-location grain.** The event table has one row per eligible
+`CaptureInterval` of every approved canonical location, taken from the
+timelines. Quiet intervals stay visible, and hard breaks never appear as
+rows. Each row reconciles to the candidate table:
+
+- the six outcome counts, comparable, percent-valid and zero-denominator
+- `price_change_count = increase + decrease`
+- `assortment_event_count = appeared + disappeared` (ambiguous candidates
+  are neither)
+- the offers at each endpoint
+
+**Movement classes** (`MovementClass`) come from the increase and decrease
+counts only:
+
+- `no_price_movement`: zero increases and zero decreases
+- `isolated_increase`: exactly one increase and no decreases
+- `isolated_decrease`: exactly one decrease and no increases
+- `synchronized_increase`: at least two price changes, all increases
+- `synchronized_decrease`: at least two price changes, all decreases
+- `mixed_direction`: at least two price changes in both directions
+
+**Synchronization.** There are three separate flags, each requiring at least
+two changed offers. There is no combined "synchronized" flag.
+
+- **Direction:** every changed offer moved the same way. Unchanged offers do
+  not prevent it and remain in the comparable denominator
+  (`changed_share_of_comparable`).
+- **Exact cent:** every changed offer has the same signed `change_cents`.
+- **Exact percentage:** every changed offer has a nonzero previous price and
+  the same exact rational `100 * change_cents / previous_price_cents`. This
+  is compared as a reduced `Fraction`, never as float equality. A zero
+  denominator excludes the interval from this flag.
+
+The largest same-cent and same-percentage cohorts keep partial
+synchronization visible.
+
+**Interval flag** (`IntervalFlag`, descriptive; the first applicable value
+wins):
+
+- `empty_endpoint`: a valid capture holds no offers, a possible extraction
+  anomaly
+- `ambiguity_present`
+- `price_and_assortment_change`
+- `assortment_change_only`
+- `price_change_only`
+- `quiet`
+
+**Cross-location comparison.** Roles and pairs come only from the approved
+location authority: its effective comparison pairs and canonical roles. They
+are never inferred from words such as "Airport" or "Downtown" in a label. A
+city without both roles is `role_unavailable`, and no counterpart is
+fabricated. Within one city and one exact scheduled interval, airport and
+downtown candidates join on `CROSS_LOCATION_PRODUCT_COLUMNS`: the event
+identity without canonical city and location. Rental dates, product fields,
+currency and price basis must therefore match. Each matched product gets one
+`CrossLocationOutcome`:
+
+- `both_unchanged`
+- `airport_only_change` / `downtown_only_change`
+- `same_direction` / `opposite_direction`
+- `one_sided_assortment`
+- `mixed_assortment`
+- `simultaneous_appearance` / `simultaneous_disappearance`
+- `ambiguous`
+
+`same_direction`, `same_cent_change` and `same_percent_change` are separate
+flags: a direction match implies neither exact match. A unit change stays a
+disappearance plus an appearance and is never a cross-location price
+comparison. Products seen at only one location are counted, not compared.
+
+**Persistence** (`PersistenceOutcome`). Every increase or decrease gets
+exactly one record, so the persistence population equals the event report's
+changed count. The follow-up is the candidate of the same full identity in
+the immediately following eligible interval of the same timeline, whose
+previous period is the event's current period. Nothing is searched beyond
+that interval.
+
+- `held`: the next price equals the changed price.
+- `continued`: the price moves further in the original direction.
+- `reverted`: the price moves back, including partial reversals. Flags
+  `returned_to_prior_price` and `overshot_prior_price` keep full returns and
+  overshoots distinct.
+- `disappeared`: the identity is absent at the next valid capture, including
+  a valid empty capture.
+- `ambiguous`: the next endpoint has several offers.
+- `not_testable`: there is no immediately following eligible interval, with
+  a `NotTestableReason`:
+  - `right_censored_final_capture`
+  - `governed_exclusion_break`
+  - `missing_capture_break`
+  - `not_one_hour_break`
+  - `source_streams_changed`
+
+Hard breaks and the end of the collection window are never bridged. Right
+censoring is not testable: it is never held, reverted, disappeared or a
+failure. The following conditions raise `PriceChangeReconciliationError`
+rather than being classified:
+
+- a missing follow-up candidate
+- an appearance of an identity that was present at the shared capture
+- a follow-up previous price that differs from the changed price (a broken
+  chain)
+
+Rates name their denominators. Held, continued and reverted shares use
+`held + continued + reverted` (disappeared and ambiguous excluded). Held,
+disappeared and ambiguous shares of testable events use events with a
+following interval. Not-testable events are never in a denominator.
+
+**Missing offers and hard breaks.** A valid eligible capture may hold zero
+canonical offers. Its offers disappear and later reappear across its
+adjacent intervals, and the interval is flagged `empty_endpoint` as an
+observed condition, never assumed to be an assortment withdrawal. Missing
+scheduled captures, governed exclusions such as the Calgary
+`INCOMPLETE_PARENT_CAPTURE`, non-one-hour gaps and source-stream changes are
+hard breaks. They produce no interval, no appearance or disappearance and no
+persistence result.
+
+**Vancouver alias provenance.** Vancouver `Downtown`/`Thurlow` is one
+canonical location. `previous_source_labels` and `current_source_labels` are
+provenance only. Dual-source provenance means one canonical event was
+observed on both source aliases, never two events. Candidates,
+synchronization counts, denominators and comparisons are never duplicated.
+Multi-source and provenance-changed candidates are counted. A provenance
+change may be relevant to anomaly review, but it is not a price movement.
+
+**Final Vancouver decrease** (`FinalDecreaseCase`). The case is derived, with
+no hard-coded timestamp or product. It is the latest exact eligible interval
+of the governed alias city (from the location authority's identity policy)
+with at least one decrease. It reports:
+
+- each involved location with its authority role, and whether the interval
+  ends at that location's final eligible capture
+- the outcome counts and the changed share of comparable offers
+- the three synchronization flags and the largest cohorts
+- decrease magnitude summaries
+- airport/downtown outcomes and assortment events
+- provenance composition
+- persistence outcomes and not-testable reasons
+
+`FinalDecreaseIndicator` values and `describe()` stay descriptive. A broad,
+directionally synchronized movement with stable assortment may be described
+as more consistent with an observed repricing candidate than with an
+isolated extraction error, without claiming proof. Assortment
+discontinuity, empty endpoints, ambiguity or provenance changes are possible
+anomaly indicators. A decrease at the terminal capture is "not testable due
+to right censoring"; persistence is never inferred from the absence of later
+data.
+
+**Reconciliation invariants** (enforced in the module, not by callers):
+
+- Every candidate belongs to exactly one location interval.
+- Each interval's outcome counts sum to its candidates.
+- Interval increases plus decreases equal the event report's changed count.
+- Interval appearances plus disappearances equal its assortment events.
+- Adjacent intervals agree at their shared capture: same identities, offer
+  counts and prices.
+- Persistence partitions every changed event exactly once.
+- Cross-location rows use each source event at most once.
+- Aliases never duplicate a canonical event.
+- The final-decrease case is a subset of the interval and persistence tables.
+- The heatmap source equals the event table before plotting.
+
+`PriceChangeAnalysisResult` re-derives every table on construction and
+rejects any tampered table or report.
+
+**Event table and heatmap.** `EVENT_TABLE_COLUMNS` is the aggregate table:
+interval identity, authority role, outcome counts, denominators, movement
+class, the three synchronization flags, cohorts, magnitude summaries,
+provenance counts, persistence counts for changes originating in the
+interval, and the interval flag. It has no product values or event-level
+prices. `plot_price_change_heatmap` draws separate increase and decrease
+panels, so the directions never cancel, for every approved location and
+scheduled period. Cells without an eligible interval (hard breaks, or
+outside the schedule) are hatched grey, never zero. The figure uses
+canonical UTC capture labels and object-oriented Matplotlib with no pyplot
+state. `write_price_change_analysis_outputs(result, output_dir)` writes
+`price_change_event_table.csv` and `price_change_event_heatmap.png`
+atomically, and only into an explicitly supplied directory. Analysis
+functions write nothing.
+
+> **Confidentiality.** The candidate, cross-location and persistence frames
+> are proprietary event-level data. They stay in memory, excluded from
+> `repr` and equality. The generated table and heatmap are proprietary local
+> artifacts: write them only to a Git-ignored location such as `reports/`,
+> and never commit them or copy their values into documentation.
+
+**Limitations.** The collection window is roughly 90 hours, so many changes
+near its end are right-censored. Persistence is observed over one following
+hour only, and short-window patterns are not evidence of stable long-term
+behaviour, seasonality or predictive rules. Hourly captures of one product
+are repeated measurements, not independent observations.
+
+The data-plan questions this phase answers:
 
 - Matched offer frequency from one hour to the next
 - Typical increase/decrease
-- Simultaneuous products move count
+- Simultaneous products move count
 - Do airport/downtown locations move together
 - New price persistence
 - Simultaneous assortment change
 - Duplicated large moves across aliased locations
+
+### Price-change presentation (notebook 03)
+
+`src/ql2_sixt_canada_analysis/price_change_presentation.py` and
+`notebooks/03_price_change_events.ipynb` complete the presentation
+deliverables of the Price-change events story. Both are enforced by
+`tests/test_price_change_presentation.py` and `tests/test_notebooks.py`
+(fabricated data only). The presentation layer is subordinate to the
+validated chain: it never rebuilds events, never redefines a population and
+calculates nothing the event engine and higher-order analysis do not already
+establish. Everything it shows describes **observed price-change
+candidates**, not proven repricing or proven extraction anomalies.
+
+**One-pipeline-run evidence flow.** `run_price_change_presentation(raw_dir,
+output_dir=None, write_detail=False)` calls `run_pricing_pipeline` exactly
+once. The same `PricingPipelineResult` then passes through
+`price_change_candidates_from_pipeline`, `price_change_analysis_from_pipeline`
+and `build_presentation_tables`. The frame binding and the location-authority
+object are verified at each step, and evidence from another run is blocked.
+A blocked upstream step returns `analysis_not_completed` with the upstream
+blocker categories and produces no table, figure or file. Every table is
+reconciled before it is returned, rendered or written. The checks include:
+
+- outcomes against the event report, and interval totals against candidates;
+- price changes equal increases plus decreases;
+- assortment events equal appearances plus disappearances;
+- persistence partitions every price change exactly once;
+- selected plus excluded movements equal all price changes;
+- cross-location rows are unique;
+- canonical events are unique across Vancouver aliases;
+- the final-case subset matches its interval;
+- the heatmap source equals the interval summary.
+
+**Sanitized aggregate tables** use fixed schemas and semantic validation;
+both levels are allowlists, so unknown or malformed fields fail closed.
+`SANITIZED_TABLE_SCHEMAS` gives the exact column order of every table,
+`SANITIZED_COLUMN_ALLOWLIST` is their union, and `SANITIZED_COLUMN_KINDS`
+assigns every allowed column exactly one value kind. `validate_sanitized_frame`
+checks both levels, and its messages name the rule (and at most a column),
+never a value.
+
+Structurally it rejects:
+
+- an unapproved table name or anything that is not a DataFrame;
+- detailed event frames;
+- product identity, rental dates or units;
+- individual prices or changes;
+- source-provenance columns;
+- raw job or row identifiers;
+- any other column outside the allowlist;
+- any deviation from the exact column order.
+
+Semantically every value must match its column's kind:
+
+- **count**: a non-negative integer, never a boolean;
+- **flag**: a boolean;
+- **share**: finite and between zero and one;
+- **aggregate cent or percentage statistic**: finite;
+- **scheduled period**: canonical `YYYYMMDDTHHMMSSZ` text;
+- **city or location**: an approved canonical city or canonical location;
+- **role**: an approved location role;
+- **enum** (movement class, interval flag, interpretation status, final-case
+  status, direction, reconciliation check or status): a member of its enum;
+- **selection rule**: exactly the documented selection rule.
+
+Missing values are allowed only where a column permits them. Pipe-joined
+source-label text is rejected everywhere, and repeated records are rejected.
+Free-form text cannot pass: every string must be an approved key, enum value
+or canonical period.
+
+`export_sanitized_tables` repeats the complete validation and the
+reconciliation check immediately before writing. A `PresentationTables`
+object mutated after construction is refused at export, and nothing is
+written.
+
+| Table | Grain and content |
+| --- | --- |
+| `event_interval_summary` | One row per approved canonical location and eligible interval. It holds the authority role, the six outcome counts, the comparable, price-change and assortment counts, the movement class, the three synchronization flags, the largest cohorts and magnitude summaries. Cent magnitudes (`min_change_cents`, `max_change_cents`) are governed by the interval's changed offers (`magnitude_suppressed`). Percentage magnitudes (`median_abs_change_percent`, `max_abs_change_percent`) are governed separately by `change_percent_contributor_count`, the changed offers with a nonzero previous price (`percent_magnitude_suppressed`). It also holds provenance counts, persistence counts for changes originating in the interval, the interval flag, `material_synchronized` and `interpretation_status`. |
+| `material_synchronized_movements` | The intervals selected by `MATERIAL_SELECTION_RULE`: direction-synchronized, meaning at least two changed offers, all in one direction. This is a descriptive rule, not an alert threshold. Rows carry the rule and every denominator. |
+| `material_selection_reconciliation` | Intervals and price changes per movement class, with whether each class is selected. Selected plus excluded price changes equal all price changes. |
+| `airport_downtown_summary` | One row per city and shared eligible interval under the approved pairs. It holds matched products, airport-only and downtown-only products, the count of every `CrossLocationOutcome`, and the same-direction, same-cent and same-percent counts. |
+| `persistence_summary` | One row per location, role and direction. It holds changed events, testable events (with a following interval), comparable-following events (held + continued + reverted), each outcome, not-testable counts by reason, returns and overshoots, and shares with named denominators. Not-testable (right-censored or hard-break) events are never in a denominator. |
+| `final_vancouver_decrease` | Exactly one fixed-schema aggregate record. It no longer accepts arbitrary section, metric or value rows. Its approved fields are: `status` (`derived`, `no_decrease` or `city_unavailable`); `canonical_city`; the previous and current scheduled capture periods; `participating_locations`; `airport_involved`, `downtown_involved` and `all_locations_end_at_final_capture`; the six outcome counts; `comparable`, `price_change_count`, `assortment_event_count` and `changed_share_of_comparable`; the three synchronization flags and the largest cohorts; the decrease contributor counts (`decrease_cent_contributor_count`, `decrease_percent_contributor_count`, `decrease_zero_denominator_count`), the suppression flags (`decrease_cent_magnitude_suppressed`, `decrease_percent_magnitude_suppressed`) and the decrease cent and percentage minimum, median and maximum, each governed by its own contributors; one `cross_<outcome>` count per cross-location outcome; provenance as four fixed category counts (`provenance_dual_alias_source`, `provenance_primary_alias_only`, `provenance_secondary_alias_only`, `provenance_other_canonical_location`), never raw source labels; one `persistence_<outcome>` count per outcome and one `not_testable_<reason>` count per reason; `persistence_testable`; and one `indicator_<FinalDecreaseIndicator>` flag per indicator. Derived-case fields must be empty unless the status is `derived`, and only `city_unavailable` has no city. The descriptive sentence (`FinalDecreaseCase.describe()`) is printed separately by the notebook and never stored in the table. |
+| `reconciliation_summary` | Each check with its expected and observed totals and its status. |
+
+**Magnitude suppression.** Every magnitude statistic is governed by its own
+contributing population. No statistic built from fewer than
+`MINIMUM_MAGNITUDE_CONTRIBUTORS` (two) contributors is presented. Zero
+contributors means no statistic, and one contributor means a suppressed
+statistic.
+
+- Decrease cent summaries are governed by `decrease_cent_contributor_count`,
+  which counts every decrease, since each has an exact cent change.
+- Decrease percentage summaries are governed by
+  `decrease_percent_contributor_count`, the decreases with a nonzero previous
+  price. Zero-denominator decreases are counted separately and never
+  contribute to a percentage.
+- Total price-change, comparable, candidate or overall percent-valid counts
+  are never a privacy denominator for a decrease-only statistic. For
+  example, one decrease plus one increase is still suppressed.
+
+Suppressed values are unavailable (empty), never zero. The suppression flag
+is set when contributors exist but are too few. Suppression happens in the
+tested package layer (`magnitude_disclosable`, `final_case_table`) before the
+table exists, so it precedes notebook display, CSV export, the manifest and
+any `repr`. Validation rejects any magnitude that disagrees with its
+contributor count or suppression flag, again immediately before export.
+Reconciliation also checks the contributor counts against the validated
+decrease rows and the presented values against the validated case.
+
+Sanitized means safe for the aggregate notebook presentation and protected
+against product-level disclosure. It does **not** mean approved for
+committing or distribution: these are confidential local artifacts. The
+detailed Parquet table below is the only local artifact that contains
+event-level fields.
+
+**Local detailed event table** (privacy class: local detail, confidential).
+`write_detailed_event_table` is an explicit opt-in, reached through
+`write_detail=True` or `QL2_SIXT_PRICE_CHANGE_WRITE_DETAIL=1` together with
+an output directory. It writes `price_change_event_detail.local.parquet`:
+one row per validated candidate, with the candidate columns, interval
+synchronization attributes, cross-location attributes, persistence and its
+censoring reason, final-case membership and a non-reversible evidence id.
+The export follows these rules:
+
+- It refuses the project raw-data directory, the configured raw-data
+  override, any `data/raw` path and the raw directory the pipeline read.
+- It creates only the requested directory, never its parents.
+- It writes atomically with owner-only permissions, and returns only the
+  path and the row count.
+- The table is never displayed, printed, included in `repr`, equality or
+  reports, documented with values, or committed.
+
+**Heatmap.** `heatmap_source_frame` provides long-form cells for every
+approved location and scheduled period. Interval cells carry counts; `break`
+and `outside` cells are `NaN`, never zero. A break is a governed exclusion,
+missing capture, non-one-hour gap, source-stream change or first capture.
+`render_price_change_heatmap(analysis, output_dir)` runs every reconciliation
+gate immediately before rendering and refuses to render if any fails. It
+writes `price_change_event_heatmap.png` with separate increase and decrease
+panels on one common scale (so mixed intervals never cancel), hatched masked
+breaks with a legend and a note, canonical UTC period labels and
+authority-role location labels. It closes its figure. `heatmap_png` renders
+the same figure in memory for the notebook.
+
+**Running locally.** Write the artifacts only into the Git-ignored
+`reports/price_change_events/` directory or another explicit directory:
+
+```bash
+QL2_SIXT_PRICE_CHANGE_OUTPUT_DIR=reports/price_change_events jupyter lab notebooks/03_price_change_events.ipynb
+python -c "from ql2_sixt_canada_analysis import run_price_change_presentation as r; \
+print(r(output_dir='reports/price_change_events').report.status.value)"
+```
+
+Add `QL2_SIXT_PRICE_CHANGE_WRITE_DETAIL=1` (or `write_detail=True`) for the
+detailed table. The outputs are the seven `price_change_<table>.csv` files,
+the heatmap, the optional detail Parquet file and
+`price_change_presentation_manifest.json`. The manifest lists artifact names,
+file names, schemas, row counts and reconciliation status, but no values or
+absolute paths. `.gitignore` covers `reports/price_change_events/`,
+`*price_change_event_detail*`, `*price_change_presentation_manifest*` and the
+heatmap file name; never force-add them. Before committing the notebook,
+clear its outputs with Edit ▸ Clear All Outputs (or `jupyter nbconvert
+--clear-output --inplace notebooks/03_price_change_events.ipynb`). The tests
+reject outputs, execution counts, embedded images and local paths.
+
+**Interpretation and limitations.** The collection spans roughly 90 hours.
+Findings are descriptive. Synchronized observations are candidates, not
+proof of intentional repricing. Right-censored events provide no persistence
+evidence. Distinguishing genuine repricing from extraction anomalies would
+require source and operational corroboration. Nothing here sets monitoring
+thresholds, long-term baselines or production rules.
+
+**Data-plan bullets completed by notebook 03:**
+
+- ordering by the canonical timestamp;
+- matching each offer to the immediately preceding scheduled capture;
+- absolute and percentage changes;
+- separating price changes from appearances and disappearances;
+- synchronized movements;
+- the final Vancouver decrease;
+- persistence when a following eligible capture exists;
+- right-censored final captures;
+- the event heatmap;
+- the event table.
+
+Visible assortment stability and monitoring work are not started here.
 
 ## Visible assortment stability
 
