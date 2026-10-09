@@ -2003,3 +2003,33 @@ def test_every_displayed_table_or_figure_is_a_tagged_result(notebook_path: Path)
             if re.search(r"\bdisplay\(", body):
                 assert "result" in _tags(cell), f"cell {index} displays a result without the result tag"
         assert set(_tags(cell)) <= {"result", "interpretation"}, f"cell {index}: unknown tag"
+
+
+def test_matched_premium_figure_interpretation_makes_no_product_attribution() -> None:
+    """Regression: the sign spread of matched-pair premiums must not be attributed to product identity."""
+    cells = read_notebook(MATCHED_PRICING_NOTEBOOK).cells
+    plots = [i for i, c in enumerate(cells)
+             if c.cell_type == "code" and "plot_matched_location_premiums(" in c.source]
+    assert len(plots) == 1, "exactly one result cell renders the matched-premium figure"
+    index = plots[0]
+    assert "result" in _tags(cells[index])
+    assert index + 1 < len(cells) and "interpretation" in _tags(cells[index + 1])
+    text = " ".join(cells[index + 1].source.split())
+    lowered = text.lower()
+    assert len(text.split()) <= MAX_INTERPRETATION_WORDS
+    # What the figure shows: the observed premium sign varies across matched pairs.
+    assert re.search(r"premium sign varies across matched pairs|sign of the (observed )?premium varies across "
+                     r"matched pairs", lowered)
+    # Unresolved contributors: repeated measurements plus capture or rental context.
+    assert "repeated measurement" in lowered
+    assert "capture timing" in lowered or "rental context" in lowered
+    assert "descriptive" in lowered or "associational" in lowered
+    # No product attribution: the reviewed phrase is gone, and any sentence linking the variation to the product
+    # does so only to deny it.
+    assert "premium depends on the product" not in lowered
+    attributing = re.compile(r"\b(product|products|product identity)\b[^.]*\b(cause[sd]?|explains?|drives?|"
+                             r"depends?|determines?|due to)\b|\b(caused|explained|driven|determined) by "
+                             r"(the )?product")
+    for sentence in re.split(r"(?<=[.;])\s+", lowered):
+        if attributing.search(sentence):
+            assert re.search(r"\b(not|no|never|cannot)\b", sentence), f"unsupported product attribution: {sentence}"
