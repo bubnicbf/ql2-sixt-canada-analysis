@@ -2033,3 +2033,34 @@ def test_matched_premium_figure_interpretation_makes_no_product_attribution() ->
     for sentence in re.split(r"(?<=[.;])\s+", lowered):
         if attributing.search(sentence):
             assert re.search(r"\b(not|no|never|cannot)\b", sentence), f"unsupported product attribution: {sentence}"
+
+
+def test_assortment_drop_review_interpretation_assigns_no_cause() -> None:
+    """Regression: simultaneous observed drops are descriptive; no shared or collection cause is presumed."""
+    cells = read_notebook(ASSORTMENT_NOTEBOOK).cells
+    reviews = [i for i, c in enumerate(cells) if c.cell_type == "code"
+               and "tables.observed_drop_review" in c.source and "tables.cross_location_drops" in c.source]
+    assert len(reviews) == 1, "exactly one result cell displays the two drop-review tables"
+    index = reviews[0]
+    assert "result" in _tags(cells[index])
+    assert index + 1 < len(cells) and "interpretation" in _tags(cells[index + 1])
+    lowered = " ".join(cells[index + 1].source.split()).lower()
+    assert len(lowered.split()) <= MAX_INTERPRETATION_WORDS
+    assert "review candidate" in lowered or "descriptive" in lowered
+    # Simultaneity is described and explicitly denied causal meaning.
+    assert re.search(r"simultaneous[^.;]*same scheduled period", lowered)
+    assert re.search(r"(does|do) not establish a (shared|common) cause|no (shared|common) cause", lowered)
+    assert re.search(r"isolated drops[^.;]*(do|does) not establish", lowered)
+    # Evidence is requested before any cause is assigned.
+    assert "collection log" in lowered or "capture-completeness" in lowered
+    assert re.search(r"\b(business|operational|supplier|revenue-management|source) corroboration", lowered) \
+        or re.search(r"corroboration from (the )?(business|supplier|source|revenue management)", lowered)
+    assert "not proven supplier availability" in lowered or "not supplier availability" in lowered
+    # No prioritized explanation and no proven labels.
+    assert "point first" not in lowered and "shared collection cause" not in lowered
+    assert not re.search(r"\b(first|primarily|most likely|probably)\b[^.;]*\bcollection\b", lowered)
+    labels = re.compile(r"\b(anomal\w*|collection failures?|failed collection|supplier withdrawals?|withdrew|"
+                        r"confirmed inventory changes?|inventory changed)\b")
+    for sentence in re.split(r"(?<=[.;])\s+", lowered):
+        if labels.search(sentence):
+            assert re.search(r"\b(not|no|never|cannot)\b", sentence), f"unsupported label: {sentence}"
