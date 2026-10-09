@@ -16,17 +16,36 @@ central gate reports it as a blocker. The result keeps the proprietary frames
 and in-memory evidence for downstream analyses
 (:mod:`~ql2_sixt_canada_analysis.pricing_baseline`,
 :mod:`~ql2_sixt_canada_analysis.matched_location_pricing`); it is never
-printed (frames are excluded from ``repr``) and nothing is written.
+printed (frames are excluded from ``repr``) and nothing is written. The coverage
+and reconciliation reports that completeness was decided on are retained too,
+so the monitoring controls (:mod:`~ql2_sixt_canada_analysis.monitoring`) read
+them instead of recomputing them. Every run carries a
+:class:`PipelineEvidenceManifest` (frame bindings and the exact report objects
+of that run), so substituted or mixed-run evidence is detectable by
+:func:`pipeline_evidence_bound` without reassessing anything.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pandas as pd
 
-__all__ = ["PricingPipelineResult", "run_pricing_pipeline"]
+__all__ = ["BOUND_PIPELINE_REPORTS", "PipelineEvidenceManifest", "PricingPipelineResult",
+           "bind_pipeline_evidence", "pipeline_evidence_bound", "run_pricing_pipeline"]
+
+#: The retained reports whose exact objects the evidence manifest binds to one run, and the input each was
+#: assessed from: ``analysis_frames`` (the run's linked ``jobs`` and ``cars``), ``pricing_eligible_frames``
+#: (the eligible rows of the bound population), ``authority_record`` (the decision record and contract) or
+#: ``cleaned_frames`` (the pre-linkage frames that the job linkage keyed; never retained, so bound by identity).
+BOUND_PIPELINE_REPORTS: tuple[tuple[str, str], ...] = (
+    ("record", "authority_record"), ("contract", "authority_record"), ("job_linkage", "cleaned_frames"),
+    ("unique_keys", "analysis_frames"), ("coverage", "analysis_frames"), ("reconciliation", "analysis_frames"),
+    ("scheduled", "analysis_frames"), ("temporal_authority", "authority_record"), ("temporal", "analysis_frames"),
+    ("reporting_days", "analysis_frames"), ("population", "analysis_frames"),
+    ("vehicle_stability", "pricing_eligible_frames"), ("canonical_offers", "analysis_frames"),
+    ("location_authority", "authority_record"), ("pricing", "analysis_frames"))
 
 
 @dataclass(frozen=True)
@@ -49,11 +68,94 @@ class PricingPipelineResult:
     canonical_offers: object = field(repr=False)
     location_authority: object = field(repr=False)
     pricing: object = field(repr=False)
+    #: The expected-location coverage report already computed for completeness (``None`` without a contract).
+    coverage: object = field(default=None, repr=False)
+    #: The per-job job/detail reconciliation report already computed for completeness (``None`` = unassessable).
+    reconciliation: object = field(default=None, repr=False)
+    #: Provenance of every retained report (:func:`bind_pipeline_evidence`); ``None`` = unbound.
+    evidence: PipelineEvidenceManifest | None = field(default=None, repr=False, compare=False)
 
     @property
     def pricing_analysis_ready(self) -> bool:
         """The central readiness gate passed (no blocking reason)."""
         return bool(self.pricing.ready)
+
+
+@dataclass(frozen=True, eq=False)
+class PipelineEvidenceManifest:
+    """Immutable provenance of one pipeline run: its frame bindings and the exact report objects it produced.
+
+    Captured once, when the run is built. ``frames`` binds the linked analysis frames; ``eligible`` binds the
+    pricing-eligible frames that vehicle stability was assessed on (``None`` without a population). ``reports``
+    holds each bound report object itself, so a structurally valid or even equal-valued report from another run
+    is still foreign: provenance is object identity plus frame bindings, never report values. Nothing here is
+    printed: every field is excluded from ``repr`` and from equality.
+    """
+
+    frames: object = field(repr=False)
+    eligible: object = field(repr=False)
+    reports: tuple[tuple[str, object], ...] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        from ql2_sixt_canada_analysis.pricing_population import FrameBinding
+
+        if not isinstance(self.frames, FrameBinding) or not (
+                self.eligible is None or isinstance(self.eligible, FrameBinding)):
+            raise TypeError("a manifest binds frames with FrameBinding objects")
+        if tuple(name for name, _ in self.reports) != tuple(name for name, _ in BOUND_PIPELINE_REPORTS):
+            raise ValueError("a manifest binds exactly the retained pipeline reports, in order")
+
+
+def _eligible_binding(run: PricingPipelineResult):  # type: ignore[no-untyped-def]
+    from ql2_sixt_canada_analysis.pricing_population import frame_binding
+
+    population = run.population
+    if population is None:
+        return None
+    return frame_binding(population.eligible_parents(run.jobs, run.cars),
+                         population.eligible_details(run.jobs, run.cars))
+
+
+def bind_pipeline_evidence(run: PricingPipelineResult) -> PricingPipelineResult:
+    """The same run with its evidence manifest captured (called once, where the run is constructed).
+
+    The manifest records the exact retained report objects and the bindings of the frames they were assessed
+    from. Replacing any bound report or frame afterwards (for example with :func:`dataclasses.replace`) breaks
+    the binding, which :func:`pipeline_evidence_bound` detects.
+    """
+    from ql2_sixt_canada_analysis.pricing_population import frame_binding
+
+    if not isinstance(run, PricingPipelineResult):
+        raise TypeError("run must be a PricingPipelineResult")
+    manifest = PipelineEvidenceManifest(
+        frames=frame_binding(run.jobs, run.cars), eligible=_eligible_binding(run),
+        reports=tuple((name, getattr(run, name)) for name, _ in BOUND_PIPELINE_REPORTS))
+    return replace(run, evidence=manifest)
+
+
+def pipeline_evidence_bound(run: object) -> bool:
+    """Whether every retained report is the exact object bound when the run was built, on the same frames.
+
+    Checks object identity of every bound report, the analysis-frame binding, the pricing-eligible-frame
+    binding, and the bindings the population and canonical offers carry themselves. Nothing is reassessed:
+    no coverage, reconciliation, temporal or stability assessment runs here.
+    """
+    from ql2_sixt_canada_analysis.pricing_population import frame_binding
+
+    if not isinstance(run, PricingPipelineResult) or not isinstance(run.evidence, PipelineEvidenceManifest):
+        return False
+    manifest = run.evidence
+    if any(getattr(run, name) is not report for name, report in manifest.reports):
+        return False
+    if not isinstance(run.jobs, pd.DataFrame) or not isinstance(run.cars, pd.DataFrame) \
+            or frame_binding(run.jobs, run.cars) != manifest.frames:
+        return False
+    population, offers = run.population, run.canonical_offers
+    if population is not None and getattr(population, "binding", None) != manifest.frames:
+        return False
+    if offers is not None and getattr(offers, "binding", None) not in (None, manifest.frames):
+        return False
+    return _eligible_binding(run) == manifest.eligible
 
 
 def run_pricing_pipeline(raw_dir: str | Path | None = None) -> PricingPipelineResult:
@@ -160,8 +262,9 @@ def run_pricing_pipeline(raw_dir: str | Path | None = None) -> PricingPipelineRe
         vehicle_stability=stability, scheduled_coverage=scheduled, job_detail_join=join,
         job_linkage=linkage.report, expected_stream_contract=contract,
         rental_dates=rental_dates, canonical_offers=offers, location_authority=location_authority)
-    return PricingPipelineResult(
+    return bind_pipeline_evidence(PricingPipelineResult(
         record=record, contract=contract, relationship=rel, jobs=jobs, cars=cars, job_linkage=linkage.report,
         unique_keys=keys, scheduled=scheduled, temporal=temporal, temporal_authority=temporal_authority,
         reporting_days=reporting_days, population=population, vehicle_stability=stability,
-        canonical_offers=offers, location_authority=location_authority, pricing=pricing)
+        canonical_offers=offers, location_authority=location_authority, pricing=pricing,
+        coverage=coverage, reconciliation=reconciliation))

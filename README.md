@@ -1848,7 +1848,11 @@ Committed notebooks must have no outputs. `01_data_ingestion.ipynb` runs the
 foundational controls; `02_matched_location_pricing.ipynb` presents the
 matched location pricing (see below) and stops unless pricing readiness is
 true; `03_price_change_events.ipynb` presents the price-change events (see
-"Price-change presentation") from one pipeline run and stops on any blocker.
+"Price-change presentation") from one pipeline run and stops on any blocker;
+`04_visible_assortment.ipynb` presents the visible assortment (see "Visible
+assortment stability"); `05_monitoring_actionability.ipynb` presents the
+eight Section 6 controls and their sample evaluation (see "Monitoring and
+actionability").
 Validate structure and execution (against synthetic temporary data) with:
 
 ```bash
@@ -2942,13 +2946,271 @@ alerts are not established. They need the following:
 - a multi-context rental policy;
 - operational corroboration channels with the collection owner.
 
-## QL2 controls
+The Section 6 catalog (see "Monitoring and actionability") keeps the
+abrupt-assortment control candidate-only until that policy is approved.
 
-- Expected/location completeness
-- Job/detail reconciliation
-- Duplicate/location/alias detection
-- Timestamp offset validation
-- Product attribute consistency
-- Large synchronized price change alerts
-- Assortment drop alerts
-- Persistence confirmation
+## Monitoring and actionability
+
+**Status: control catalog, sample evaluation and presentation implemented;
+production monitoring not established.** Data-plan Section 6 is implemented
+by [`src/ql2_sixt_canada_analysis/monitoring.py`](src/ql2_sixt_canada_analysis/monitoring.py)
+and presented by `notebooks/05_monitoring_actionability.ipynb`. No authority
+record is changed, and no grain, canonical location, alias, schedule,
+timestamp rule, product identity, assortment or price-change definition is
+redefined.
+
+### Purpose and scope
+
+This is an in-repository monitoring **blueprint** for a one-off sample extract.
+It defines the eight required QL2 controls, evaluates each one on the evidence
+the validated pipeline already produced, and presents the result. It is not a
+scheduler, daemon, alerting service, dashboard or notification integration:
+nothing raises an alert, sends a notification or writes a file. The sample
+spans roughly 90 hours, so the contract-based controls can be evaluated now,
+but no production threshold can be calibrated from it.
+
+```python
+from ql2_sixt_canada_analysis import monitoring_control_table, monitoring_summary_lines, run_monitoring
+
+result = run_monitoring()                      # run_pricing_pipeline exactly once; nothing is written
+print("\n".join(monitoring_summary_lines(result.report)))   # status values and control names only
+table = monitoring_control_table(result.report)             # one sanitized row per control
+```
+
+### Severity and status
+
+Severity (`Severity`) communicates business impact and response urgency, not
+statistical confidence:
+
+| Severity | Meaning | Expected response |
+| --- | --- | --- |
+| `critical` | Can invalidate the collection as a whole, because every downstream comparison may be biased. | Stop downstream publication and investigate immediately. |
+| `high` | Can bias comparisons or contaminate many prices or products at once. | Withhold the affected analysis and investigate before its next use. |
+| `medium` | A provisional or review-level observation whose meaning is not yet established. | Keep it out of customer-facing conclusions until it is reviewed, corroborated or confirmed. |
+
+The catalog severity of a control is fixed. Only two controls can raise their
+effective severity, and only to high: abrupt assortment changes, when an
+explicitly approved rule is met while collection completeness is suspect, and
+unconfirmed end-of-window anomalies, when the right-censored observation is
+part of a synchronized price movement.
+
+Every evaluated control has exactly one `ControlStatus`, and the five
+statuses are never merged:
+
+| Status | Observation |
+| --- | --- |
+| `triggered` | Defect observed in the supplied evidence. |
+| `passed` | Evaluated and passed: every prerequisite was available and the control held. |
+| `not_assessable` | Not assessable: prerequisite evidence was unavailable. This is never a pass. |
+| `candidate_only` | Candidate rule only: no approved or calibrated threshold exists. Observations are review candidates, not alerts and not passes. |
+| `confirmation_required` | Right-censored observation: no following eligible capture exists, so it needs another collection before confirmation. |
+
+Findings, unavailable evidence and notes are typed codes
+(`MonitoringFinding`, `EvidenceGap`, `MonitoringNote`). A control passes only
+when every prerequisite report is available and holds. A missing report gives
+`not_assessable`, never `passed`. A candidate rule without an approved policy
+gives `candidate_only`: it can neither pass nor trigger.
+
+### The eight controls
+
+#### 1. Missing expected locations (`missing_expected_locations`)
+
+- **Condition:** An approved source stream of the exhaustive expected-stream contract, or one of its required scheduled stream-periods, has no captured rows and no governed exception or exclusion. Expectations come only from the authority record, never from the locations observed in the extract, and a repeated location never compensates for a missing one.
+- **Severity:** critical
+- **Likely business impact:** Every downstream comparison, price summary and assortment measure is biased toward the locations that happened to return data, and a city or airport-versus-downtown comparison can silently lose one side.
+- **Recommended response:** Check collection logs and source availability for the affected stream and window; rerun or recollect the window where possible; withhold comparisons that use the affected location until coverage is restored or the gap is governed by a recorded exception.
+- **Evidence:** Approved expected-stream contract, expected-location coverage and per-stream scheduled coverage.
+- **Calibration:** `contract_based` (contract-based; evaluated now).
+
+#### 2. Job/detail count mismatches (`job_detail_count_mismatches`)
+
+- **Condition:** For any single parent job, a declared detail count is missing, invalid or different from the detail rows linked to it, declared counts disagree, or detail rows are orphaned, unlinked or carry another scope than their parent. Each job is judged on its own, so over-counts and under-counts never offset.
+- **Severity:** high
+- **Likely business impact:** Lost or duplicated offers distort prices, offer counts and visible assortment for the affected capture and can mimic genuine assortment or price changes.
+- **Recommended response:** Reconcile the parent job with its detail feed; identify ingestion or parsing loss or duplication; quarantine the affected capture before it enters analysis.
+- **Evidence:** Per-job job/detail reconciliation and the authority-backed job linkage.
+- **Calibration:** `contract_based` (contract-based; evaluated now).
+
+#### 3. Duplicate or aliased location feeds (`duplicate_or_aliased_location_feeds`)
+
+- **Condition:** A location feed is unapproved, misspelled or assigned inconsistently, a location identity decision is missing or contradicted by authoritative identity evidence, or an approved alias is not canonicalized before analysis. Similar prices or matching offers are evidence for review only and never establish an alias.
+- **Severity:** high
+- **Likely business impact:** Duplicate feeds inflate location counts, synchronized-event counts and assortment measures, and can create false market comparisons.
+- **Recommended response:** Validate source identifiers and collection configuration with the collection owner; apply only approved canonical mappings (Vancouver Downtown and Thurlow are one canonical location); prevent double counting until identity is resolved.
+- **Evidence:** Expected-location coverage, approved location roles and comparison pairs, the Vancouver identity policy with its recorded comparison evidence, and the approved canonical-offer combination.
+- **Calibration:** `contract_based` (contract-based; evaluated now).
+
+#### 4. Unexpected timestamp offsets (`unexpected_timestamp_offsets`)
+
+- **Condition:** A finish or scrape time does not parse, cannot be resolved in its city's approved time zone, falls outside its scheduled period, collides with another capture, disagrees between parent and detail, or is later than its parent's finish time. Offsets come only from the approved city time zones, never from the machine time zone, and naive times are never reinterpreted without authority.
+- **Severity:** high
+- **Likely business impact:** Incorrect timestamps misorder captures and can manufacture or hide price and assortment changes.
+- **Recommended response:** Validate parser and time-zone configuration; compare raw timestamp text with its canonical UTC derivation; withhold time-sequenced analysis for the affected captures.
+- **Evidence:** Temporal authority, temporal reconciliation and the per-stream schedule assignment of every parent job.
+- **Calibration:** `contract_based` (contract-based; evaluated now).
+
+#### 5. Invalid or changing product attributes (`invalid_or_changing_product_attributes`)
+
+- **Condition:** A required product-identity value is missing, or a product's structural attributes conflict over time or within one capture. Insufficient history and temporally unassessable products are reported as missing evidence, never as stable.
+- **Severity:** high
+- **Likely business impact:** Unstable product identity breaks like-for-like price comparison and can create false assortment additions and removals.
+- **Recommended response:** Check source parsing and attribute mappings; quarantine ambiguous products; rerun product matching only after identity attributes are trustworthy.
+- **Evidence:** Vehicle-attribute stability of the pricing-eligible population under the product identity contract.
+- **Calibration:** `contract_based` (contract-based; evaluated now).
+
+#### 6. Abrupt assortment changes (`abrupt_assortment_changes`)
+
+- **Condition:** Candidate rule: a valid consecutive-capture interval whose observed drop in distinct returned products meets an approved unusual-drop policy (method, minimum history, grouping and threshold). No such policy is approved, so observed drops are review candidates only and are never called anomalies, collection failures or supplier withdrawals.
+- **Severity:** medium
+- **Likely business impact:** A genuine contraction changes what customers can book, while a collection gap looks the same in the extract.
+- **Recommended response:** Check capture completeness and collection logs; compare nearby captures; seek business or supplier corroboration before drawing a commercial conclusion. Escalate to high when an approved rule is met and collection completeness is suspect.
+- **Evidence:** Visible-assortment timeline, observed-drop metrics, typed interval breaks and the unusual-drop policy status.
+- **Calibration:** `candidate_policy_unapproved` (candidate-only; threshold not approved).
+
+#### 7. Large synchronized price movements (`large_synchronized_price_movements`)
+
+- **Condition:** Candidate rule: within one canonical location and one valid interval, the changed offers all move in the same direction and the movement meets approved changed-offer, changed-share, magnitude and cross-location parameters. Increases and decreases are evaluated separately. No parameters are approved, so synchronized movements are descriptive review candidates only, not proof of repricing or of an extraction failure.
+- **Severity:** high
+- **Likely business impact:** A genuine market move may change customer decisions, while a processing defect may contaminate many prices at once.
+- **Recommended response:** Check raw versus processed values, recent parser or deployment changes, the affected dimensions and collection health; seek independent source or operational corroboration before publication or escalation.
+- **Evidence:** Observed price-change candidates and the higher-order synchronization analysis on canonical locations.
+- **Calibration:** `candidate_policy_unapproved` (candidate-only; threshold not approved).
+
+#### 8. Unconfirmed anomalies at the end of a collection window (`unconfirmed_end_of_window_anomalies`)
+
+- **Condition:** A price-change candidate or an observed assortment drop falls in the final interval of the collection window, so no following eligible capture exists to test its persistence. It requires confirmation; it is neither persistent nor failed, and missing captures and hard breaks are never bridged.
+- **Severity:** medium
+- **Likely business impact:** A final-window movement may be a lasting change or a one-capture artifact, and acting on it early risks a false customer-facing claim.
+- **Recommended response:** Request another eligible collection; keep the finding provisional; avoid customer-facing or causal conclusions until it is confirmed or independently corroborated.
+- **Evidence:** Price-change persistence with right-censoring semantics and the visible-assortment timeline.
+- **Calibration:** `contract_based` (contract-based; evaluated now).
+
+### Evaluated now versus candidate-only
+
+- **Contract-based, evaluated now:** missing expected locations, job/detail
+  count mismatches, duplicate or aliased location feeds, unexpected timestamp
+  offsets and invalid or changing product attributes. They compare the
+  extract with approved contracts: the exhaustive expected-stream contract
+  and per-stream schedule (governed exclusions and exceptions are notes, not
+  gaps), the per-job reconciliation, the location authority and the
+  Vancouver identity policy (Downtown and Thurlow are one canonical location;
+  behavioral similarity is review evidence only), the approved city time
+  zones (never the machine time zone), and the product identity contract.
+- **Candidate-only:** abrupt assortment changes and large synchronized price
+  movements. The unusual-drop policy (`UnusualDropPolicy`) and the
+  synchronized-movement policy (`SynchronizedMovementPolicy`) both default to
+  `unavailable`, and the default synchronized-movement policy carries no
+  parameter. Observed drops and synchronized movements are listed as review
+  candidates (increases and decreases separately), never as alerts or passes.
+  Only an explicitly supplied `approved` policy, with a recorded authority
+  record and reference and every parameter, makes either control an evaluated
+  rule; the repository approves none, and the synthetic tests exercise that
+  path with fabricated policies. Approved minimums are inclusive and are
+  compared exactly: for each canonical location interval the changed share
+  is `Fraction(price_change_count, comparable)` and the magnitude is the
+  `statistics.median` of the absolute `exact_change_percent` values of its
+  increases or decreases, both re-derived from the integer cents of the
+  bound, validated candidate evidence. The float summaries of the event
+  table are never converted back into fractions, a zero or missing
+  denominator never qualifies, and candidate evidence that disagrees with
+  the event table makes the control `not_assessable`
+  (`price_change_evidence_inconsistent`). No threshold is estimated from the sample:
+  no extremum, quantile, standard deviation or observed maximum is used.
+- **Right-censored, `confirmation_required`:** unconfirmed anomalies at the end
+  of a collection window. Right-censored events provide no persistence
+  evidence: a price-change candidate or an observed assortment drop in the
+  final interval of a location's window has no following eligible capture. It
+  is neither persistent nor failed and needs another eligible collection.
+  Missing captures, governed exclusions and other hard breaks are never
+  bridged; they are reported as notes.
+
+### Evidence flow and fail-closed behavior
+
+- `run_monitoring(raw_dir=None)` runs `run_pricing_pipeline` exactly once.
+- `monitoring_from_pipeline(run)` derives the higher-order price-change
+  analysis (`price_change_analysis_from_pipeline`) and the visible assortment
+  (`visible_assortment_from_pipeline`) from that same `PricingPipelineResult`.
+  It checks that both are bound to the run's frames (`frame_binding`) and to
+  its location authority, and that the readiness report was decided on the
+  run's own schedule and authority.
+- **Same-run provenance.** Every `PricingPipelineResult` built by
+  `run_pricing_pipeline` carries a `PipelineEvidenceManifest`, captured once
+  when the run is constructed (`bind_pipeline_evidence`). It records the
+  exact retained report objects (`BOUND_PIPELINE_REPORTS`: the decision
+  record and contract, job linkage, keys, coverage, reconciliation,
+  schedule, temporal authority and reconciliation, reporting days, the
+  pricing population, vehicle stability, canonical offers, location
+  authority and readiness) and the `FrameBinding` of the frames they were
+  assessed from: the linked analysis frames, and separately the
+  pricing-eligible frames that vehicle stability uses. Before any control
+  is evaluated, `monitoring_from_pipeline` requires
+  `pipeline_evidence_bound(run)`: every report must be the very object of
+  that run, on the same frames. A report from another run, even a
+  structurally valid or equal-valued one, a swapped frame or a missing
+  manifest gives a blocked report with `evidence_binding_mismatch`.
+  Provenance is object identity plus frame bindings, never report values;
+  nothing is reassessed, and the manifest is excluded from `repr`. This is
+  an integrity safeguard for the sample analysis and a design
+  recommendation for production, not deployed alerting infrastructure.
+- `evaluate_monitoring_controls(evidence)` is the pure evaluation of one
+  `MonitoringEvidence` bundle. It reads only the retained reports and never
+  recomputes them. `PricingPipelineResult` now also retains the
+  expected-location coverage and job/detail reconciliation reports that
+  completeness was decided on (`coverage`, `reconciliation`).
+- The report is `evaluated` when every control had its evidence,
+  `partially_evaluated` when at least one is `not_assessable`, and `blocked`
+  when the evidence chain cannot be bound (`pipeline_evidence_unavailable`,
+  `evidence_binding_mismatch` or `downstream_evidence_invalid`). A blocked
+  report keeps all eight definitions, each `not_assessable`.
+- When pricing readiness is blocked, correctly bound structural controls are
+  still evaluated from their own reports, and the downstream controls are
+  `not_assessable`. The readiness blocker categories are kept in
+  `upstream_blockers`.
+- Evaluation is deterministic and idempotent and never mutates its inputs.
+  Results fail closed, and nothing weakens an existing readiness gate.
+
+### Confidentiality and no-I/O guarantees
+
+- The control table (`monitoring_control_table`, exact
+  `MONITORING_TABLE_COLUMNS`) holds catalog text, enum values and typed codes
+  only. `validate_monitoring_table` refuses any other schema, row order,
+  value or code.
+- `monitoring_summary_lines` returns status values and control names only.
+- Reports hold no frames, identifiers, product values, prices, labels or
+  paths. The in-memory evidence is excluded from `repr` and equality.
+- The module prints nothing, writes nothing, plots nothing, reads no
+  environment variable and opens no connection. No files are written by the
+  module or by notebook 05.
+
+### Data-plan reconciliation (Section 6)
+
+- Missing expected locations: implemented from the approved expected-stream contract, expected-location coverage and per-stream scheduled coverage; contract-based and evaluated, with governed exclusions kept separate from unexplained gaps.
+- Job/detail count mismatches: implemented from the per-job reconciliation and the job linkage; contract-based and evaluated, so offsetting over-counts and under-counts cannot cancel.
+- Duplicate or aliased location feeds: implemented from coverage, the location authority, the Vancouver identity policy and the canonical-offer combination; contract-based and evaluated, and behavioral similarity never establishes an alias.
+- Unexpected timestamp offsets: implemented from the temporal authority, temporal reconciliation and the per-stream schedule assignment; contract-based and evaluated against the approved city time zones.
+- Invalid or changing product attributes: implemented from vehicle-attribute stability; contract-based and evaluated, with missing values, insufficient history and proven conflicts kept distinct.
+- Abrupt assortment changes: implemented from the visible-assortment engine; candidate-only because the unusual-drop policy is unavailable, so observed drops are review candidates and no alert is raised.
+- Large synchronized price movements: implemented from the higher-order price-change analysis; candidate-only because no synchronized-movement parameters are approved, with increases and decreases kept separate.
+- Unconfirmed anomalies at the end of a collection window: implemented from right-censored persistence and the assortment timeline; final-window observations are confirmation-required, never persistent, and breaks are never bridged.
+
+### Before production monitoring
+
+Production monitoring is not established. It needs:
+
+- Longer historical coverage that spans normal periods, known incidents, seasonality and collection changes.
+- Business-owner approval of every candidate method, minimum history, grouping and threshold, recorded in the authority record before use.
+- Back-testing of each candidate rule against labelled incidents and normal periods; no threshold may be optimized against this sample.
+- Operational corroboration channels with the collection owner for completeness and identity questions.
+- An approved persistence decision for evaluations and an approved alert-routing decision; this repository defines neither.
+- Periodic review of every threshold after collection, parser, schedule or supplier changes.
+
+### Running the tests and notebook
+
+```bash
+python -m pytest tests/test_monitoring.py
+python -m pytest tests/test_notebooks.py
+```
+
+Run `notebooks/05_monitoring_actionability.ipynb` top to bottom after
+restarting the kernel. Clear all outputs and execution counts before
+committing; `tests/test_notebooks.py` fails otherwise.

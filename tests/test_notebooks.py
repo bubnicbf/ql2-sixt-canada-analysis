@@ -1826,3 +1826,141 @@ def test_assortment_notebook_runs_top_to_bottom_on_synthetic_ready_data(
     images = [o for o in shown if type(o).__name__ == "Image"]
     assert len(images) == 1 and images[0].data[:4] == b"\x89PNG"
     assert os.listdir(tmp_path) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------- monitoring and actionability (05)
+
+MONITORING_NOTEBOOK = NOTEBOOKS_DIR / "05_monitoring_actionability.ipynb"
+MONITORING_SECTIONS = ("# 05 — Monitoring and actionability", "## Data-plan scope", "## Severity scale",
+                       "## Evaluation statuses", "## Confidentiality and side effects", "## Pipeline evidence",
+                       "## Control definitions and sample evaluation",
+                       "## Current sample evidence versus proposed operational controls",
+                       "## Candidate rules and right-censored observations",
+                       "## Limitations and production calibration", "## Data-plan reconciliation",
+                       "## Clear all outputs before committing")
+
+
+def test_monitoring_notebook_has_the_required_sections_in_order_and_its_reconciliation() -> None:
+    from ql2_sixt_canada_analysis.monitoring import DATA_PLAN_RECONCILIATION, MONITORING_CONTROLS
+
+    notebook = read_notebook(MONITORING_NOTEBOOK)
+    headings = [c.source.splitlines()[0] for c in notebook.cells if c.cell_type == "markdown"]
+    positions = [next(i for i, h in enumerate(headings) if h == s) for s in MONITORING_SECTIONS]
+    assert positions == sorted(positions)
+    text = " ".join("\n".join(c.source for c in notebook.cells if c.cell_type == "markdown").split())
+    for control in MONITORING_CONTROLS:
+        assert control.name in text and DATA_PLAN_RECONCILIATION[control.control_id] in text
+    for phrase in ("roughly 90 hours", "not a statistical confidence level", "never a pass", "candidate-only",
+                   "confirmation_required", "Right-censored events provide no persistence evidence",
+                   "never bridged", "never establishes an alias", "Vancouver Downtown and Thurlow",
+                   "not proof of intentional repricing", "not a scheduler", "Nothing is written",
+                   "Clear all outputs", "exactly once"):
+        assert phrase in text, phrase
+
+
+def test_monitoring_notebook_delegates_to_package_functions_only() -> None:
+    notebook = read_notebook(MONITORING_NOTEBOOK)
+    code = _code_source(notebook)
+    for name in ("run_monitoring", "monitoring_control_table", "monitoring_summary_lines", "severity_scale_table",
+                 "status_legend_table", "resolve_raw_data_dir"):
+        assert f"{name}(" in code, name
+    assert code.count("run_monitoring(") == 1, "the pipeline runs once"
+    for pattern in (r"\bdef\b", r"\blambda\b", r"\.merge\(", r"\.groupby\(", r"\.pivot", r"\.sum\(", r"\.median\(",
+                    r"\.mean\(", r"\.quantile\(", r"\.std\(", r"\.max\(", r"\.min\(", r"pyplot", r"plt\.",
+                    r"savefig", r"\.evidence\b", r"\.event_table\b", r"\.timeline\b", r"\.persistence\b",
+                    r"\.membership\b", r"\.offers\b", r"\.candidates\b", r"run_pricing_pipeline",
+                    r"monitoring_from_pipeline", r"evaluate_monitoring_controls", r"ControlEvaluation",
+                    r"MonitoringFinding", r"ControlStatus\.", r"SynchronizedMovementPolicy", r"UnusualDropPolicy",
+                    r"policy\s*=", r"to_csv", r"to_parquet", r"to_json", r"open\(", r"output_dir", r"os\.environ",
+                    r"getenv",
+                    r"\.(head|tail|sample|info|to_string|to_markdown|to_html)\(", r"job_id", r"\bjobs\b",
+                    r"\bcars\b", r"\.fillna\(", r"threshold", r"alert\(", r"notify", r"requests", r"smtp"):
+        assert not re.search(pattern, code), f"notebook re-implements or exposes: {pattern}"
+    raw = MONITORING_NOTEBOOK.read_text(encoding="utf-8")
+    assert "image/png" not in raw and "attachments" not in raw and "base64" not in raw
+
+
+def _run_monitoring_cells(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run: object) -> tuple:
+    from ql2_sixt_canada_analysis import pricing_pipeline
+
+    calls: list[object] = []
+    monkeypatch.setattr(pricing_pipeline, "run_pricing_pipeline", lambda raw_dir=None: calls.append(raw_dir) or run)
+    monkeypatch.setenv(paths.RAW_DATA_DIR_ENV_VAR, str(tmp_path / "synthetic_raw"))
+    monkeypatch.chdir(tmp_path)
+    shown: list[object] = []
+    printed: list[str] = []
+    namespace = {"__name__": "__main__", "print": lambda *a, **k: printed.append(" ".join(map(str, a)))}
+    import IPython.display
+
+    monkeypatch.setattr(IPython.display, "display", lambda obj, *a, **k: shown.append(obj))
+    for cell in _code_cells(read_notebook(MONITORING_NOTEBOOK)):
+        exec(compile(cell.source, "<notebook-cell>", "exec"), namespace)   # noqa: S102 - the committed cells
+    return calls, shown, "\n".join(printed), namespace
+
+
+def test_monitoring_notebook_runs_top_to_bottom_on_synthetic_ready_evidence(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The committed cells, in order, against a ready synthetic pipeline result (in process; nothing written)."""
+    import pandas as pd
+    from test_monitoring import FINAL, full_run
+    from test_price_change_events import synthetic_world
+
+    from ql2_sixt_canada_analysis.monitoring import validate_monitoring_table
+
+    repo_before = _snapshot(PROJECT_ROOT)
+    calls, shown, text, namespace = _run_monitoring_cells(monkeypatch, tmp_path,
+                                                          full_run(synthetic_world(products=FINAL)))
+    assert len(calls) == 1
+    assert "Monitoring evaluation status: evaluated" in text and "No files written." in text
+    assert "candidate_only: abrupt_assortment_changes, large_synchronized_price_movements" in text
+    assert "confirmation_required: unconfirmed_end_of_window_anomalies" in text
+    assert "SYNTH" not in text and str(tmp_path) not in text and "$" not in text
+    frames = [o for o in shown if isinstance(o, pd.DataFrame)]
+    assert len(frames) == 3
+    validate_monitoring_table(frames[2])
+    assert frames[2] is namespace["controls"] and len(frames[2]) == 8
+    assert all("SYNTH" not in f.to_csv(index=False) for f in frames)
+    assert os.listdir(tmp_path) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+def test_monitoring_notebook_shows_only_definitions_and_categories_when_blocked(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import dataclasses
+
+    import pandas as pd
+    from test_monitoring import full_run
+    from test_price_change_events import synthetic_world
+
+    from ql2_sixt_canada_analysis.monitoring import MONITORING_CONTROLS
+
+    repo_before = _snapshot(PROJECT_ROOT)
+    run = dataclasses.replace(full_run(synthetic_world()), pricing=None)
+    calls, shown, text, namespace = _run_monitoring_cells(monkeypatch, tmp_path, run)
+    assert len(calls) == 1
+    assert "Monitoring evaluation status: blocked" in text and "pipeline_evidence_unavailable" in text
+    assert "the control definitions remain available" in text and "No files written." in text
+    controls = namespace["controls"]
+    assert isinstance(controls, pd.DataFrame) and set(controls["evaluation_status"]) == {"not_assessable"}
+    assert controls["condition"].tolist() == [c.condition for c in MONITORING_CONTROLS]
+    assert set(controls["unavailable_evidence"]) == {"monitoring_evidence_blocked"}
+    assert set(controls["findings"]) == {""}
+    assert not re.search(r"\d", text) and "SYNTH" not in text
+    assert os.listdir(tmp_path) == [] and _snapshot(PROJECT_ROOT) == repo_before
+
+
+def test_monitoring_notebook_executes_from_a_clean_kernel_on_synthetic_data(synthetic_raw_dir: Path,
+                                                                            tmp_path: Path) -> None:
+    repo_before = _snapshot(PROJECT_ROOT)
+    workdir = tmp_path / "outside_repository"
+    workdir.mkdir()
+    result = execute_notebook_copy(MONITORING_NOTEBOOK, workdir=workdir,
+                                   env={paths.RAW_DATA_DIR_ENV_VAR: str(synthetic_raw_dir)}, timeout_seconds=300)
+    assert result.execution_counts == tuple(range(1, len(_code_cells(result.executed)) + 1))
+    outputs = "\n".join(o.get("text", "") for c in _code_cells(result.executed) for o in c.outputs)
+    rendered = json.dumps([o for c in _code_cells(result.executed) for o in c.outputs])
+    assert "Monitoring evaluation status: partially_evaluated" in outputs and "No files written." in outputs
+    assert "triggered: missing_expected_locations" in outputs           # expectations come from the contract
+    assert "Pricing-readiness blockers:" in outputs
+    assert "synthetic_" not in rendered and str(synthetic_raw_dir) not in rendered and str(tmp_path) not in rendered
+    assert "image/png" not in rendered
+    assert not any(workdir.iterdir()) and _snapshot(PROJECT_ROOT) == repo_before
