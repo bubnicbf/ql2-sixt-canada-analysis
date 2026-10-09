@@ -83,6 +83,7 @@ from ql2_sixt_canada_analysis.monitoring import (
     status_legend_table,
     validate_monitoring_table,
 )
+from ql2_sixt_canada_analysis.pricing_pipeline import bind_pipeline_evidence
 from ql2_sixt_canada_analysis.pricing_population import frame_binding
 from ql2_sixt_canada_analysis.readiness import LocationPolicyReport, PricingBlocker
 from ql2_sixt_canada_analysis.reconciliation import assess_job_detail_reconciliation
@@ -159,7 +160,8 @@ def full_run(world: dict, **replace):  # type: ignore[no-untyped-def]
     extra = dict(coverage=assess_expected_location_coverage(world["cars"], CONTRACT.coverage),
                  reconciliation=reconciliation(), job_linkage=LINKAGE, temporal_authority=TEMPORAL_AUTHORITY,
                  temporal=temporal_report(), vehicle_stability=stability_report())
-    return dataclasses.replace(run, **{**extra, **replace})
+    # Built as one run: its evidence manifest is captured after every report is in place.
+    return bind_pipeline_evidence(dataclasses.replace(run, **{**extra, **replace}))
 
 
 def evaluate(world: dict, *, movement_policy=DEFAULT_SYNCHRONIZED_MOVEMENT_POLICY, assortment_policy=None,  # type: ignore[no-untyped-def]
@@ -1257,3 +1259,178 @@ def test_exact_policy_evaluation_is_deterministic_sanitized_and_side_effect_free
     pd.testing.assert_frame_equal(first.evidence.price_changes.events.candidates, candidates)
     pd.testing.assert_frame_equal(run.cars, cars)
     assert dict(os.environ) == before_env and list(tmp_path.iterdir()) == []
+
+
+# ============================================================================ same-run evidence binding
+
+from ql2_sixt_canada_analysis.expected_stream_contract import current_expected_stream_contract  # noqa: E402
+from ql2_sixt_canada_analysis.pricing_pipeline import (  # noqa: E402
+    BOUND_PIPELINE_REPORTS,
+    PipelineEvidenceManifest,
+    PricingPipelineResult,
+    pipeline_evidence_bound,
+    run_pricing_pipeline,
+)
+
+
+def assert_binding_blocked(result: MonitoringResult) -> None:
+    """The fail-closed contract of a binding mismatch: blocked, no trusted evidence, eight not-assessable rows."""
+    report = result.report
+    assert report.blocked and report.blockers == (MonitoringBlocker.EVIDENCE_BINDING_MISMATCH,)
+    assert result.evidence is None
+    assert all(e.status is ST.NOT_ASSESSABLE and e.unavailable_evidence == (G.MONITORING_EVIDENCE_BLOCKED,)
+               for e in report.evaluations)
+    table = monitoring_control_table(report)
+    assert table["control_id"].tolist() == [c.value for c in ORDER]
+    assert table["condition"].tolist() == [c.condition for c in MONITORING_CONTROLS]
+    assert set(table["findings"]) == set(table["notes"]) == {""}
+    text = table.to_csv(index=False) + "\n".join(monitoring_summary_lines(report))
+    assert "SYNTH" not in text and not re.search(r"\d", text)
+
+
+@pytest.fixture(scope="module")
+def twin_runs():  # type: ignore[no-untyped-def]
+    """Two separately built runs over equal fabricated frames: equal report values, distinct report objects."""
+    return full_run(synthetic_world(products=QUIET)), full_run(synthetic_world(products=QUIET))
+
+
+def test_an_intact_run_is_bound_and_evaluated(twin_runs) -> None:  # type: ignore[no-untyped-def]
+    run, _ = twin_runs
+    assert isinstance(run.evidence, PipelineEvidenceManifest) and pipeline_evidence_bound(run)
+    result = monitoring_from_pipeline(run)
+    assert result.report.status is MonitoringReportStatus.EVALUATED and result.evidence is not None
+    assert result.evidence.coverage is run.coverage and result.evidence.temporal is run.temporal
+
+
+def test_the_reported_coverage_substitution_fails_closed_against_a_false_trigger(quiet_world) -> None:  # type: ignore[no-untyped-def]
+    run = full_run(quiet_world)
+    cars = quiet_world["cars"]
+    foreign = assess_expected_location_coverage(
+        cars[(cars["city"] != TOR_AIR[0]) | (cars["location"] != TOR_AIR[1])], CONTRACT.coverage)
+    # The foreign report alone would trigger the control on a run whose own coverage is complete.
+    assert one(MonitoringEvidence(contract=CONTRACT, coverage=foreign, scheduled=run.scheduled),
+               C.MISSING_EXPECTED_LOCATIONS).status is ST.TRIGGERED
+    assert monitoring_from_pipeline(run).report.evaluation(C.MISSING_EXPECTED_LOCATIONS).status is ST.PASSED
+    assert_binding_blocked(monitoring_from_pipeline(dataclasses.replace(run, coverage=foreign)))
+
+
+def test_a_coverage_substitution_fails_closed_against_a_false_pass() -> None:
+    world = synthetic_world(products=QUIET)
+    cars = world["cars"]
+    missing = cars[(cars["city"] != TOR_AIR[0]) | (cars["location"] != TOR_AIR[1])]
+    run = full_run(world, coverage=assess_expected_location_coverage(missing, CONTRACT.coverage))
+    assert monitoring_from_pipeline(run).report.evaluation(C.MISSING_EXPECTED_LOCATIONS).status is ST.TRIGGERED
+    clean = assess_expected_location_coverage(cars, CONTRACT.coverage)
+    assert_binding_blocked(monitoring_from_pipeline(dataclasses.replace(run, coverage=clean)))
+
+
+def _foreign(name: str, other: PricingPipelineResult):  # type: ignore[no-untyped-def]
+    """A structurally valid replacement for one bound report: another run's object or a fresh equal copy."""
+    fresh = {
+        "contract": lambda: dataclasses.replace(current_expected_stream_contract()),
+        "reconciliation": lambda: reconciliation(),
+        "job_linkage": lambda: link(_jobs([J1, J2], [1, 1]), _cars([J1, J2])).report,
+        "temporal_authority": lambda: temporal_authority_from_record(
+            load_current_decision_record(), ANALYSIS_TEMPORAL_RECONCILIATION, CONTRACT),
+        "temporal": lambda: temporal_report(),
+        "vehicle_stability": lambda: stability_report(),
+        "location_authority": lambda: dataclasses.replace(AUTHORITY),
+    }
+    return fresh[name]() if name in fresh else getattr(other, name)
+
+
+@pytest.mark.parametrize("name", ["contract", "coverage", "reconciliation", "job_linkage", "scheduled",
+                                  "temporal_authority", "temporal", "vehicle_stability", "population",
+                                  "canonical_offers", "location_authority", "pricing"])
+def test_every_foundational_report_from_another_run_is_rejected_even_when_equal(twin_runs, name) -> None:  # type: ignore[no-untyped-def]
+    run, other = twin_runs
+    foreign = _foreign(name, other)
+    assert foreign is not getattr(run, name)
+    if name in ("coverage", "reconciliation", "temporal", "vehicle_stability", "scheduled", "job_linkage"):
+        assert foreign == getattr(run, name)          # equal public values never prove same-run provenance
+    mixed = dataclasses.replace(run, **{name: foreign})
+    assert not pipeline_evidence_bound(mixed)
+    assert_binding_blocked(monitoring_from_pipeline(mixed))
+    assert pipeline_evidence_bound(run)                # the original run is untouched
+
+
+def test_a_foreign_vehicle_stability_population_and_both_temporal_reports_are_rejected(twin_runs) -> None:  # type: ignore[no-untyped-def]
+    run, _ = twin_runs
+    different = stability_report(status=VehicleStabilityStatus.VIOLATIONS, entities_with_value_conflicts=1,
+                                 fully_stable_entities=1, value_unstable_only_entities=1)
+    assert_binding_blocked(monitoring_from_pipeline(dataclasses.replace(run, vehicle_stability=different)))
+    both = dataclasses.replace(run, temporal=temporal_report(), temporal_authority=_foreign("temporal_authority", run))
+    assert_binding_blocked(monitoring_from_pipeline(both))
+
+
+def test_substituted_frames_manifests_or_missing_provenance_are_rejected(twin_runs, sync_world) -> None:  # type: ignore[no-untyped-def]
+    run, other = twin_runs
+    shuffled = dataclasses.replace(run, cars=run.cars.iloc[::-1])
+    assert_binding_blocked(monitoring_from_pipeline(shuffled))                       # frames differ from the binding
+    swapped = dataclasses.replace(run, coverage=other.coverage, evidence=other.evidence)
+    assert_binding_blocked(monitoring_from_pipeline(swapped))                         # another run's manifest
+    assert_binding_blocked(monitoring_from_pipeline(dataclasses.replace(run, evidence=None)))
+    elsewhere = full_run(sync_world)
+    assert_binding_blocked(monitoring_from_pipeline(
+        dataclasses.replace(elsewhere, jobs=run.jobs, cars=run.cars)))                # frames of another run
+
+
+def test_runs_of_the_real_pipeline_are_bound_and_cannot_be_mixed(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    directory = tmp_path / "synthetic_raw"
+    directory.mkdir()
+    for key in DatasetKey:
+        write_synthetic_csv(directory / f"synthetic_{key}.csv", contract_columns(key), rows=3)
+    first, second = run_pricing_pipeline(directory), run_pricing_pipeline(directory)
+    assert pipeline_evidence_bound(first) and pipeline_evidence_bound(second)
+    assert not first.pricing_analysis_ready                    # pricing is blocked on these fabricated rows ...
+    report = monitoring_from_pipeline(first).report
+    assert not report.blocked                                 # ... yet the bound structural evidence is assessed
+    assert report.evaluation(C.MISSING_EXPECTED_LOCATIONS).status is ST.TRIGGERED
+    assert report.evaluation(C.JOB_DETAIL_COUNT_MISMATCHES).status is not ST.NOT_ASSESSABLE
+    for name in ("coverage", "reconciliation", "temporal", "temporal_authority", "pricing"):
+        assert getattr(second, name) == getattr(first, name) or name in ("pricing", "temporal_authority")
+        assert_binding_blocked(monitoring_from_pipeline(dataclasses.replace(first, **{name: getattr(second, name)})))
+
+
+def test_binding_validation_never_reassesses_retained_reports(twin_runs, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import ql2_sixt_canada_analysis as pkg
+    from ql2_sixt_canada_analysis import coverage, reconciliation as rec, stability, temporal
+
+    def forbidden(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("retained evidence must not be reassessed")
+
+    for module, name in ((coverage, "assess_expected_location_coverage"),
+                         (coverage, "assess_dataset_location_coverage"),
+                         (rec, "assess_job_detail_reconciliation"), (temporal, "assess_temporal_reconciliation"),
+                         (stability, "assess_vehicle_attribute_stability")):
+        monkeypatch.setattr(module, name, forbidden)
+        if name in pkg.__all__:
+            monkeypatch.setattr(pkg, name, forbidden)
+    run, other = twin_runs
+    assert not monitoring_from_pipeline(run).report.blocked
+    assert_binding_blocked(monitoring_from_pipeline(dataclasses.replace(run, reconciliation=other.reconciliation)))
+
+
+def test_binding_is_deterministic_immutable_and_never_mutates_its_inputs(quiet_world) -> None:  # type: ignore[no-untyped-def]
+    run = full_run(quiet_world)
+    jobs, cars = run.jobs.copy(deep=True), run.cars.copy(deep=True)
+    unbound = dataclasses.replace(run, evidence=None)
+    rebound = bind_pipeline_evidence(unbound)
+    assert unbound.evidence is None and rebound.evidence is not unbound.evidence
+    assert all(getattr(rebound, n) is getattr(run, n) for n, _ in BOUND_PIPELINE_REPORTS)
+    assert [pipeline_evidence_bound(run) for _ in range(3)] == [True] * 3
+    assert monitoring_from_pipeline(run).report == monitoring_from_pipeline(run).report
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        run.evidence.reports = ()                                                # type: ignore[misc]
+    with pytest.raises(ValueError):
+        PipelineEvidenceManifest(frames=run.evidence.frames, eligible=None, reports=run.evidence.reports[:-1])
+    pd.testing.assert_frame_equal(run.jobs, jobs)
+    pd.testing.assert_frame_equal(run.cars, cars)
+
+
+def test_provenance_never_appears_in_representations(quiet_world) -> None:  # type: ignore[no-untyped-def]
+    run = full_run(quiet_world)
+    text = repr(run.evidence) + repr(run)
+    assert text.startswith("PipelineEvidenceManifest()")
+    assert "SYNTH" not in text and "digest" not in text and "DataFrame" not in text and not re.search(r"\d", text)
+    assert "evidence" not in repr(run)

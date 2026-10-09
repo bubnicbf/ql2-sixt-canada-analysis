@@ -3133,6 +3133,25 @@ gives `candidate_only`: it can neither pass nor trigger.
   It checks that both are bound to the run's frames (`frame_binding`) and to
   its location authority, and that the readiness report was decided on the
   run's own schedule and authority.
+- **Same-run provenance.** Every `PricingPipelineResult` built by
+  `run_pricing_pipeline` carries a `PipelineEvidenceManifest`, captured once
+  when the run is constructed (`bind_pipeline_evidence`). It records the
+  exact retained report objects (`BOUND_PIPELINE_REPORTS`: the decision
+  record and contract, job linkage, keys, coverage, reconciliation,
+  schedule, temporal authority and reconciliation, reporting days, the
+  pricing population, vehicle stability, canonical offers, location
+  authority and readiness) and the `FrameBinding` of the frames they were
+  assessed from: the linked analysis frames, and separately the
+  pricing-eligible frames that vehicle stability uses. Before any control
+  is evaluated, `monitoring_from_pipeline` requires
+  `pipeline_evidence_bound(run)`: every report must be the very object of
+  that run, on the same frames. A report from another run, even a
+  structurally valid or equal-valued one, a swapped frame or a missing
+  manifest gives a blocked report with `evidence_binding_mismatch`.
+  Provenance is object identity plus frame bindings, never report values;
+  nothing is reassessed, and the manifest is excluded from `repr`. This is
+  an integrity safeguard for the sample analysis and a design
+  recommendation for production, not deployed alerting infrastructure.
 - `evaluate_monitoring_controls(evidence)` is the pure evaluation of one
   `MonitoringEvidence` bundle. It reads only the retained reports and never
   recomputes them. `PricingPipelineResult` now also retains the
@@ -3143,8 +3162,8 @@ gives `candidate_only`: it can neither pass nor trigger.
   when the evidence chain cannot be bound (`pipeline_evidence_unavailable`,
   `evidence_binding_mismatch` or `downstream_evidence_invalid`). A blocked
   report keeps all eight definitions, each `not_assessable`.
-- When pricing readiness is blocked, the structural controls are still
-  evaluated from their own reports, and the downstream controls are
+- When pricing readiness is blocked, correctly bound structural controls are
+  still evaluated from their own reports, and the downstream controls are
   `not_assessable`. The readiness blocker categories are kept in
   `upstream_blockers`.
 - Evaluation is deterministic and idempotent and never mutates its inputs.

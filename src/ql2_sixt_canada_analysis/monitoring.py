@@ -1340,12 +1340,15 @@ def monitoring_evidence_from_pipeline(run: object, *, assortment_policy: Unusual
                                       ) -> MonitoringEvidence | MonitoringBlocker:
     """The evidence bundle of one pipeline result, or the blocker that prevents binding it.
 
-    Never reruns the pipeline. The price-change analysis and the visible
+    Never reruns the pipeline. Every retained foundational report must carry
+    the run's own provenance (:func:`~ql2_sixt_canada_analysis.pricing_pipeline.pipeline_evidence_bound`):
+    a report substituted from another run, even an equal-valued one, gives
+    ``EVIDENCE_BINDING_MISMATCH``. The price-change analysis and the visible
     assortment are derived from ``run`` itself and must be bound to its frames
     and its location authority.
     """
     from ql2_sixt_canada_analysis.price_change_analysis import price_change_analysis_from_pipeline
-    from ql2_sixt_canada_analysis.pricing_pipeline import PricingPipelineResult
+    from ql2_sixt_canada_analysis.pricing_pipeline import PricingPipelineResult, pipeline_evidence_bound
     from ql2_sixt_canada_analysis.pricing_population import frame_binding
     from ql2_sixt_canada_analysis.readiness import PricingReadinessReport
     from ql2_sixt_canada_analysis.visible_assortment import visible_assortment_from_pipeline
@@ -1358,8 +1361,14 @@ def monitoring_evidence_from_pipeline(run: object, *, assortment_policy: Unusual
     if not isinstance(pricing, PricingReadinessReport) or not isinstance(run.jobs, pd.DataFrame) \
             or not isinstance(run.cars, pd.DataFrame):
         return MonitoringBlocker.PIPELINE_EVIDENCE_UNAVAILABLE
-    if (pricing.location_authority is not None and pricing.location_authority is not run.location_authority) \
-            or (pricing.scheduled_coverage is not None and pricing.scheduled_coverage is not run.scheduled):
+    # Same-run provenance: every retained foundational report must be the exact object bound when the run was
+    # built, on the same frames (identity and frame bindings; nothing is reassessed or compared by value).
+    if not pipeline_evidence_bound(run):
+        return MonitoringBlocker.EVIDENCE_BINDING_MISMATCH
+    decided_on = ((pricing.location_authority, run.location_authority), (pricing.scheduled_coverage, run.scheduled),
+                  (pricing.canonical_offers, run.canonical_offers), (pricing.job_linkage, run.job_linkage),
+                  (pricing.expected_stream_contract, run.contract))
+    if any(used is not None and used is not retained for used, retained in decided_on):
         return MonitoringBlocker.EVIDENCE_BINDING_MISMATCH
     try:
         analysis = price_change_analysis_from_pipeline(run)
