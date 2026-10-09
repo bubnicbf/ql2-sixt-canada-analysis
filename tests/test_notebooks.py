@@ -1964,3 +1964,42 @@ def test_monitoring_notebook_executes_from_a_clean_kernel_on_synthetic_data(synt
     assert "synthetic_" not in rendered and str(synthetic_raw_dir) not in rendered and str(tmp_path) not in rendered
     assert "image/png" not in rendered
     assert not any(workdir.iterdir()) and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------- result / interpretation convention (all notebooks)
+
+INTERPRETATION_HELPERS = ("interpret_section(", "final_conclusions(", "build_assortment_narrative(")
+MAX_INTERPRETATION_WORDS = 120
+
+
+def _tags(cell: nbformat.NotebookNode) -> list[str]:
+    return list(cell.metadata.get("tags", []))
+
+
+@pytest.mark.parametrize("notebook_path", TRACKED_NOTEBOOKS, ids=NOTEBOOK_IDS)
+def test_every_result_is_immediately_followed_by_an_interpretation(notebook_path: Path) -> None:
+    cells = read_notebook(notebook_path).cells
+    results = [i for i, c in enumerate(cells) if "result" in _tags(c)]
+    assert results, "every notebook tags its result cells"
+    for index in results:
+        assert cells[index].cell_type == "code", f"cell {index}: only code cells produce results"
+        assert index + 1 < len(cells), f"cell {index}: a result needs an interpretation after it"
+        following = cells[index + 1]
+        assert "interpretation" in _tags(following), f"cell {index}: the next cell must be the interpretation"
+        if following.cell_type == "markdown":
+            assert following.source.startswith("**Interpretation.**"), f"cell {index + 1}: unlabelled interpretation"
+            assert len(following.source.split()) <= MAX_INTERPRETATION_WORDS, f"cell {index + 1}: not concise"
+        else:
+            assert any(h in following.source for h in INTERPRETATION_HELPERS), \
+                f"cell {index + 1}: runtime interpretation must come from a tested package helper"
+
+
+@pytest.mark.parametrize("notebook_path", TRACKED_NOTEBOOKS, ids=NOTEBOOK_IDS)
+def test_every_displayed_table_or_figure_is_a_tagged_result(notebook_path: Path) -> None:
+    for index, cell in enumerate(read_notebook(notebook_path).cells):
+        if cell.cell_type == "code":
+            body = "\n".join(line for line in cell.source.splitlines()
+                             if not re.match(r"\s*(from|import)\s", line))
+            if re.search(r"\bdisplay\(", body):
+                assert "result" in _tags(cell), f"cell {index} displays a result without the result tag"
+        assert set(_tags(cell)) <= {"result", "interpretation"}, f"cell {index}: unknown tag"
