@@ -1,14 +1,18 @@
 # notebooks
 
-Exploratory and presentation notebooks. Reusable logic belongs in
+Presentation notebooks. Reusable logic belongs in
 `src/ql2_sixt_canada_analysis`; notebooks import it rather than re-implement it.
 
 ## Execution order
 
 Run notebooks in numeric-prefix order, each one **top to bottom after
-restarting the kernel** (Kernel ▸ Restart Kernel and Run All Cells). No
-notebook may rely on variables, imports or files left behind by an earlier
-interactive session, and none depends on the working directory.
+restarting the kernel** (Kernel ▸ Restart Kernel and Run All Cells). The
+notebooks are **independent**: none reads variables, imports, outputs or files
+left behind by another notebook or an earlier session, and none depends on the
+working directory. Notebooks 02 to 06 each rebuild every readiness gate through
+the package, so any one of them can be run on its own; the order is the reading
+order. Notebook 06 is the final report and the one to read first if you only
+read one.
 
 | Order | Notebook | Purpose |
 | --- | --- | --- |
@@ -17,8 +21,9 @@ interactive session, and none depends on the working directory.
 | 3 | `03_price_change_events.ipynb` | Price-change events, independent of earlier kernel state: `run_price_change_presentation` runs `run_pricing_pipeline` exactly once and passes that one result through the event engine (`price_change_events`), the higher-order analysis (`price_change_analysis`) and the presentation reconciliation (`price_change_presentation`); when anything is blocked only blocker categories are printed and no table, figure or file is produced. Displays only sanitized aggregate tables (reconciliation summary, event interval summary, material synchronized movements and selection reconciliation, airport/downtown summary, persistence summary, final Vancouver decrease summary) and the reconciled two-panel event heatmap rendered in memory (`heatmap_png`). Nothing is written unless an explicit output directory is set (`OUTPUT_DIR` or `QL2_SIXT_PRICE_CHANGE_OUTPUT_DIR`); the confidential detailed Parquet event table additionally needs `WRITE_DETAIL` or `QL2_SIXT_PRICE_CHANGE_WRITE_DETAIL=1` and is never displayed. Observed candidates only - descriptive, not proof of repricing or extraction error. |
 | 4 | `04_visible_assortment.ipynb` | Visible assortment, independent of earlier kernel state: `run_assortment_presentation` runs `run_pricing_pipeline` exactly once and passes that one result through the price-change engine, the visible-assortment engine (`visible_assortment`) and the presentation reconciliation (`assortment_presentation`). When anything is blocked, only blocker categories and a generic blocked narrative are printed, and no table, figure or finding is produced. Otherwise the notebook displays only sanitized aggregate tables: the reconciliation summary, the assortment timeline (one row per canonical location and scheduled capture), the location summary, the observed-drop review with cross-location simultaneity, and the price-coincidence summary. It also shows the timeline figure, rendered in memory (`assortment_timeline_png`), and the deterministic narrative (`build_assortment_narrative`). The unusual-drop policy is unavailable, so observed drops are review candidates only, and coincidence is not causation. Timeline persistence is not approved: nothing is written, and an output directory is refused with `persistence_not_approved`. |
 | 5 | `05_monitoring_actionability.ipynb` | Monitoring and actionability (data-plan Section 6), independent of earlier kernel state: `run_monitoring` runs `run_pricing_pipeline` exactly once, derives the price-change analysis and the visible assortment from that same result, checks that both are bound to its frames and location authority, and evaluates the eight controls (`monitoring`). It shows the severity scale, the five evaluation statuses, and one sanitized row per control (`monitoring_control_table`: condition, severity, likely business impact, recommended response, calibration status, evaluation status and typed finding, evidence-gap and note codes), then status-only summary lines and the production-calibration requirements. Missing locations, job/detail counts, duplicate or aliased feeds, timestamp offsets and product attributes are contract-based and evaluated now; abrupt assortment changes and large synchronized price movements are candidate-only because no threshold is approved; end-of-window observations are right-censored and need confirmation by another collection. A missing prerequisite gives `not_assessable`, never a pass; a blocked evidence chain shows only blocker categories and the eight definitions as `not_assessable`. No files are written and no alert or notification is produced. The roughly 90-hour sample cannot calibrate production thresholds. |
+| 6 | `06_final_report.ipynb` | Final report (data-plan Section 7), independent of earlier kernel state: `run_final_report` runs `run_pricing_pipeline` exactly once and passes that one result to `matched_location_pricing_from_pipeline`, `presentation_from_pipeline`, `assortment_presentation_from_pipeline` and `monitoring_from_pipeline` (`final_report`). Evidence that is not bound to that run, or a missing readiness report, produces no commercial section. It presents, in order: purpose and analytical questions, scope and confidentiality, data and pipeline readiness (`final_status_lines`, `final_section_table`), matched-location pricing (`matched_summary_table`, `matched_premium_png`), price changes (persistence summary and heatmap), visible assortment (location summary and cross-location drops), monitoring (`monitoring_overview_table`), assumptions, exclusions, limitations, unanswered questions (`open_questions_table`), requested additional data (`data_requests_table`), final conclusions (`final_conclusions`) and the Section 7 reconciliation. Every result cell is followed by an interpretation generated by `interpret_section` from the sanitized reports; a blocked section shows only its blocker categories and says what cannot be concluded. Nothing is written. |
 
-Later notebooks will be added with the next prefixes (`06_`, `07_`, ...).
+New notebooks take the next prefix (`07_`, ...) and must be added to this table in order.
 
 ## Rules
 
@@ -33,15 +38,57 @@ Later notebooks will be added with the next prefixes (`06_`, `07_`, ...).
   paths.
 - Do not call `os.chdir`, edit `sys.path`, or install packages from a cell;
   do not read CSVs directly or name source files.
+- Every cell that displays a result (a table, figure, printed status block or
+  summary) is tagged `result` in its cell metadata and is **immediately
+  followed** by a cell tagged `interpretation`: a short Markdown cell that says
+  what the result means, what it supports and its main limitation, or (in the
+  final report) a code cell that prints text generated by
+  `interpret_section`/`final_conclusions`. Never hard-code real-data values in
+  Markdown; runtime-dependent interpretation comes from a tested package
+  helper. `tests/test_notebooks.py` enforces the convention.
+
+## Running a notebook
+
+Interactively: start `jupyter lab` from the activated environment, open the
+notebook, then Kernel ▸ Restart Kernel and Run All Cells. With the default
+settings each notebook reads the two raw exports from `data/raw/`.
+
+Headless, without touching the tracked file (the executed copy stays in
+memory; pass `output_path=` only to a Git-ignored location such as
+`reports/`, because an executed copy run on the real data contains
+confidential outputs):
+
+```bash
+python - <<'PY'
+from tempfile import TemporaryDirectory
+from ql2_sixt_canada_analysis.notebook_validation import execute_notebook_copy
+
+with TemporaryDirectory() as workdir:
+    result = execute_notebook_copy("notebooks/06_final_report.ipynb", workdir=workdir, timeout_seconds=900)
+print("Executed code cells:", len(result.execution_counts))
+PY
+```
+
+To execute a copy against **synthetic** data instead, point the documented
+override at a directory of synthetic exports that follow the column contracts
+(`QL2_SIXT_RAW_DATA_DIR=<synthetic directory> python - <<'PY' ...`). The test
+suite does exactly this with CSVs it generates in a temporary directory.
+
+When readiness gates do not pass (for example on synthetic data), notebooks 02
+to 04 print `blocked` with blocker categories only, notebook 05 marks the
+dependent controls `not_assessable`, and notebook 06 shows each section's
+status and blockers and states that no commercial finding is valid. That is
+the expected fail-closed behaviour, not a notebook error.
 
 ## Validation
 
 ```bash
-python -m pytest tests/test_notebooks.py
+python -m pytest tests/test_notebooks.py tests/test_final_documentation.py
 ```
 
-The tests check each notebook's structure and then execute a **copy** from a
-clean kernel (notebook 02 from a working directory outside the repository; on
+The tests check each notebook's structure (including the `result` /
+`interpretation` tags) and then execute a **copy** from a
+clean kernel (notebooks 02 and 06 from a working directory outside the repository; on
 the synthetic CSVs it is not pricing ready, so the test confirms it stops
 cleanly with blocker categories only and writes nothing), top to bottom, against synthetic CSVs generated in a pytest
 temporary directory from the centralized column contracts. The executed copy
@@ -56,3 +103,16 @@ centralized default raw directory. The same validator,
 `ql2_sixt_canada_analysis.notebook_validation.execute_notebook_copy`, can be
 used locally against the real files; it reports execution-order problems and
 cell failures by cell index only.
+
+## Clearing outputs before committing
+
+Committed notebooks must have no outputs, execution counts, widget state or
+execution timing. In JupyterLab use Edit ▸ Clear Outputs of All Cells and
+save; from the command line (keeps sources, cell ids, the `result` /
+`interpretation` tags and the kernelspec; removes everything else, including
+execution timing that `jupyter nbconvert --clear-output` leaves behind):
+
+```bash
+python -m ql2_sixt_canada_analysis.notebook_validation --clear notebooks/*.ipynb
+python -m pytest tests/test_notebooks.py -k "clean or portable or machine_specific"
+```

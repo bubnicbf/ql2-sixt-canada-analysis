@@ -1964,3 +1964,103 @@ def test_monitoring_notebook_executes_from_a_clean_kernel_on_synthetic_data(synt
     assert "synthetic_" not in rendered and str(synthetic_raw_dir) not in rendered and str(tmp_path) not in rendered
     assert "image/png" not in rendered
     assert not any(workdir.iterdir()) and _snapshot(PROJECT_ROOT) == repo_before
+
+
+# ------------------------------------------------------- result / interpretation convention (all notebooks)
+
+INTERPRETATION_HELPERS = ("interpret_section(", "final_conclusions(", "build_assortment_narrative(")
+MAX_INTERPRETATION_WORDS = 120
+
+
+def _tags(cell: nbformat.NotebookNode) -> list[str]:
+    return list(cell.metadata.get("tags", []))
+
+
+@pytest.mark.parametrize("notebook_path", TRACKED_NOTEBOOKS, ids=NOTEBOOK_IDS)
+def test_every_result_is_immediately_followed_by_an_interpretation(notebook_path: Path) -> None:
+    cells = read_notebook(notebook_path).cells
+    results = [i for i, c in enumerate(cells) if "result" in _tags(c)]
+    assert results, "every notebook tags its result cells"
+    for index in results:
+        assert cells[index].cell_type == "code", f"cell {index}: only code cells produce results"
+        assert index + 1 < len(cells), f"cell {index}: a result needs an interpretation after it"
+        following = cells[index + 1]
+        assert "interpretation" in _tags(following), f"cell {index}: the next cell must be the interpretation"
+        if following.cell_type == "markdown":
+            assert following.source.startswith("**Interpretation.**"), f"cell {index + 1}: unlabelled interpretation"
+            assert len(following.source.split()) <= MAX_INTERPRETATION_WORDS, f"cell {index + 1}: not concise"
+        else:
+            assert any(h in following.source for h in INTERPRETATION_HELPERS), \
+                f"cell {index + 1}: runtime interpretation must come from a tested package helper"
+
+
+@pytest.mark.parametrize("notebook_path", TRACKED_NOTEBOOKS, ids=NOTEBOOK_IDS)
+def test_every_displayed_table_or_figure_is_a_tagged_result(notebook_path: Path) -> None:
+    for index, cell in enumerate(read_notebook(notebook_path).cells):
+        if cell.cell_type == "code":
+            body = "\n".join(line for line in cell.source.splitlines()
+                             if not re.match(r"\s*(from|import)\s", line))
+            if re.search(r"\bdisplay\(", body):
+                assert "result" in _tags(cell), f"cell {index} displays a result without the result tag"
+        assert set(_tags(cell)) <= {"result", "interpretation"}, f"cell {index}: unknown tag"
+
+
+def test_matched_premium_figure_interpretation_makes_no_product_attribution() -> None:
+    """Regression: the sign spread of matched-pair premiums must not be attributed to product identity."""
+    cells = read_notebook(MATCHED_PRICING_NOTEBOOK).cells
+    plots = [i for i, c in enumerate(cells)
+             if c.cell_type == "code" and "plot_matched_location_premiums(" in c.source]
+    assert len(plots) == 1, "exactly one result cell renders the matched-premium figure"
+    index = plots[0]
+    assert "result" in _tags(cells[index])
+    assert index + 1 < len(cells) and "interpretation" in _tags(cells[index + 1])
+    text = " ".join(cells[index + 1].source.split())
+    lowered = text.lower()
+    assert len(text.split()) <= MAX_INTERPRETATION_WORDS
+    # What the figure shows: the observed premium sign varies across matched pairs.
+    assert re.search(r"premium sign varies across matched pairs|sign of the (observed )?premium varies across "
+                     r"matched pairs", lowered)
+    # Unresolved contributors: repeated measurements plus capture or rental context.
+    assert "repeated measurement" in lowered
+    assert "capture timing" in lowered or "rental context" in lowered
+    assert "descriptive" in lowered or "associational" in lowered
+    # No product attribution: the reviewed phrase is gone, and any sentence linking the variation to the product
+    # does so only to deny it.
+    assert "premium depends on the product" not in lowered
+    attributing = re.compile(r"\b(product|products|product identity)\b[^.]*\b(cause[sd]?|explains?|drives?|"
+                             r"depends?|determines?|due to)\b|\b(caused|explained|driven|determined) by "
+                             r"(the )?product")
+    for sentence in re.split(r"(?<=[.;])\s+", lowered):
+        if attributing.search(sentence):
+            assert re.search(r"\b(not|no|never|cannot)\b", sentence), f"unsupported product attribution: {sentence}"
+
+
+def test_assortment_drop_review_interpretation_assigns_no_cause() -> None:
+    """Regression: simultaneous observed drops are descriptive; no shared or collection cause is presumed."""
+    cells = read_notebook(ASSORTMENT_NOTEBOOK).cells
+    reviews = [i for i, c in enumerate(cells) if c.cell_type == "code"
+               and "tables.observed_drop_review" in c.source and "tables.cross_location_drops" in c.source]
+    assert len(reviews) == 1, "exactly one result cell displays the two drop-review tables"
+    index = reviews[0]
+    assert "result" in _tags(cells[index])
+    assert index + 1 < len(cells) and "interpretation" in _tags(cells[index + 1])
+    lowered = " ".join(cells[index + 1].source.split()).lower()
+    assert len(lowered.split()) <= MAX_INTERPRETATION_WORDS
+    assert "review candidate" in lowered or "descriptive" in lowered
+    # Simultaneity is described and explicitly denied causal meaning.
+    assert re.search(r"simultaneous[^.;]*same scheduled period", lowered)
+    assert re.search(r"(does|do) not establish a (shared|common) cause|no (shared|common) cause", lowered)
+    assert re.search(r"isolated drops[^.;]*(do|does) not establish", lowered)
+    # Evidence is requested before any cause is assigned.
+    assert "collection log" in lowered or "capture-completeness" in lowered
+    assert re.search(r"\b(business|operational|supplier|revenue-management|source) corroboration", lowered) \
+        or re.search(r"corroboration from (the )?(business|supplier|source|revenue management)", lowered)
+    assert "not proven supplier availability" in lowered or "not supplier availability" in lowered
+    # No prioritized explanation and no proven labels.
+    assert "point first" not in lowered and "shared collection cause" not in lowered
+    assert not re.search(r"\b(first|primarily|most likely|probably)\b[^.;]*\bcollection\b", lowered)
+    labels = re.compile(r"\b(anomal\w*|collection failures?|failed collection|supplier withdrawals?|withdrew|"
+                        r"confirmed inventory changes?|inventory changed)\b")
+    for sentence in re.split(r"(?<=[.;])\s+", lowered):
+        if labels.search(sentence):
+            assert re.search(r"\b(not|no|never|cannot)\b", sentence), f"unsupported label: {sentence}"

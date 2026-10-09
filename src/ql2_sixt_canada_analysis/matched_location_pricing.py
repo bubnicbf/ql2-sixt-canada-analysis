@@ -116,6 +116,7 @@ __all__ = [
     "match_count_frame",
     "plot_matched_location_premiums",
     "render_matched_location_pricing_markdown",
+    "matched_location_pricing_from_pipeline",
     "run_matched_location_pricing",
     "vehicle_type_summary_frame",
     "vehicle_type_test_frame",
@@ -1190,9 +1191,22 @@ def _sensitivity_testable(report: MatchedLocationPricingReport) -> bool:
 def run_matched_location_pricing(raw_dir: str | Path | None = None) -> MatchedLocationPricingResult:
     """Run the validated pricing pipeline and the matched-location analysis (fails closed unless ready)."""
     from ql2_sixt_canada_analysis.pricing_pipeline import run_pricing_pipeline
+
+    return matched_location_pricing_from_pipeline(run_pricing_pipeline(raw_dir))
+
+
+def matched_location_pricing_from_pipeline(run: object) -> MatchedLocationPricingResult:
+    """The matched-location analysis of one existing pipeline result (never reruns the pipeline).
+
+    Fails closed exactly like :func:`run_matched_location_pricing`: unless the
+    run's central readiness gate passed and every required assessment exists,
+    only the blocker categories are returned.
+    """
+    from ql2_sixt_canada_analysis.pricing_pipeline import PricingPipelineResult
     from ql2_sixt_canada_analysis.readiness import PricingReadinessReport
 
-    run = run_pricing_pipeline(raw_dir)
+    if not isinstance(run, PricingPipelineResult):
+        raise TypeError("run must be a PricingPipelineResult")
     pricing = run.pricing
     if not isinstance(pricing, PricingReadinessReport):
         raise TypeError("the pipeline produced no readiness report")

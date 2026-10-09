@@ -24,6 +24,7 @@ __all__ = [
     "NotebookExecutionResult",
     "NotebookOrderError",
     "check_execution_order",
+    "clear_notebook_state",
     "execute_notebook_copy",
     "read_notebook",
 ]
@@ -134,3 +135,51 @@ def execute_notebook_copy(
     if output_path is not None:
         nbformat.write(notebook, Path(output_path))
     return NotebookExecutionResult(source=source_path, executed=notebook, execution_counts=counts)
+
+
+#: Notebook-level metadata keys kept by :func:`clear_notebook_state` (everything else is machine or session state).
+KEPT_NOTEBOOK_METADATA = ("kernelspec", "language_info")
+#: Cell-level metadata keys kept by :func:`clear_notebook_state` (the result/interpretation convention).
+KEPT_CELL_METADATA = ("tags",)
+
+
+def clear_notebook_state(path: str | os.PathLike[str]) -> bool:
+    """Remove outputs, execution counts, execution timing, widget state and other session metadata in place.
+
+    Keeps cell sources, cell ids, cell ``tags`` and the notebook ``kernelspec`` and
+    ``language_info``. Returns whether the file changed (an already clean
+    notebook is not rewritten).
+    """
+    path = Path(path)
+    notebook = read_notebook(path)
+    before = nbformat.writes(notebook)
+    notebook.metadata = nbformat.from_dict(
+        {k: v for k, v in notebook.metadata.items() if k in KEPT_NOTEBOOK_METADATA})
+    for cell in notebook.cells:
+        cell.metadata = nbformat.from_dict({k: v for k, v in cell.metadata.items() if k in KEPT_CELL_METADATA})
+        if cell.cell_type == "code":
+            cell.outputs = []
+            cell.execution_count = None
+    after = nbformat.writes(notebook)
+    if after == before:
+        return False
+    nbformat.validate(notebook)
+    nbformat.write(notebook, path)
+    return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m ql2_sixt_canada_analysis.notebook_validation --clear NOTEBOOK...``: clear committed state."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Clear notebook outputs and session state before committing.")
+    parser.add_argument("--clear", nargs="+", required=True, metavar="NOTEBOOK")
+    args = parser.parse_args(argv)
+    for name in args.clear:
+        changed = clear_notebook_state(name)
+        print(f"{Path(name).name}: {'cleared' if changed else 'already clean'}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
