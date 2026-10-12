@@ -1,5 +1,14 @@
 # ql2-sixt-canada-analysis
 
+Can QL2 trust an hourly Sixt Canada rate feed enough to support customer
+decisions, and which pricing and visible-assortment signals can be extracted
+once coverage, timestamps, locations and product identity are controlled?
+The repository answers this with fail-closed data-quality gates, descriptive
+pricing analyses and a monitoring blueprint. Start with
+`notebooks/06_final_report.ipynb` (the final report), the
+[assumptions, exclusions and open questions](docs/assumptions_exclusions_and_open_questions.md)
+and the [data dictionary](docs/data_dictionary.md).
+
 ## Project structure
 
 ```text
@@ -11,7 +20,8 @@ src/ql2_sixt_canada_analysis/   Reusable Python source package
 tests/             Automated validation (pytest)
 reports/           Generated analytical reports (ignored by default)
 reports/figures/   Generated charts and figures (ignored by default)
-docs/              Supporting documentation (investigations, decision records)
+docs/              Supporting documentation: data dictionary, assumptions and
+                   open questions, investigations, decision records
 ```
 
 - `data/raw/` is immutable input data: never edit, rename, or overwrite it.
@@ -49,6 +59,139 @@ Data and environment safety:
   real QL2 data for committed test fixtures.
 - This configuration installs code and dependencies only; it does not make
   proprietary datasets safe to publish.
+
+## Reproducing the analysis
+
+These steps take a new developer from a clean checkout to a validated run.
+Every command runs from the repository root inside the activated environment.
+
+### 1. Python and the environment
+
+Python **3.11 or newer** is required (`requires-python = ">=3.11"` in
+`pyproject.toml`); the package uses `enum.StrEnum`, which older versions lack.
+
+```bash
+python3 --version                      # 3.11 or newer
+python3 -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"      # editable package + pytest, JupyterLab, nbformat, nbclient, ipykernel
+```
+
+### 2. Place the two proprietary exports
+
+Copy the two supplied CSV exports, unchanged, into `data/raw/` (the standard
+raw-data directory, `ql2_sixt_canada_analysis.paths.RAW_DATA_DIR`). The loader
+assigns each CSV to the `jobs` or `cars` dataset by the last of those words in
+its file name and validates the exact header, so the supplied names work as
+they are.
+
+- **Never edit, rename, reformat, commit or publish these files**, and never
+  copy them into tests, docs, notebooks or reports. `data/raw/`,
+  `data/interim/` and `data/processed/` are Git-ignored except for their
+  README/placeholder files.
+- The documented override `QL2_SIXT_RAW_DATA_DIR=<directory>` points every
+  notebook and `resolve_raw_data_dir()` at another directory. It exists for
+  automated validation against synthetic data; normal use leaves it unset.
+
+### 3. Run the notebooks
+
+Run them in this order, each **top to bottom after restarting the kernel**
+(`jupyter lab`, then Kernel ▸ Restart Kernel and Run All Cells):
+
+1. `notebooks/01_data_ingestion.ipynb` - foundational quality gates.
+2. `notebooks/02_matched_location_pricing.ipynb` - airport versus downtown premiums.
+3. `notebooks/03_price_change_events.ipynb` - price-change events.
+4. `notebooks/04_visible_assortment.ipynb` - visible assortment.
+5. `notebooks/05_monitoring_actionability.ipynb` - monitoring controls.
+6. `notebooks/06_final_report.ipynb` - the final report (data-plan Section 7).
+
+The notebooks are independent: none shares kernel state, variables or files
+with another, and notebooks 02 to 06 each rebuild every readiness gate from the
+raw files. To run only the final report, open notebook 06 and run all cells.
+To execute a copy headlessly without modifying the tracked file:
+
+```bash
+python - <<'PY'
+from tempfile import TemporaryDirectory
+from ql2_sixt_canada_analysis.notebook_validation import execute_notebook_copy
+
+with TemporaryDirectory() as workdir:
+    result = execute_notebook_copy("notebooks/06_final_report.ipynb", workdir=workdir, timeout_seconds=900)
+print("Executed code cells:", len(result.execution_counts))
+PY
+```
+
+Prefix the command with `QL2_SIXT_RAW_DATA_DIR=<synthetic directory>` to run
+the same copy against synthetic exports. `python -m pytest tests/test_notebooks.py`
+generates synthetic CSVs from the column contracts in a temporary directory and
+executes copies of every notebook that way; it never reads the real files.
+
+**Expected fail-closed behaviour.** When a readiness gate does not pass (for
+example on synthetic data), notebooks 02 to 04 print `blocked` and the blocker
+categories only, notebook 05 marks the dependent controls `not_assessable`,
+and notebook 06 shows each section's status and blockers and says what cannot
+be concluded. No table, figure or finding is shown as valid. This is the
+designed outcome, not an error.
+
+### 4. Validate
+
+Targeted checks during development:
+
+```bash
+python -m pytest tests/test_final_documentation.py   # final report, docs and README contracts
+python -m pytest tests/test_notebooks.py             # notebook structure, tags and clean-kernel execution
+python -m pytest tests/test_monitoring.py tests/test_price_change_presentation.py tests/test_assortment_presentation.py
+```
+
+Full suite and whitespace check before committing:
+
+```bash
+python -m pytest
+git diff --check
+```
+
+### 5. Optional local reports (Git-ignored, confidential)
+
+```bash
+python -m ql2_sixt_canada_analysis.matched_location_pricing      # reports/matched_location_pricing.md and reports/figures/
+python -m ql2_sixt_canada_analysis.pricing_baseline --commit <sha> --date <YYYY-MM-DD>   # prints sanitized Markdown
+python -m ql2_sixt_canada_analysis.authority_decisions docs/decisions/pricing_authorities/v8.toml
+python -m ql2_sixt_canada_analysis.data_dictionary               # regenerates the data-dictionary blocks (no data read)
+```
+
+Notebook 03 writes sanitized tables and the heatmap only when
+`QL2_SIXT_PRICE_CHANGE_OUTPUT_DIR` (or `OUTPUT_DIR` in the notebook) is set, for
+example to `reports/price_change_events/`; the confidential detailed Parquet
+event table additionally needs `QL2_SIXT_PRICE_CHANGE_WRITE_DETAIL=1`. Notebook
+04 and the final report write nothing. Everything under `reports/` (except its
+README and placeholders), executed notebook copies (`*.executed.ipynb`,
+`*.nbconvert.ipynb`), CSV/Parquet extracts and quality or audit reports are
+Git-ignored because they are derived from proprietary data. Never force-add
+them.
+
+### 6. Clear notebook outputs before committing
+
+```bash
+python -m ql2_sixt_canada_analysis.notebook_validation --clear notebooks/*.ipynb
+python -m pytest tests/test_notebooks.py -k "clean or portable or machine_specific"
+```
+
+The command keeps sources, cell ids, the `result` / `interpretation` tags and
+the kernelspec, and removes outputs, execution counts, execution timing and
+widget state. Edit ▸ Clear Outputs of All Cells in JupyterLab also works; either
+way, the tests fail if a committed notebook keeps outputs, execution counts,
+widget state, execution timing or local paths.
+
+### 7. Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| A notebook stops at the loading cell with a missing-dataset or header error | The exports are not in `data/raw/` (or `QL2_SIXT_RAW_DATA_DIR` points elsewhere). Copy both CSVs into `data/raw/` unchanged and unset the override. |
+| `ERROR: Package ... requires a different Python` or `ImportError: cannot import name 'StrEnum'` | The environment uses Python older than 3.11. Recreate `.venv` with Python 3.11+ and reinstall with `pip install -e ".[dev]"`. |
+| `No such kernel named python3` | Run JupyterLab and the tests from the activated environment; if needed register it with `python -m ipykernel install --sys-prefix`. |
+| Every section prints `blocked` | A readiness gate failed. Read the blocker categories, run notebook 01 for the gate-by-gate status, and see the decision records under `docs/decisions/`; this is fail-closed behaviour, not a bug. |
+| `tests/test_notebooks.py` fails on outputs, execution counts or metadata | A notebook was saved after running. Clear it (step 6) and commit again; never commit executed notebooks. |
 
 ## Raw data ingestion
 
@@ -1852,7 +1995,9 @@ true; `03_price_change_events.ipynb` presents the price-change events (see
 `04_visible_assortment.ipynb` presents the visible assortment (see "Visible
 assortment stability"); `05_monitoring_actionability.ipynb` presents the
 eight Section 6 controls and their sample evaluation (see "Monitoring and
-actionability").
+actionability"); `06_final_report.ipynb` is the final report (see "Final
+report and documentation"). Every result cell is followed by a short
+interpretation cell (cell tags `result` and `interpretation`).
 Validate structure and execution (against synthetic temporary data) with:
 
 ```bash
@@ -3214,3 +3359,68 @@ python -m pytest tests/test_notebooks.py
 Run `notebooks/05_monitoring_actionability.ipynb` top to bottom after
 restarting the kernel. Clear all outputs and execution counts before
 committing; `tests/test_notebooks.py` fails otherwise.
+
+## Final report and documentation
+
+Data-plan Section 7, *Final notebook and documentation*. No standalone
+data-plan document is tracked in this repository or its Git history; the
+controlling specification is the in-repository data-plan reconciliation
+of the earlier sections plus the Section 7 requirements reconciled below.
+
+### Final report (`notebooks/06_final_report.ipynb`)
+
+`ql2_sixt_canada_analysis.final_report` is the only orchestration added:
+`run_final_report(raw_dir)` runs `run_pricing_pipeline` **exactly once** and
+passes that one `PricingPipelineResult` to the existing entry points
+(`matched_location_pricing_from_pipeline`, `presentation_from_pipeline`,
+`assortment_presentation_from_pipeline`, `monitoring_from_pipeline`). Nothing
+is recomputed or re-decided, and nothing is written.
+
+- **Fail closed.** A run without a readiness report or frames
+  (`pipeline_evidence_unavailable`), or whose retained reports are no longer
+  bound to it (`evidence_binding_mismatch`), produces no commercial section;
+  only blocker categories and the blocked monitoring catalog remain. A run
+  whose readiness gate is blocked still calls each analysis, which fails
+  closed with its own typed blockers. `FinalReportResult.findings_valid(section)`
+  is true only for a completed section of a bound run.
+- **Sanitized display.** `final_section_table` (one row per section:
+  status, findings validity and blocker codes), `matched_summary_table` and
+  `matched_premium_png`, the existing price-change and assortment tables,
+  `monitoring_overview_table`, `open_questions_table` and `data_requests_table`.
+  No offer-level row, product identity, identifier, raw location label, file
+  name or path is shown.
+- **Interpretation.** `interpret_section` and `final_conclusions` generate
+  short, deterministic text from report counts, enum values and summary
+  statistics. It is qualified throughout: no causal claims, synchronized
+  movements are not called intentional repricing, assortment changes are not
+  called supplier availability changes, candidate rules are not production
+  alerts, right-censored events are neither persistent nor disproven, and
+  behavioural similarity never establishes an alias. A blocked section states
+  what cannot be concluded.
+
+### Documentation
+
+- [`docs/assumptions_exclusions_and_open_questions.md`](docs/assumptions_exclusions_and_open_questions.md)
+  separates the approved decisions of record v8 from analytical assumptions,
+  data limitations, governed, mechanical and unassessable exclusions, open
+  questions and additional data requests. The question and request tables are
+  generated from `OPEN_QUESTIONS` and `DATA_REQUESTS`.
+- [`docs/data_dictionary.md`](docs/data_dictionary.md) documents dataset
+  grains, keys and relationships, every raw `jobs` and `cars` field, the
+  derived and presentation fields, and the formulas. Its raw-field blocks are
+  generated from the schema contracts by
+  `ql2_sixt_canada_analysis.data_dictionary`.
+
+`tests/test_final_documentation.py` keeps the notebook, the documents and the
+READMEs in step with the schema, the current authority record and the
+catalogs.
+
+### Data-plan reconciliation (Section 7)
+
+- Remove exploratory clutter: every notebook was reviewed; stale wording that contradicted record v8 (reporting day, canonical-offer combination) was corrected, the downstream-use guidance in notebook 01 was condensed, and governance, limitation and fail-closed explanations were kept.
+- Add concise interpretation beneath each result: every result cell carries the `result` tag and is immediately followed by an `interpretation` cell; the final report generates its interpretation with tested helpers, and the structure is enforced by tests.
+- Document assumptions: each assumption has a scope and an analytical consequence, separate from the approved authority decisions and from observed results.
+- Document exclusions: governed (the incomplete Calgary capture), mechanical (blank rows), invalid or blocked, ambiguous, unassessable (zero denominators, right censoring) and presentation/privacy exclusions are distinguished.
+- Write the data dictionary: all raw fields, derived and presentation fields, grains, keys, relationships, formulas and handling rules; coverage is tested against the code contracts.
+- Complete README execution instructions: see "Reproducing the analysis" above and `notebooks/README.md`.
+- Record unanswered questions and requested additional data: catalogued in `final_report.py`, shown in notebook 06 and mirrored in the assumptions document; resolved v8 decisions are not reopened.
