@@ -1120,12 +1120,15 @@ def event_heatmap_source(result: PriceChangeAnalysisResult) -> dict:
             "state": state}
 
 
-def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 150):  # type: ignore[no-untyped-def]
+def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 150,  # type: ignore[no-untyped-def]
+                              figsize: tuple[float, float] | None = None, font_scale: float = 1.0):
     """Two-panel heatmap (increases, decreases) per approved location and eligible interval.
 
     Separate panels keep increases and decreases from cancelling; cells with no
     eligible interval (hard breaks, outside the schedule) are hatched grey, never
     zero. Object-oriented :class:`matplotlib.figure.Figure` (no pyplot state).
+    ``figsize`` overrides the size derived from the number of periods and
+    ``font_scale`` multiplies every text size (slide export).
     """
     import numpy as np
     from matplotlib.colors import LinearSegmentedColormap
@@ -1136,7 +1139,7 @@ def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 1
     peak = max(1.0, float(np.nanmax(np.concatenate([source["increase"].ravel(), source["decrease"].ravel(),
                                                      [0.0]]))))
     width = min(max(11.0, 4.0 + 0.16 * len(periods)), 30.0)
-    fig = Figure(figsize=(width, 2.2 + 0.9 * len(labels)), dpi=dpi, facecolor="white", layout="constrained")
+    fig = Figure(figsize=figsize or (width, 2.2 + 0.9 * len(labels)), dpi=dpi, facecolor="white", layout="constrained")
     axes = fig.subplots(2, 1, sharex=True)
     panels = ((axes[0], source["increase"], "#2a78d6", "Increases per interval (observed candidates)"),
               (axes[1], source["decrease"], "#eb6834", "Decreases per interval (observed candidates)"))
@@ -1153,34 +1156,39 @@ def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 1
                 elif matrix[i, j] > 0 and len(periods) <= 120:
                     ax.text(j, i, str(int(matrix[i, j])), ha="center", va="center", fontsize=6,
                             color="#0b0b0b" if matrix[i, j] < 0.6 * peak else "white")
-        ax.set_yticks(range(len(labels)), labels, fontsize=8)
+        ax.set_yticks(range(len(labels)), labels, fontsize=8 * font_scale)
         ax.set_yticks([i + 0.5 for i in range(len(labels) - 1)], minor=True)
         ax.grid(which="minor", axis="y", color="white", linewidth=2.0)
         ax.tick_params(which="minor", left=False)
-        ax.set_title(title, loc="left", fontsize=11, color="#0b0b0b")
+        ax.set_title(title, loc="left", fontsize=11 * font_scale, color="#0b0b0b")
         from matplotlib.ticker import MaxNLocator
 
-        bar = fig.colorbar(image, ax=ax, shrink=0.8, label="count")
-        bar.locator = MaxNLocator(integer=True)
+        bar = fig.colorbar(image, ax=ax, shrink=0.8)
+        bar.set_label("Candidates (count)", fontsize=9 * font_scale)
+        bar.ax.tick_params(labelsize=8 * font_scale)
+        bar.locator = MaxNLocator(nbins=4, integer=True)
         bar.update_ticks()
     axes[1].set_xticks(range(0, len(periods), step), [periods[j] for j in range(0, len(periods), step)],
-                       rotation=60, ha="right", fontsize=7)
-    axes[1].set_xlabel("Interval current scheduled capture period (UTC)", color="#52514e")
+                       rotation=60, ha="right", fontsize=7 * font_scale)
+    axes[1].set_xlabel("Interval current scheduled capture period (UTC)", color="#52514e",
+                       fontsize=10 * font_scale)
     fig.suptitle("Observed price-change candidates by approved location and eligible interval", x=0.01,
-                 ha="left", fontsize=12)
-    # (the legend is placed outside the axes, above the panels, by the constrained layout)
+                 ha="left", fontsize=12 * font_scale)
+    # (the legend is placed outside the axes, below the panels, by the constrained layout)
     from matplotlib.patches import Patch
 
     fig.legend(handles=[Patch(facecolor="#d9d8d4", edgecolor="#9a9994", hatch="///",
                               label="No eligible interval (masked break)"),
                         Patch(facecolor="#f7f6f3", edgecolor="#9a9994", label="Eligible interval, zero changes")],
-               loc="outside upper right", ncols=2, fontsize=8, frameon=False)
+               loc="outside lower right", ncols=2, fontsize=8 * font_scale, frameon=False)
     import textwrap
 
     note = ("Both panels share one count scale. Hatched grey: no eligible interval ending at that capture "
             "(governed exclusion, missing capture, non-one-hour gap, source-stream change, first capture or "
             "outside the schedule) - not zero activity.")
-    fig.supxlabel("\n".join(textwrap.wrap(note, int(width * 14))), fontsize=8, color="#52514e", x=0.01,
+    # The note fills the left of the bottom band; the legend sits at its right.
+    wrapped = "\n".join(textwrap.wrap(note, int(fig.get_figwidth() * 8.5 / font_scale)))
+    fig.supxlabel(wrapped, fontsize=8 * font_scale, color="#52514e", x=0.01,
                   ha="left")
     return fig, (axes[0], axes[1])
 

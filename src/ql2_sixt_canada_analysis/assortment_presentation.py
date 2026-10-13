@@ -940,7 +940,8 @@ def _render(source: pd.DataFrame, dpi: int, footer: str):  # type: ignore[no-unt
         Patch(color=_BAND, label="Governed exclusion or missing capture (no count)")],
         loc="upper center", ncol=2, fontsize=8, frameon=False)
     fig.text(0.01, 0.005, footer, fontsize=7, color=_MUTED)
-    fig.subplots_adjust(top=1 - 0.9 / fig.get_figheight(), bottom=0.9 / fig.get_figheight() + 0.02, hspace=0.45)
+    # The bottom margin holds the rotated period labels, the axis label and the footer without overlap.
+    fig.subplots_adjust(top=1 - 0.9 / fig.get_figheight(), bottom=1.45 / fig.get_figheight(), hspace=0.45)
     return fig
 
 
