@@ -136,6 +136,7 @@ __all__ = [
     "analyze_price_change_events",
     "event_heatmap_source",
     "exact_change_percent",
+    "HEATMAP_LABELS",
     "plot_price_change_heatmap",
     "price_change_analysis_from_pipeline",
     "run_price_change_analysis",
@@ -1120,20 +1121,54 @@ def event_heatmap_source(result: PriceChangeAnalysisResult) -> dict:
             "state": state}
 
 
+#: Figure wording: the analysis default and the audience-facing slide wording (same data, masking and layout).
+HEATMAP_LABELS: dict[str, dict[str, str]] = {
+    "analysis": {
+        "title": "Observed price-change candidates by approved location and eligible interval",
+        "increase": "Increases per interval (observed candidates)",
+        "decrease": "Decreases per interval (observed candidates)",
+        "colorbar": "Candidates (count)",
+        "xlabel": "Interval current scheduled capture period (UTC)",
+        "masked": "No eligible interval (masked break)",
+        "zero": "Eligible interval, zero changes",
+        "note": ("Both panels share one count scale. Hatched grey: no eligible interval ending at that capture "
+                 "(governed exclusion, missing capture, non-one-hour gap, source-stream change, first capture or "
+                 "outside the schedule) - not zero activity."),
+    },
+    "audience": {
+        "title": "Observed price moves by location and hourly comparison",
+        "increase": "Price increases per interval",
+        "decrease": "Price decreases per interval",
+        "colorbar": "Changes (count)",
+        "xlabel": "Hourly comparison, current capture period (UTC)",
+        "masked": "No comparable prior capture",
+        "zero": "Comparable interval, no change",
+        "note": ("Both panels share one count scale. Hatched grey: no comparable prior capture one hour earlier "
+                 "(excluded or missing capture, first capture or outside the schedule) - not zero activity."),
+    },
+}
+
+
 def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 150,  # type: ignore[no-untyped-def]
-                              figsize: tuple[float, float] | None = None, font_scale: float = 1.0):
+                              figsize: tuple[float, float] | None = None, font_scale: float = 1.0,
+                              wording: str = "analysis"):
     """Two-panel heatmap (increases, decreases) per approved location and eligible interval.
 
     Separate panels keep increases and decreases from cancelling; cells with no
     eligible interval (hard breaks, outside the schedule) are hatched grey, never
     zero. Object-oriented :class:`matplotlib.figure.Figure` (no pyplot state).
     ``figsize`` overrides the size derived from the number of periods and
-    ``font_scale`` multiplies every text size (slide export).
+    ``font_scale`` multiplies every text size (slide export). ``wording``
+    selects the text of :data:`HEATMAP_LABELS` (``"analysis"`` or
+    ``"audience"``); it changes labels only, never the data or the masking.
     """
     import numpy as np
     from matplotlib.colors import LinearSegmentedColormap
     from matplotlib.figure import Figure
 
+    if wording not in HEATMAP_LABELS:
+        raise ValueError(f"wording must be one of {sorted(HEATMAP_LABELS)}")
+    text = HEATMAP_LABELS[wording]
     source = event_heatmap_source(result)
     periods, labels = source["periods"], source["labels"]
     peak = max(1.0, float(np.nanmax(np.concatenate([source["increase"].ravel(), source["decrease"].ravel(),
@@ -1141,8 +1176,8 @@ def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 1
     width = min(max(11.0, 4.0 + 0.16 * len(periods)), 30.0)
     fig = Figure(figsize=figsize or (width, 2.2 + 0.9 * len(labels)), dpi=dpi, facecolor="white", layout="constrained")
     axes = fig.subplots(2, 1, sharex=True)
-    panels = ((axes[0], source["increase"], "#2a78d6", "Increases per interval (observed candidates)"),
-              (axes[1], source["decrease"], "#eb6834", "Decreases per interval (observed candidates)"))
+    panels = ((axes[0], source["increase"], "#2a78d6", text["increase"]),
+              (axes[1], source["decrease"], "#eb6834", text["decrease"]))
     step = max(1, len(periods) // 16)
     for ax, matrix, colour, title in panels:
         cmap = LinearSegmentedColormap.from_list("one_hue", ["#f7f6f3", colour])
@@ -1164,28 +1199,26 @@ def plot_price_change_heatmap(result: PriceChangeAnalysisResult, *, dpi: int = 1
         from matplotlib.ticker import MaxNLocator
 
         bar = fig.colorbar(image, ax=ax, shrink=0.8)
-        bar.set_label("Candidates (count)", fontsize=9 * font_scale)
+        bar.set_label(text["colorbar"], fontsize=9 * font_scale)
         bar.ax.tick_params(labelsize=8 * font_scale)
         bar.locator = MaxNLocator(nbins=4, integer=True)
         bar.update_ticks()
     axes[1].set_xticks(range(0, len(periods), step), [periods[j] for j in range(0, len(periods), step)],
                        rotation=60, ha="right", fontsize=7 * font_scale)
-    axes[1].set_xlabel("Interval current scheduled capture period (UTC)", color="#52514e",
+    axes[1].set_xlabel(text["xlabel"], color="#52514e",
                        fontsize=10 * font_scale)
-    fig.suptitle("Observed price-change candidates by approved location and eligible interval", x=0.01,
+    fig.suptitle(text["title"], x=0.01,
                  ha="left", fontsize=12 * font_scale)
     # (the legend is placed outside the axes, below the panels, by the constrained layout)
     from matplotlib.patches import Patch
 
     fig.legend(handles=[Patch(facecolor="#d9d8d4", edgecolor="#9a9994", hatch="///",
-                              label="No eligible interval (masked break)"),
-                        Patch(facecolor="#f7f6f3", edgecolor="#9a9994", label="Eligible interval, zero changes")],
+                              label=text["masked"]),
+                        Patch(facecolor="#f7f6f3", edgecolor="#9a9994", label=text["zero"])],
                loc="outside lower right", ncols=2, fontsize=8 * font_scale, frameon=False)
     import textwrap
 
-    note = ("Both panels share one count scale. Hatched grey: no eligible interval ending at that capture "
-            "(governed exclusion, missing capture, non-one-hour gap, source-stream change, first capture or "
-            "outside the schedule) - not zero activity.")
+    note = text["note"]
     # The note fills the left of the bottom band; the legend sits at its right.
     wrapped = "\n".join(textwrap.wrap(note, int(fig.get_figwidth() * 8.5 / font_scale)))
     fig.supxlabel(wrapped, fontsize=8 * font_scale, color="#52514e", x=0.01,

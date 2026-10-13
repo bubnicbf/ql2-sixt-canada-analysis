@@ -69,6 +69,7 @@ __all__ = [
     "observation_window",
     "opening_conclusion",
     "render_deck_html",
+    "retained_share",
     "validate_deck",
     "verify_traces",
 ]
@@ -102,11 +103,11 @@ DECK_FIGURES: Mapping[str, Mapping[str, Any]] = {
         "figsize": (13.0, 6.2),
         "font_scale": 1.1,
         "required": {
-            "title": r"price-change candidates",
-            "axes_titles": (r"^Increases per interval", r"^Decreases per interval"),
+            "title": r"price moves",
+            "axes_titles": (r"^Price increases per interval$", r"^Price decreases per interval$"),
             "xlabels": (r"\(UTC\)$",),
             "colorbar_labels": (r"\(count\)$", r"\(count\)$"),
-            "legend": (r"No eligible interval", r"zero changes"),
+            "legend": (r"No comparable prior capture", r"no change"),
         },
     },
 }
@@ -263,6 +264,47 @@ def _require_completed(result: object):  # type: ignore[no-untyped-def]
         codes = ", ".join(b.value for b in result.blockers) or "unavailable"
         raise DeckError(f"the deck needs a completed final report (blocked: {codes}); no deck is built")
     return result
+
+
+def retained_share(retained: int, previous: int) -> tuple[float, str]:
+    """``(ratio, display)`` of the pooled retained-product share (fails closed).
+
+    Rounding rule: a whole percentage, rounded half up. When that would show
+    ``100%`` or ``0%`` for a share that is not exactly one or zero, one decimal
+    (half up) is shown instead; if even that would round to ``100.0%`` or
+    ``0.0%``, the display is ``>99.9%`` or ``<0.1%``. Exact arithmetic on the
+    counts, so the display never depends on binary floating point.
+
+    Raises:
+        DeckError: A non-integer, negative or zero denominator, or more retained than previous products.
+    """
+    from fractions import Fraction
+
+    if (isinstance(retained, bool) or isinstance(previous, bool) or not isinstance(retained, int)
+            or not isinstance(previous, int)):
+        raise DeckError("retained and previous product counts must be integers")
+    if previous <= 0:
+        raise DeckError("the retained-product share is unavailable: no previous products (zero denominator)")
+    if not 0 <= retained <= previous:
+        raise DeckError("retained products must be between zero and the previous products")
+    percent = Fraction(100 * retained, previous)
+
+    def half_up(value: Fraction, decimals: int) -> Fraction:
+        scale = 10 ** decimals
+        return Fraction(int(value * scale + Fraction(1, 2)), scale)
+
+    whole = half_up(percent, 0)
+    if (whole == 100 and retained != previous) or (whole == 0 and retained != 0):
+        tenth = half_up(percent, 1)
+        if tenth == 100:
+            display = ">99.9%"
+        elif tenth == 0:
+            display = "<0.1%"
+        else:
+            display = f"{float(tenth):.1f}%"
+    else:
+        display = f"{int(whole)}%"
+    return retained / previous, display
 
 
 def opening_conclusion(controls_clean: bool) -> str:
@@ -449,12 +491,22 @@ def deck_results(result: object) -> dict[str, Any]:
     lead = {"mostly decreases": "Prices mostly fall", "mostly increases": "Prices mostly rise",
             "evenly split": "Price moves split evenly"}[direction]
     v.text("pc_direction_phrase", direction, "derived: price-event report overall.increase versus overall.decrease")
+    v.text("pc_direction_label", direction[0].upper() + direction[1:],
+           "derived: price-event report overall.increase versus overall.decrease (more decreases: mostly decreases; "
+           "more increases: mostly increases; equal: evenly split)")
     c = assortment.overall
     if not c.previous_products:
         raise DeckError("pooled retention is unavailable (zero denominator)")
     v.add("retention", c.retained / c.previous_products, f"{c.retained / c.previous_products:.2f}", "ratio",
           "assortment report: overall.retained / overall.previous_products",
           f"pooled retention {c.retained / c.previous_products:.2f}")
+    share, share_display = retained_share(c.retained, c.previous_products)
+    v.add("retained_share", share, share_display, "retained_share",
+          "assortment report: overall.retained / overall.previous_products, pooled over assessed intervals "
+          "(retained_share(): whole percent, half up; one decimal when that would show 0% or 100% for an "
+          "inexact share)")
+    v.count("retained_products", c.retained, "assortment report: overall.retained")
+    v.count("previous_products", c.previous_products, "assortment report: overall.previous_products")
     v.count("assessed_intervals", c.assessed_intervals, "assortment report: overall.assessed_intervals",
             fr._n(c.assessed_intervals, "consecutive one-hour interval"))
     v.count("additions", c.additions, "assortment report: overall.additions", fr._n(c.additions, "addition"))
@@ -619,7 +671,8 @@ def _render_figures(result: object, directory: Path) -> dict[str, Any]:
         "matched_premiums": lambda spec: plot_matched_location_premiums(
             r.matched, figsize=spec["figsize"], dpi=_FIGURE_DPI, font_scale=spec["font_scale"])[0],
         "price_change_heatmap": lambda spec: plot_price_change_heatmap(
-            analysis, dpi=_FIGURE_DPI, figsize=spec["figsize"], font_scale=spec["font_scale"])[0],
+            analysis, dpi=_FIGURE_DPI, figsize=spec["figsize"], font_scale=spec["font_scale"],
+            wording="audience")[0],
     }
     out: dict[str, Any] = {}
     for name, spec in DECK_FIGURES.items():
@@ -652,10 +705,12 @@ def _alt_texts(results: Mapping[str, Any]) -> dict[str, str]:
     matched = ("Two-panel chart of matched airport-minus-downtown listed-price premiums by city. Left panel: "
                "dollar premium per rental day; right panel: premium as a percentage of the downtown price. "
                f"Boxes show the interquartile range and median, whiskers the full range, points every pair. {cities}.")
-    heatmap = ("Two-panel heatmap of price-change candidates per canonical location (rows) and eligible one-hour "
-               f"interval (columns, UTC). Top: increases ({values['pc_increases']['display']} in total); bottom: "
-               f"decreases ({values['pc_decreases']['display']} in total). Hatched cells have no eligible interval "
-               "and are not zero activity.")
+    heatmap = ("Heatmap of observed price moves. Rows are the standardized (canonical) locations; columns are "
+               "eligible hourly comparisons in UTC. The top panel counts price increases "
+               f"({values['pc_increases']['display']} in total) and the bottom panel price decreases "
+               f"({values['pc_decreases']['display']} in total). Darker cells mean more price moves in that hour; "
+               "pale cells are comparable hours with no change; hatched grey cells have no comparable prior "
+               "capture and are not zero activity.")
     return {"matched_alt": matched, "heatmap_alt": heatmap}
 
 

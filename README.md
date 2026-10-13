@@ -2643,7 +2643,8 @@ scheduled period. Cells without an eligible interval (hard breaks, or
 outside the schedule) are hatched grey, never zero. The figure uses
 canonical UTC capture labels and object-oriented Matplotlib with no pyplot
 state; the optional `figsize` and `font_scale` arguments resize it for the
-slide deck without changing its content. `write_price_change_analysis_outputs(result, output_dir)` writes
+slide deck, and `wording="audience"` switches to the plain-language labels of
+`HEATMAP_LABELS`, without changing its content. `write_price_change_analysis_outputs(result, output_dir)` writes
 `price_change_event_table.csv` and `price_change_event_heatmap.png`
 atomically, and only into an explicitly supplied directory. Analysis
 functions write nothing.

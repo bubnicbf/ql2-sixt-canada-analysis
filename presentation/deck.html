@@ -152,41 +152,65 @@
       </aside>
     </section>
 
-    <!-- Slide: second major result — price changes and visible assortment -->
+    <!-- Slide: price-change heatmap and three summary findings -->
     <section id="changes" aria-labelledby="changes-title">
-      <h2 id="changes-title">{{change_headline}}</h2>
+      <h2 id="changes-title">Price changes were concentrated, while visible assortment remained stable</h2>
       <figure class="figure-wide">
         <img src="figures/price_change_heatmap.png" alt="{{=heatmap_alt}}" width="{{=price_change_heatmap_width}}" height="{{=price_change_heatmap_height}}">
+        <figcaption>Rows are locations and columns are hourly comparisons. Darker cells indicate more observed price
+          moves; hatched cells have no comparable prior capture.</figcaption>
       </figure>
-      <ul class="tiles" aria-label="Change and assortment summary">
-        <li><p class="big">{{pc_total}}</p><p>price-change candidates: {{pc_increases}} up, {{pc_decreases}} down</p></li>
-        <li><p class="big">{{sync_intervals}}</p><p>direction-synchronized location intervals</p></li>
-        <li><p class="big">{{held}} <span class="unit">held</span></p><p>{{continued}} continued, {{reverted}} reverted
-          of {{with_following}}; {{censored}} right-censored</p></li>
-        <li><p class="big">{{retention}} <span class="unit">retention</span></p><p>{{additions}} added,
-          {{removals}} removed; {{drop_phrase}}, {{drop_sharing_phrase}}</p></li>
+      <ul class="summary" aria-label="Summary of price changes and visible assortment">
+        <li>
+          <p class="value">{{pc_total}}</p>
+          <p class="label">Observed price changes</p>
+          <p class="detail">{{pc_direction_label}} · {{pc_increases}} up, {{pc_decreases}} down</p>
+        </li>
+        <li>
+          <p class="value">{{sync_intervals}}</p>
+          <p class="label">Intervals with coordinated price moves</p>
+          <p class="detail">of {{interval_count}} hourly location comparisons</p>
+        </li>
+        <li>
+          <p class="value">{{retained_share}}</p>
+          <p class="label">Products retained hour to hour</p>
+          <p class="detail">pooled across consecutive comparable hours</p>
+        </li>
       </ul>
       <aside class="notes">
-        <p><strong>Purpose.</strong> Answer the change-and-anomaly question: are movements isolated, synchronized
-          and persistent?</p>
-        <p><strong>Say.</strong> Each offer is compared with the immediately preceding eligible capture of the same
-          location one hour earlier. There are {{pc_total}} price-change candidates — {{pc_increases}} increases and
-          {{pc_decreases}} decreases, so {{pc_direction_phrase}} — across {{interval_count}} eligible location
-          intervals, plus {{assortment_events}} appearance or disappearance events. The heatmap shows they bunch
-          into {{changed_intervals}} of the {{interval_count}} intervals ({{pc_spread_phrase}}): {{sync_intervals}} intervals are direction-synchronized, meaning at least two
-          products at one location moved the same way in the same hour.</p>
-        <p><strong>Persistence.</strong> Of the {{with_following}} changes that have a following eligible interval,
-          {{held}} held, {{continued}} continued and {{reverted}} reverted. {{not_testable}} are not testable, of
-          which {{censored}} sit at the final capture and are right-censored, so they are excluded from persistence
-          conclusions.</p>
-        <p><strong>Assortment.</strong> Pooled retention is {{retention}} (rounded to two decimals) over
-          {{assessed_intervals}} assessed intervals, with {{additions}} additions and {{removals}} removals. There
-          were {{drop_intervals_phrase}}, {{drop_sharing_phrase}}; {{coincident_intervals}} intervals had a
-          price change at the same location. With the unusual-drop policy {{policy_status}}, drops are review
-          candidates only.</p>
-        <p><strong>Caveat.</strong> Synchronized movements are candidates, not evidence of deliberate repricing or of
-          an extraction error. Telling those apart needs collection logs or source snapshots.</p>
-        <p><strong>Transition.</strong> So what can we rely on today, and what remains unknown?</p>
+        <p><strong>Purpose.</strong> Show how prices and the visible product range moved hour to hour, in three
+          findings the panel can take away, while keeping the detailed classifications ready for questions.</p>
+        <p><strong>Say.</strong> Each offer is compared with the same location's previous comparable capture, one
+          hour earlier. I observed {{pc_total}} price changes — {{pc_increases}} increases and {{pc_decreases}}
+          decreases, so {{pc_direction_phrase}}; the direction is simply whichever count is larger, and "evenly
+          split" if they are equal. Technically these are observed price-change candidates: real differences in
+          listed prices, not causally explained or commercially confirmed events. They sit in
+          {{changed_intervals}} of the {{interval_count}} eligible one-hour location intervals, which is why I call
+          them concentrated ({{pc_spread_phrase}}). There were also {{assortment_events}} products appearing or
+          disappearing.</p>
+        <p><strong>Coordinated moves.</strong> An interval has coordinated price moves when at least two products at
+          the same location moved in the same direction during the same eligible hourly interval; that happened in
+          {{sync_intervals}} intervals. "Coordinated" describes co-movement only. It does not imply intentional
+          coordination, deliberate repricing or a collection defect; each one is an investigation candidate, and
+          telling those explanations apart needs collection logs or source snapshots.</p>
+        <p><strong>What happened next (for questions).</strong> Of the {{with_following}} changes that have a
+          comparable following hour, {{held}} held — the new price stayed the same an hour later; {{continued}}
+          continued — the price kept moving in the same direction; and {{reverted}} reverted — the price moved back.
+          Another {{censored}} changes are awaiting the next capture: they happened at the last capture in the
+          window, so there is no following hour to check yet. Technically they are right-censored at the final
+          capture, and I excluded them from persistence conclusions rather than guess their outcome.</p>
+        <p><strong>Assortment.</strong> Products retained hour to hour is the pooled share of products seen in one
+          comparable hour that were still returned in the next: {{retained_products}} retained out of
+          {{previous_products}}, which is {{retained_share}} (the pooled retention ratio is {{retention}}). It is an
+          interval-level measure across {{assessed_intervals}} assessed intervals, not the share of unique products
+          kept over the whole window. There were {{additions}} additions and {{removals}} removals, and
+          {{drop_intervals_phrase}} with an abrupt drop, {{drop_sharing_phrase}}; {{coincident_intervals}} intervals
+          had a price change at the same location as an assortment change. With the unusual-drop policy
+          {{policy_status}}, drops remain review candidates.</p>
+        <p><strong>Caveat.</strong> Visible assortment is what the collection returned, not confirmed supplier
+          availability. The data identifies patterns; it does not establish their cause.</p>
+        <p><strong>Transition.</strong> So what should QL2 trust, what should it investigate, and what should it not
+          conclude yet?</p>
       </aside>
     </section>
 

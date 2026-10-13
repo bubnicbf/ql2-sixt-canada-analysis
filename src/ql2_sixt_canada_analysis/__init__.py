@@ -598,6 +598,7 @@ __all__ = [
     "analyze_price_change_events",
     "event_heatmap_source",
     "exact_change_percent",
+    "HEATMAP_LABELS",
     "plot_price_change_heatmap",
     "price_change_analysis_from_pipeline",
     "run_price_change_analysis",
@@ -761,6 +762,7 @@ __all__ = [
     "deck_results",
     "render_deck_html",
     "validate_deck",
+    "retained_share",
     "verify_traces",
     "final_case_table",
     "magnitude_suppressed",
@@ -993,6 +995,7 @@ _LAZY_OTHER = {
     "analyze_price_change_events": "price_change_analysis",
     "event_heatmap_source": "price_change_analysis",
     "exact_change_percent": "price_change_analysis",
+    "HEATMAP_LABELS": "price_change_analysis",
     "plot_price_change_heatmap": "price_change_analysis",
     "price_change_analysis_from_pipeline": "price_change_analysis",
     "run_price_change_analysis": "price_change_analysis",
@@ -1167,6 +1170,7 @@ _LAZY_OTHER = {
     "deck_results": "presentation_deck",
     "render_deck_html": "presentation_deck",
     "validate_deck": "presentation_deck",
+    "retained_share": "presentation_deck",
     "verify_traces": "presentation_deck",
 }
 

@@ -94,15 +94,14 @@ html, body { background: var(--paper); }
 /* Figures */
 .figure-wide { margin: 0; }
 .figure-wide img { display: block; width: auto; max-width: 100%; height: auto; max-height: 470px; object-fit: contain; object-position: left top; margin: 0; }
-#changes .figure-wide img { max-height: 500px; }
+#changes .figure-wide img { max-height: 478px; }
 #pricing .figure-wide img { max-height: 440px; }
 .reveal figcaption { font-size: 14px; color: var(--muted); margin-top: 4px; }
 
 /* City cards and stat tiles */
-.cards, .tiles { list-style: none; display: grid; gap: 14px; margin-top: 10px !important; }
+.cards { list-style: none; display: grid; gap: 14px; margin-top: 10px !important; }
 .cards { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-.tiles { grid-template-columns: repeat(4, 1fr); }
-.city-card, .tiles li { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 10px 16px; }
+.city-card { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 10px 16px; }
 .city-card { border-top: 5px solid var(--blue); }
 .city-card:nth-child(2) { border-top-color: var(--orange); }
 .city-card:nth-child(3) { border-top-color: var(--green); }
@@ -110,10 +109,19 @@ html, body { background: var(--paper); }
 .city-card .cc-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .city-card .big { font-size: 24px; white-space: nowrap; }
 .city-card p { font-size: 14.5px; }
-.city-card p, .tiles p { font-size: 15.5px; margin: 0 !important; color: var(--muted); }
+.city-card p { font-size: 15.5px; margin: 0 !important; color: var(--muted); }
 .reveal .big { font-size: 28px; font-weight: 700; color: var(--ink); line-height: 1.2; }
-.reveal .unit { font-size: 16px; font-weight: 600; color: var(--muted); }
 .muted { color: var(--faint) !important; }
+
+/* Slide 4 (#changes): heatmap, caption and three equal summary tiles. Scoped to this slide. */
+#changes h2 { font-size: 28px; margin-bottom: 12px; }
+#changes figcaption { font-size: 15px; margin-top: 2px; }
+#changes .summary { list-style: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 10px !important; }
+#changes .summary li { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 8px 18px 10px; }
+#changes .summary p { margin: 0 !important; }
+#changes .summary .value { font-size: 32px; font-weight: 700; line-height: 1.15; color: var(--ink); }
+#changes .summary .label { font-size: 18px; font-weight: 650; color: var(--ink); }
+#changes .summary .detail { font-size: 15px; color: var(--muted); }
 
 /* Slide 5 (#limits): three decision-boundary columns. Scoped; the control table lives in the speaker notes. */
 #limits .framing { font-size: 22px; color: var(--muted); margin: -4px 0 26px !important; max-width: 1100px; }

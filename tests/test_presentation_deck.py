@@ -479,6 +479,161 @@ def test_a_tampered_methodology_note_value_is_detected(deck_copy: Path) -> None:
         pd_.validate_deck(deck_copy)
 
 
+# ============================================================================ slide 4: price changes and assortment
+
+CHANGES_TITLE = "Price changes were concentrated, while visible assortment remained stable"
+SUMMARY = (("pc_total", "Observed price changes"), ("sync_intervals", "Intervals with coordinated price moves"),
+           ("retained_share", "Products retained hour to hour"))
+HIDDEN_ON_SLIDE_FOUR = ("direction-synchronized", "held", "continued", "reverted", "right-censored", "retention",
+                        "candidate", "persistence")
+
+
+def _summary_tiles(directory: Path) -> list[str]:
+    visible, _, _ = _slide(directory, "changes")
+    summary = re.search(r'<ul class="summary" aria-label="[^"]+">(.*?)</ul>', visible, re.DOTALL)
+    assert summary, "the tiles are a labelled semantic list"
+    return re.findall(r"<li>(.*?)</li>", summary.group(1), re.DOTALL)
+
+
+def test_price_change_slide_shows_three_audience_findings(deck_dir: Path, ready_report) -> None:
+    visible, text, _ = _slide(deck_dir, "changes")
+    parsed = pd_._parse((deck_dir / "index.html").read_text(encoding="utf-8"))
+    assert parsed.slides[3]["id"] == "changes"
+    assert [h.strip() for h in parsed.slides[3]["headings"]] == [CHANGES_TITLE]
+    values = _results(deck_dir)["values"]
+    assert values["change_headline"]["display"] not in text, "the generated headline is no longer the title"
+    tiles = _summary_tiles(deck_dir)
+    assert len(tiles) == 3
+    for tile, (key, label) in zip(tiles, SUMMARY, strict=True):
+        assert re.search(rf'<p class="value"><span class="v" data-value="{key}">', tile), key
+        assert f'<p class="label">{label}</p>' in tile, label
+        assert _inline(re.search(r'<p class="value">(.*?)</p>', tile, re.DOTALL).group(1)) == values[key]["display"]
+    events = ready_report.price_changes.analysis.events.report.overall
+    expected = ("Mostly decreases" if events.decrease > events.increase
+                else "Mostly increases" if events.increase > events.decrease else "Evenly split")
+    assert values["pc_direction_label"]["display"] == expected
+    assert _inline(tiles[0]).startswith(f"{values['pc_total']['display']} Observed price changes {expected}")
+    assert values["pc_total"]["value"] == ready_report.price_changes.analysis.report.price_change_count
+    c = ready_report.assortment.assortment.report.overall
+    assert values["retained_share"]["value"] == c.retained / c.previous_products
+    assert values["retained_share"]["display"] == pd_.retained_share(c.retained, c.previous_products)[1]
+    order = [text.index(label) for _, label in SUMMARY]
+    assert order == sorted(order) and text.index(CHANGES_TITLE) < order[0]
+
+
+def test_price_change_slide_hides_the_technical_taxonomy(deck_dir: Path) -> None:
+    visible, text, notes = _slide(deck_dir, "changes")
+    for term in HIDDEN_ON_SLIDE_FOUR:
+        assert not re.search(r"\b" + re.escape(term), text, re.IGNORECASE), term
+    tiles = " ".join(_inline(t) for t in _summary_tiles(deck_dir))
+    for key in ("held", "continued", "reverted", "censored", "retention"):
+        assert f'data-value="{key}"' not in visible, key
+    assert tiles and "candidate" in notes
+
+
+def test_price_change_notes_keep_the_detailed_classifications(deck_dir: Path) -> None:
+    _, _, notes = _slide(deck_dir, "changes")
+    values = _results(deck_dir)["values"]
+    note_html = _slide_html(deck_dir, "changes").split('<aside class="notes">')[1]
+    for key in ("pc_total", "pc_increases", "pc_decreases", "pc_direction_phrase", "interval_count",
+                "changed_intervals", "sync_intervals", "with_following", "held", "continued", "reverted", "censored",
+                "retained_products", "previous_products", "retained_share", "retention", "assessed_intervals",
+                "additions", "removals", "drop_intervals_phrase", "drop_sharing_phrase", "coincident_intervals",
+                "policy_status"):
+        assert f'data-value="{key}"' in note_html, key
+        assert values[key]["display"] in notes, key
+    for kept in ("whichever count is larger", "at least two products at the same location moved in the same "
+                 "direction during the same eligible hourly interval", "does not imply intentional coordination",
+                 "investigation candidate", "held — the new price stayed", "continued — the price kept moving",
+                 "reverted — the price moved back", "awaiting the next capture", "right-censored at the final capture",
+                 "excluded them from persistence conclusions", "not the share of unique products",
+                 "not confirmed supplier availability", "does not establish their cause", "Transition."):
+        assert kept in notes, kept
+    assert notes.index("awaiting the next capture") < notes.index("right-censored"), "plain language first"
+    assert len(notes.split()) >= 400
+
+
+def test_heatmap_alternative_text_uses_plain_language(deck_dir: Path) -> None:
+    visible, _, _ = _slide(deck_dir, "changes")
+    alt = html_module.unescape(re.search(r'<img src="figures/price_change_heatmap.png" alt="([^"]+)"',
+                                         visible).group(1))
+    values = _results(deck_dir)["values"]
+    for phrase in ("Rows are the standardized (canonical) locations", "hourly comparisons in UTC",
+                   "price increases", "price decreases", "Darker cells mean more price moves",
+                   "no comparable prior capture", "not zero activity", values["pc_increases"]["display"],
+                   values["pc_decreases"]["display"]):
+        assert phrase in alt, phrase
+    assert "candidate" not in alt and "pricing-authorities" not in alt
+
+
+@pytest.mark.parametrize(("retained", "previous", "display"), [
+    (10002, 10017, "99.9%"),          # the whole percent would read 100% for an inexact share
+    (9, 10, "90%"), (1, 8, "13%"),    # 12.5% rounds half up
+    (199, 200, "99.5%"), (1996, 2000, "99.8%"), (1999, 2000, ">99.9%"),   # 99.95% would round to 100.0%
+    (1, 200, "1%"), (1, 400, "0.3%"), (1, 20000, "<0.1%"), (0, 5, "0%"), (5, 5, "100%"),
+])
+def test_retained_share_rounding_rule(retained: int, previous: int, display: str) -> None:
+    ratio, shown = pd_.retained_share(retained, previous)
+    assert shown == display and ratio == retained / previous
+
+
+@pytest.mark.parametrize(("retained", "previous"), [(0, 0), (3, 0), (-1, 4), (5, 4), (1.0, 2), (True, 2)])
+def test_retained_share_fails_closed(retained, previous) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(pd_.DeckError):
+        pd_.retained_share(retained, previous)
+
+
+def test_changed_results_change_all_three_tiles(deck_dir: Path) -> None:
+    results = _results(deck_dir)
+    original = {k: results["values"][k]["display"] for k, _ in SUMMARY}
+    for key, display in (("pc_total", "9,999"), ("sync_intervals", "77"), ("retained_share", "42%")):
+        results["values"][key]["display"] = display
+    page = pd_.render_deck_html(TEMPLATE.read_text(encoding="utf-8"), results)
+    start = page.index('<section id="changes"')
+    visible = page[start:page.index("</section>", start)].split('<aside class="notes">')[0]
+    tiles = re.findall(r"<li>(.*?)</li>", re.search(r'<ul class="summary"[^>]*>(.*?)</ul>', visible,
+                                                    re.DOTALL).group(1), re.DOTALL)
+    for tile, (key, display) in zip(tiles, (("pc_total", "9,999"), ("sync_intervals", "77"),
+                                            ("retained_share", "42%")), strict=True):
+        value = _inline(re.search(r'<p class="value">(.*?)</p>', tile, re.DOTALL).group(1))
+        assert value == display != original[key], key
+
+
+def test_a_tampered_tile_value_is_detected(deck_copy: Path) -> None:
+    page = deck_copy / "index.html"
+    text = page.read_text(encoding="utf-8")
+    display = _results(deck_copy)["values"]["retained_share"]["display"]
+    span = f'data-value="retained_share">{display}<'
+    position = text.index(span, text.index('<section id="changes"'))
+    page.write_text(text[:position] + span.replace(display, "100%") + text[position + len(span):], encoding="utf-8")
+    with pytest.raises(pd_.DeckValidationError, match="span retained_share"):
+        pd_.validate_deck(deck_copy)
+
+
+def test_heatmap_wording_option_changes_labels_only(ready_report) -> None:
+    import numpy as np
+    from matplotlib.backends.backend_agg import FigureCanvasAgg as Canvas
+
+    from ql2_sixt_canada_analysis.price_change_analysis import HEATMAP_LABELS, plot_price_change_heatmap
+
+    analysis = ready_report.price_changes.analysis
+    default, (d_inc, d_dec) = plot_price_change_heatmap(analysis)
+    audience, (a_inc, a_dec) = plot_price_change_heatmap(analysis, wording="audience")
+    Canvas(default).draw()
+    Canvas(audience).draw()
+    for d, a in ((d_inc, a_inc), (d_dec, a_dec)):
+        assert np.array_equal(np.ma.getdata(d.images[0].get_array()), np.ma.getdata(a.images[0].get_array()),
+                              equal_nan=True)
+        assert len(d.patches) == len(a.patches), "the same cells are hatched"
+    assert d_inc.get_title(loc="left") == HEATMAP_LABELS["analysis"]["increase"]
+    assert a_inc.get_title(loc="left") == HEATMAP_LABELS["audience"]["increase"]
+    assert a_dec.get_xlabel().endswith("(UTC)") and d_dec.get_xlabel().endswith("(UTC)")
+    with pytest.raises(ValueError):
+        plot_price_change_heatmap(analysis, wording="other")
+    default.clear()
+    audience.clear()
+
+
 # ============================================================================ slide 5: decision boundaries
 
 BOUNDARY_TITLE = "What I would trust today—and what I would not"
@@ -755,7 +910,9 @@ def test_figure_labels_and_units_are_explicit(deck_dir: Path) -> None:
     cities = [c["city"] for c in results["cities"]]
     assert all(a["xticklabels"] == cities for a in matched["axes"]), "category labels are the full city names"
     assert "IQR" not in json.dumps(matched) and "interquartile range" in matched["note"]
-    assert heatmap["colorbar_labels"] == ["Candidates (count)", "Candidates (count)"]
+    assert heatmap["colorbar_labels"] == ["Changes (count)", "Changes (count)"]
+    assert [a["title"] for a in heatmap["axes"]] == ["Price increases per interval", "Price decreases per interval"]
+    assert set(heatmap["legend"]) == {"No comparable prior capture", "Comparable interval, no change"}
     assert heatmap["axes"][1]["xlabel"].endswith("(UTC)")
     assert all(re.fullmatch(r"\d{8}T\d{6}Z", t) for t in heatmap["axes"][1]["xticklabels"])
     assert "not zero activity" in heatmap["note"]
@@ -792,7 +949,7 @@ def test_every_value_span_matches_the_results_artifact(deck_dir: Path) -> None:
     for key, parts in parsed.spans:
         assert "".join(parts) == results["values"][key]["display"], key
     shown = {k for k, _ in parsed.spans}
-    for required in ("matched_pairs", "pc_total", "retention", "controls_passed", "city1_median"):
+    for required in ("matched_pairs", "pc_total", "retained_share", "controls_passed", "city1_median"):
         assert required in shown
 
 
@@ -823,6 +980,7 @@ def test_formatting_is_consistent_by_kind(deck_dir: Path) -> None:
                 "percent": r"[+-]\d+\.\d{1,2}%( to [+-]\d+\.\d{2}%)?", "share": r"\d{1,3}%",
                 "ratio": r"\d\.\d{2}", "date": r"\d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} UTC",
                 "duration": r"\d{1,3}(,\d{3})*(\.\d)?",
+                "retained_share": r"(\d{1,3}|\d{1,2}\.\d)%|>99\.9%|<0\.1%",
                 "scope": r"[A-Z][a-z]+( [A-Za-z]+)* (markets?|locations( only)?|(days?|hours?) of hourly observations)"}
     for key, item in _results(deck_dir)["values"].items():
         if item["kind"] in patterns:
