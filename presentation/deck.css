@@ -140,11 +140,7 @@ html, body { background: var(--paper); }
 #limits .boundary-open h3 { color: var(--muted); }
 #limits .boundary-note { margin-top: 30px !important; font-size: 24px; font-weight: 600; color: var(--ink); border-left: 6px solid var(--ink); padding: 6px 0 6px 20px; }
 
-/* Slide 6 (#conclusions): evidence strip, prioritized actions, one-week box, closing statement. Scoped. */
-#conclusions .evidence { list-style: none; display: flex; flex-wrap: nowrap; gap: 0; margin: 0 0 20px !important; font-size: 16px; color: var(--muted); white-space: nowrap; }
-#conclusions .evidence li { padding: 0 14px; border-left: 1px solid var(--rule); }
-#conclusions .evidence li:first-child { padding-left: 0; border-left: 0; }
-#conclusions .evidence strong { color: var(--ink); }
+/* Slide 6 (#conclusions): prioritized actions, one-week box, closing statement. Scoped. */
 #conclusions .plan { display: grid; grid-template-columns: 1.75fr 1fr; gap: 26px; align-items: start; margin-bottom: 18px; }
 #conclusions .next-steps h3 { font-size: 22px; margin-bottom: 10px; }
 #conclusions .priorities { list-style: none; counter-reset: priority; display: grid; gap: 10px; }

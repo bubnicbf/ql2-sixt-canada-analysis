@@ -308,14 +308,16 @@ def retained_share(retained: int, previous: int) -> tuple[float, str]:
 
 
 def opening_conclusion(controls_clean: bool) -> str:
-    """The opening slide's conclusion: decision-ready for monitoring only when no control triggered or went unassessed.
+    """The opening slide's conclusion: reliable for descriptive monitoring only when no control triggered or
+    went unassessed.
 
     The deck is built only from a completed (pricing-ready) report, so the one
     remaining condition is the monitoring outcome; a triggered or not-assessable
-    control narrows the conclusion instead of keeping the decision-ready wording.
+    control replaces the clean-controls wording with a "not yet decision-ready"
+    conclusion instead.
     """
     if controls_clean:
-        return ("Reliable for descriptive monitoring; not yet sufficient for pricing decisions.")
+        return "Reliable for descriptive monitoring; not yet sufficient for pricing decisions."
     return "Not yet decision-ready: contract-based controls flag defects to resolve before monitoring or pricing use."
 
 

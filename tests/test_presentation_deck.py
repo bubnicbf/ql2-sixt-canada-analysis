@@ -215,10 +215,9 @@ def test_template_types_no_quantity(deck_dir: Path) -> None:
 
 # ============================================================================ slide 1: the opening answer
 
-OPENING_TITLE = "From hourly rate feeds to decision-ready pricing signals"
+OPENING_TITLE = "From hourly rate feeds to defensible pricing signals"
 OPENING_SUBTITLE = "Assessing whether Sixt Canada data can support pricing analysis and ongoing monitoring"
-OPENING_CONCLUSION = ("Decision-ready for descriptive monitoring; more history and operational evidence are needed "
-                      "before using it for pricing decisions.")
+OPENING_CONCLUSION = "Reliable for descriptive monitoring; not yet sufficient for pricing decisions."
 OLD_QUESTION = "Can QL2 trust the hourly Sixt Canada rate feed?"
 SCOPE_KEYS = ("scope_markets", "scope_locations", "scope_duration")
 
@@ -274,6 +273,7 @@ def test_opening_slide_leads_with_the_answer(deck_dir: Path) -> None:
 def test_opening_conclusion_is_the_requested_wording_only_when_controls_are_clean(deck_dir: Path) -> None:
     assert pd_.opening_conclusion(True) == OPENING_CONCLUSION
     assert pd_.opening_conclusion(False).startswith("Not yet decision-ready")
+    assert pd_.opening_conclusion(False) != pd_.opening_conclusion(True), "clean and unclean states differ"
     values = _results(deck_dir)["values"]
     clean = values["controls_triggered"]["value"] == 0 and values["controls_not_assessable"]["value"] == 0
     assert values["conclusion"]["display"] == pd_.opening_conclusion(clean)
@@ -831,7 +831,27 @@ def test_final_slide_presents_a_prioritized_plan(deck_dir: Path) -> None:
     assert re.search(r'<p class="closing">' + re.escape(CLOSING).replace(r"\ ", r"\s+") + "</p>", visible)
     order = [text.index(t) for t in (NEXT_HEADING, PRIORITIES[0][0], PRIORITIES[-1][0], WEEK_HEADING, CLOSING)]
     assert order == sorted(order)
-    assert "not alerts" in text and not re.search(r"\b(confirmed|production|triggered) alerts?\b", text + notes)
+    assert not re.search(r"\b(confirmed|production|triggered) alerts?\b", text + notes)
+
+
+def test_final_slide_keeps_alerting_behind_threshold_calibration(deck_dir: Path) -> None:
+    """Observed patterns stay investigation candidates until thresholds are calibrated (no evidence strip)."""
+    visible, text, notes = _slide(deck_dir, "conclusions")
+    plan = re.search(r'<ol class="priorities"[^>]*>(.*?)</ol>', visible, re.DOTALL).group(1)
+    last = _flat(re.findall(r"<li>(.*?)</li>", plan, re.DOTALL)[-1])
+    assert last == ("Calibrate monitoring thresholds "
+                    "Establish normal variation before converting candidates into alerts.")
+    assert re.search(r"normal variation before converting candidates into alerts", last), "calibration precedes alerts"
+    assert not re.search(r"\b(confirmed|production|triggered) alerts?\b", text + notes, re.IGNORECASE)
+    assert "calibrated and backtested" in notes and "they stay review candidates until then" in notes
+
+    template = TEMPLATE.read_text(encoding="utf-8")
+    start = template.index('<section id="conclusions"')
+    slide = template[start:template.index("</section>", start)]
+    for page in (visible, slide):
+        assert 'class="evidence"' not in page and "What the evidence supports" not in page, "no evidence strip"
+    css = (PROJECT_ROOT / "presentation" / "deck.css").read_text(encoding="utf-8")
+    assert "#conclusions .evidence" not in css, "no styles remain for the removed evidence strip"
 
 
 def test_final_slide_template_names_no_market_or_premium(deck_dir: Path) -> None:

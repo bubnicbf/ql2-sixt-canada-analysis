@@ -57,10 +57,11 @@ results artifact, in authoritative control order. Do not restore internal
 status or severity terminology (candidate-only, confirmation-required, not
 assessable, severities, passed or triggered) to the projected slide.
 
-Slide 6 closes with a decision plan rather than a results recap: a short
-evidence strip, four prioritized actions in a semantic ordered list ("What I
-would do next"), a compact one-week follow-on plan that separates work that can
-start now from work that needs more data, and the closing statement that marks
+Slide 6 closes with a decision plan rather than a results recap: four
+prioritized actions in a semantic ordered list ("What I would do next", ending
+with threshold calibration before any candidate becomes an alert), a compact
+one-week follow-on plan that separates work that can start now from work that
+needs more data, and the closing statement that marks
 the boundary between investigation and commercial action. The leading market
 and its premium come from `top_city_name` and `top_city_median`; the per-question
 recap and the rationale for each evidence gap are in its speaker notes. Its
