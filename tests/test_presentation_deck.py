@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import html as html_module
 import http.server
 import json
 import os
@@ -212,6 +213,168 @@ def test_template_types_no_quantity(deck_dir: Path) -> None:
     assert keys <= set(_results(deck_dir)["values"]), keys - set(_results(deck_dir)["values"])
 
 
+# ============================================================================ slide 1: the opening answer
+
+OPENING_TITLE = "From hourly rate feeds to decision-ready pricing signals"
+OPENING_SUBTITLE = "Assessing whether Sixt Canada data can support pricing analysis and ongoing monitoring"
+OPENING_CONCLUSION = ("Decision-ready for descriptive monitoring; more history and operational evidence are needed "
+                      "before using it for pricing decisions.")
+OLD_QUESTION = "Can QL2 trust the hourly Sixt Canada rate feed?"
+SCOPE_KEYS = ("scope_markets", "scope_locations", "scope_duration")
+
+
+def _opening(directory: Path) -> tuple[str, str, str]:
+    """``(slide 1 HTML, its visible text, its speaker-notes text)`` of a built deck."""
+    page = (directory / "index.html").read_text(encoding="utf-8")
+    start = page.index('<section id="question"')
+    section = page[start:page.index("</section>", start)]
+    notes = section[section.index('<aside class="notes">'):]
+    visible = section[:section.index('<aside class="notes">')]
+
+    def text(fragment: str) -> str:
+        return re.sub(r"\s+", " ", html_module.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
+
+    return visible, text(visible), text(notes)
+
+
+def _report_spanning(hours: int) -> fr.FinalReportResult:
+    """A ready synthetic run whose scheduled captures span ``hours`` from the first to the last period."""
+    from test_monitoring import full_run, stability_report
+    from test_price_change_events import synthetic_world
+    from test_price_change_presentation import RICH
+
+    world = synthetic_world(hours=hours - 1, products=RICH)      # the rich fixture adds one trailing period
+    report = fr.final_report_from_pipeline(full_run(world, vehicle_stability=stability_report(
+        observations_assessed=world["population"].eligible_detail_rows)))
+    assert report.completed
+    return report
+
+
+def test_opening_slide_leads_with_the_answer(deck_dir: Path) -> None:
+    visible, text, _ = _opening(deck_dir)
+    parsed = pd_._parse((deck_dir / "index.html").read_text(encoding="utf-8"))
+    assert [h.strip() for h in parsed.slides[0]["headings"]] == [OPENING_TITLE]
+    assert re.search(r'<h1 id="question-title">' + re.escape(OPENING_TITLE) + "</h1>", visible)
+    assert re.search(r'<p class="subtitle">' + re.escape(OPENING_SUBTITLE) + "</p>", visible)
+    conclusion = re.search(r'<p class="conclusion-text">(.*?)</p>', visible, re.DOTALL).group(1)
+    assert conclusion == f'<span class="v" data-value="conclusion">{OPENING_CONCLUSION}</span>'
+    assert _results(deck_dir)["values"]["conclusion"]["display"] == OPENING_CONCLUSION
+    order = [text.index(t) for t in (OPENING_TITLE, OPENING_SUBTITLE, OPENING_CONCLUSION)]
+    assert order == sorted(order), "title, then subtitle, then the conclusion"
+    assert 'aria-describedby="question-conclusion"' in visible and 'aria-label="Conclusion"' in visible
+    assert OLD_QUESTION not in (deck_dir / "index.html").read_text(encoding="utf-8")
+    assert OLD_QUESTION not in TEMPLATE.read_text(encoding="utf-8")
+
+
+def test_opening_conclusion_is_the_requested_wording_only_when_controls_are_clean(deck_dir: Path) -> None:
+    assert pd_.opening_conclusion(True) == OPENING_CONCLUSION
+    assert pd_.opening_conclusion(False).startswith("Not yet decision-ready")
+    values = _results(deck_dir)["values"]
+    clean = values["controls_triggered"]["value"] == 0 and values["controls_not_assessable"]["value"] == 0
+    assert values["conclusion"]["display"] == pd_.opening_conclusion(clean)
+
+
+def test_opening_slide_has_exactly_three_scope_facts_from_results(deck_dir: Path, ready_report) -> None:
+    visible, _, _ = _opening(deck_dir)
+    values = _results(deck_dir)["values"]
+    items = re.findall(r"<li>(.*?)</li>", re.search(r'<ul class="scope"[^>]*>(.*?)</ul>', visible, re.DOTALL).group(1),
+                       re.DOTALL)
+    assert len(items) == 3 and len(re.findall(r"<li\b", visible)) == 3, "exactly three visible scope facts"
+    for item, key in zip(items, SCOPE_KEYS, strict=True):
+        assert item == f'<span class="v" data-value="{key}">{values[key]["display"]}</span>', key
+    markets, locations, duration = (values[k] for k in SCOPE_KEYS)
+    cities = len(ready_report.matched.report.cities)
+    assert markets["value"] == cities == values["city_count"]["value"]
+    assert markets["display"] == f"{pd_._number_word(cities).capitalize()} Canadian markets"
+    assert locations["display"] == "Airport and downtown locations" and locations["value"] == ["airport", "downtown"]
+    assert duration["display"].endswith("of hourly observations")
+    window = pd_.observation_window(ready_report.assortment.tables.assortment_timeline[
+        __import__("ql2_sixt_canada_analysis.assortment_presentation", fromlist=["_CAPTURE"])._CAPTURE])
+    assert duration["display"] == window.phrase
+    assert values["observation_hours"]["value"] == window.elapsed_hours
+    assert values["observation_periods"]["value"] == window.capture_periods
+    template_scope = re.search(r'<ul class="scope"[^>]*>(.*?)</ul>', TEMPLATE.read_text(encoding="utf-8"),
+                               re.DOTALL).group(1)
+    assert re.sub(r"\s+", "", template_scope) == "".join(f"<li>{{{{{k}}}}}</li>" for k in SCOPE_KEYS), \
+        "the template holds only placeholders for the scope facts"
+
+
+def test_the_four_day_window_is_derived_from_the_capture_window(ready_report, tmp_path: Path) -> None:
+    four_days = _report_spanning(92)                             # the supplied extract's shape: 92 hours
+    values = pd_.deck_results(four_days)["values"]
+    assert values["scope_duration"]["display"] == "Approximately four days of hourly observations"
+    assert values["scope_duration"]["value"] == 4 and values["observation_hours"]["value"] == 92
+    assert values["observation_periods"]["value"] == 93
+    assert values["window_start"]["display"] == "4 Mar 2030, 13:00 UTC"
+    assert values["window_end"]["display"] == "8 Mar 2030, 09:00 UTC"
+    shorter = pd_.deck_results(_report_spanning(60))["values"]
+    assert shorter["scope_duration"]["display"] == "Approximately three days of hourly observations"
+    native = pd_.deck_results(ready_report)["values"]
+    assert native["scope_duration"]["display"] == "Four hours of hourly observations"
+    target = tmp_path / "deck"
+    pd_.build_deck(four_days, target)
+    pd_.validate_deck(target, four_days)
+    _, visible, _ = _opening(target)
+    assert "Approximately four days of hourly observations" in visible
+    with pytest.raises(pd_.DeckValidationError, match="stale for this run: .*scope_duration"):
+        pd_.validate_deck(target, ready_report)                  # a changed source window is detected
+
+
+@pytest.mark.parametrize(("hours", "phrase", "days"), [
+    (92, "Approximately four days of hourly observations", 4),
+    (96, "Four days of hourly observations", 4),
+    (84, "Approximately four days of hourly observations", 4),   # 3.5 days rounds half up
+    (83, "Approximately three days of hourly observations", 3),
+    (36, "Approximately two days of hourly observations", 2),
+    (35, "35 hours of hourly observations", None),
+    (12, "Twelve hours of hourly observations", None),
+    (1, "One hour of hourly observations", None),
+    (24 * 30, "30 days of hourly observations", 30),
+])
+def test_observation_window_rounding_rule(hours: int, phrase: str, days: int | None) -> None:
+    import datetime as dt
+
+    start = dt.datetime(2030, 3, 4, 2, tzinfo=dt.timezone.utc)
+    periods = [f"{start + dt.timedelta(hours=h):%Y%m%dT%H%M%SZ}" for h in (0, 1, hours)]
+    window = pd_.observation_window(periods + periods[:1])
+    assert window.phrase == phrase and window.rounded_days == days
+    assert window.elapsed_hours == hours and window.capture_periods == len(set(periods))
+
+
+@pytest.mark.parametrize("periods", [[], ["20300304T020000Z"], ["20300304T020000Z", "2030-03-04 03:00"],
+                                     ["20300304T020000Z", None]], ids=["empty", "single", "invalid", "missing"])
+def test_observation_window_fails_closed(periods: list) -> None:
+    with pytest.raises(pd_.DeckError, match="observation window"):
+        pd_.observation_window(periods)
+
+
+def test_opening_slide_hides_governance_detail_and_the_notes_keep_it(deck_dir: Path) -> None:
+    _, visible, notes = _opening(deck_dir)
+    values = _results(deck_dir)["values"]
+    for hidden in (values["authority_record"]["display"], "authority", "canonical", "Thurlow", "alias",
+                   values["window_start"]["display"], values["window_end"]["display"], "supplier", "source mode",
+                   "win/meet/loss", "out of scope", "governance"):
+        assert hidden.lower() not in visible.lower(), hidden
+    assert not re.search(r"\d", visible.replace("QL2", "QL")), "slide 1 states its scope in words"
+    for kept in (OPENING_CONCLUSION, values["authority_record"]["display"], "decision record", "canonical location",
+                 "Vancouver Thurlow", "Vancouver Downtown", values["window_start"]["display"],
+                 values["window_end"]["display"], f'{values["observation_hours"]["display"]} hours',
+                 "one supplier and one apparent source mode", "competitor, channel and win/meet/loss",
+                 "not actual supplier availability", "Why monitoring is supported", "Why pricing needs more evidence",
+                 "I treated incomplete evidence", "Transition."):
+        assert kept in notes, kept
+    assert len(notes.split()) >= 150
+    assert OPENING_SUBTITLE not in notes, "the notes add to the slide rather than repeat it"
+
+
+def test_a_tampered_opening_value_is_detected(deck_copy: Path) -> None:
+    page = deck_copy / "index.html"
+    display = _results(deck_copy)["values"]["scope_markets"]["display"]
+    page.write_text(page.read_text(encoding="utf-8").replace(display, "Four Canadian markets", 1), encoding="utf-8")
+    with pytest.raises(pd_.DeckValidationError, match="span scope_markets"):
+        pd_.validate_deck(deck_copy)
+
+
 # ============================================================================ figures, labels and units
 
 
@@ -304,7 +467,9 @@ def test_values_are_recomputed_from_the_report(deck_dir: Path, ready_report) -> 
 def test_formatting_is_consistent_by_kind(deck_dir: Path) -> None:
     patterns = {"count": r"\d{1,3}(,\d{3})*", "money": r"[+-]?[A-Z]*\$\d{1,3}(,\d{3})*\.\d{2}/\w+",
                 "percent": r"[+-]\d+\.\d{1,2}%( to [+-]\d+\.\d{2}%)?", "share": r"\d{1,3}%",
-                "ratio": r"\d\.\d{2}", "date": r"\d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} UTC"}
+                "ratio": r"\d\.\d{2}", "date": r"\d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} UTC",
+                "duration": r"\d{1,3}(,\d{3})*(\.\d)?",
+                "scope": r"[A-Z][a-z]+( [A-Za-z]+)* (markets?|locations( only)?|(days?|hours?) of hourly observations)"}
     for key, item in _results(deck_dir)["values"].items():
         if item["kind"] in patterns:
             assert re.fullmatch(patterns[item["kind"]], item["display"]), (key, item["display"])

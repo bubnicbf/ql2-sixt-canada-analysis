@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sixt Canada Rate-Feed Review</title>
-  <meta name="description" content="Can QL2 trust the hourly Sixt Canada rate feed? Readiness, matched airport-versus-downtown pricing, price and assortment changes, monitoring and recommendations from one gated pipeline run.">
+  <meta name="description" content="From hourly rate feeds to decision-ready pricing signals: whether Sixt Canada data can support pricing analysis and ongoing monitoring, with matched airport-versus-downtown pricing, price and assortment changes, monitoring and recommendations from one gated pipeline run.">
   <link rel="stylesheet" href="vendor/reveal.js/reset.css">
   <link rel="stylesheet" href="vendor/reveal.js/reveal.css">
   <link rel="stylesheet" href="deck.css">
@@ -13,38 +13,48 @@
 <div class="reveal">
   <div class="slides">
 
-    <!-- Slide: title, central question and context -->
-    <section id="question" class="slide-title" aria-labelledby="question-title">
-      <p class="kicker">QL2 · Sixt Canada hourly rate feed · data-quality and pricing review</p>
-      <h1 id="question-title">Can QL2 trust the hourly Sixt Canada rate feed?</h1>
-      <p class="lede">Enough to support customer decisions — and which pricing and visible-assortment signals survive
-        once coverage, timestamps, locations and product identity are controlled?</p>
-      <ul class="chips" aria-label="Scope of the extract">
-        <li><strong>{{city_count}}</strong> cities</li>
-        <li><strong>{{location_count}}</strong> canonical locations, airport and downtown</li>
-        <li><strong>{{hours_per_location}}</strong> scheduled hourly captures per location</li>
-        <li><strong>{{window_label}}</strong> (UTC)</li>
-      </ul>
-      <div class="answer" role="note">
-        <p class="answer-label">Short answer</p>
-        <p class="answer-text">{{answer_line}}</p>
+    <!-- Slide: title, conclusion and scope -->
+    <section id="question" class="slide-title" aria-labelledby="question-title" aria-describedby="question-conclusion">
+      <p class="kicker">QL2 · Sixt Canada rate-feed analysis</p>
+      <h1 id="question-title">From hourly rate feeds to decision-ready pricing signals</h1>
+      <p class="subtitle">Assessing whether Sixt Canada data can support pricing analysis and ongoing monitoring</p>
+      <div class="conclusion" id="question-conclusion" role="note" aria-label="Conclusion">
+        <p class="conclusion-label">Conclusion</p>
+        <p class="conclusion-text">{{conclusion}}</p>
       </div>
-      <p class="footer-note">One supplier and one apparent source mode, so supplier, channel and win/meet/loss
-        questions are out of scope. Confidential: derived from proprietary QL2 data.</p>
+      <ul class="scope" aria-label="Scope of the analysis">
+        <li>{{scope_markets}}</li>
+        <li>{{scope_locations}}</li>
+        <li>{{scope_duration}}</li>
+      </ul>
+      <p class="footer-note">Confidential: derived from proprietary QL2 data.</p>
       <aside class="notes">
-        <p><strong>Purpose.</strong> Frame the decision. QL2 wants to know whether this hourly Sixt Canada feed is
-          trustworthy enough to put in front of customers, and what it actually says about pricing and the visible
-          product range.</p>
-        <p><strong>Say.</strong> The extract covers {{city_count}} cities and {{location_count}} canonical locations
-          — an airport and a downtown branch in each city — with {{hours_per_location}} scheduled hourly captures per
-          location between {{window_start}} and {{window_end}}. The short answer is on the slide: {{answer_line}}
-          The rest of the deck earns that answer.</p>
-        <p><strong>Definitions.</strong> A canonical location is the approved location identity after alias
-          handling; Vancouver Thurlow is combined into Vancouver Downtown under the approved authority record.</p>
-        <p><strong>Caveat.</strong> There is one supplier and one apparent source mode, so supplier, channel and
-          win/meet/loss comparisons cannot be answered from these files.</p>
-        <p><strong>Transition.</strong> Before any finding, here is how the data was gated and what each number
-          refers to.</p>
+        <p><strong>Purpose.</strong> Open with the answer, so the audience knows from the first minute what the
+          analysis supports and what it does not, before any method or chart.</p>
+        <p><strong>Say.</strong> QL2 collects hourly rate feeds; the business question was whether this Sixt Canada
+          feed is complete and consistent enough to use, and which pricing and visible-assortment signals still hold
+          once coverage, timestamps, locations and product identity are controlled. My conclusion: {{conclusion}}</p>
+        <p><strong>Why monitoring is supported.</strong> Every foundational readiness gate passed under the approved
+          decision record {{authority_record}}, and {{controls_passed}} of the {{control_count}} monitoring controls
+          passed with {{controls_triggered}} triggered. The feed is internally consistent enough to describe this
+          window and to monitor future extracts with the same contract-based checks.</p>
+        <p><strong>Why pricing needs more evidence.</strong> The window is short, the premiums are associational,
+          {{censored}} end-of-window price changes are still unconfirmed, and without collection logs or source
+          snapshots a synchronized move cannot be classified as repricing or as a collection defect. I treated
+          incomplete evidence as a reason to narrow the conclusion rather than fill the gap with assumptions.</p>
+        <p><strong>Exact window.</strong> Scheduled captures run from {{window_start}} to {{window_end}}:
+          {{observation_hours}} hours from the first to the last capture, rounded to whole days on the slide, with
+          {{hours_per_location}} scheduled hourly captures per location.</p>
+        <p><strong>Locations.</strong> The analysis covers {{city_count}} cities and {{location_count}} canonical
+          locations, one airport and one downtown branch per city. A canonical location is the approved location
+          identity after alias handling: Vancouver Thurlow is combined into Vancouver Downtown under the same
+          decision record.</p>
+        <p><strong>Limits of the evidence.</strong> The files hold one supplier and one apparent source mode, so
+          competitor, channel and win/meet/loss conclusions are outside the available evidence. Visible assortment
+          means the products the collection returned, not actual supplier availability. I separated what the feed
+          can describe from the commercial decisions it cannot yet support.</p>
+        <p><strong>Transition.</strong> Next, how the data was gated and what each number in the deck refers
+          to.</p>
       </aside>
     </section>
 

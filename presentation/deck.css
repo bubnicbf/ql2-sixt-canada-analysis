@@ -60,17 +60,18 @@ html, body { background: var(--paper); }
 .reveal ul, .reveal ol { margin: 0; padding: 0; }
 .reveal .v { font-variant-numeric: tabular-nums; }
 
-/* Title slide */
+/* Title slide: kicker, title, subtitle, conclusion (the primary takeaway), three scope facts, footer */
 .slide-title { display: flex; flex-direction: column; justify-content: center; }
-.kicker { color: var(--blue); font-weight: 650; font-size: 18px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 18px !important; }
-.lede { font-size: 26px; color: var(--muted); max-width: 980px; margin: 18px 0 26px !important; }
-.chips { list-style: none; display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 28px !important; }
-.chips li { background: var(--panel); border: 1px solid var(--rule); border-radius: 999px; padding: 8px 18px; font-size: 19px; color: var(--muted); }
-.chips strong { color: var(--ink); }
-.answer { border-left: 6px solid var(--blue); background: var(--info-bg); padding: 14px 22px; border-radius: 0 10px 10px 0; max-width: 980px; }
-.answer-label { font-size: 15px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em; color: var(--info); margin-bottom: 4px !important; }
-.answer-text { font-size: 26px; font-weight: 650; margin: 0 !important; }
-.footer-note { position: absolute; bottom: 26px; left: 50px; right: 50px; font-size: 15px; color: var(--faint); }
+.kicker { color: var(--blue); font-weight: 650; font-size: 18px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 16px !important; }
+.slide-title h1 { max-width: 900px; text-wrap: balance; }
+.subtitle { font-size: 25px; color: var(--muted); max-width: 1120px; margin: 16px 0 30px !important; }
+.conclusion { border-left: 8px solid var(--blue); background: var(--info-bg); padding: 18px 26px 20px; border-radius: 0 12px 12px 0; max-width: 1080px; margin-bottom: 26px; }
+.conclusion-label { font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--info); margin-bottom: 6px !important; }
+.conclusion-text { font-size: 30px; line-height: 1.3; font-weight: 700; color: var(--ink); margin: 0 !important; }
+.scope { list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 0; font-size: 19px; color: var(--muted); }
+.scope li { padding: 0 18px; border-left: 1px solid var(--rule); }
+.scope li:first-child { padding-left: 0; border-left: 0; }
+.footer-note { position: absolute; bottom: 26px; left: 50px; right: 50px; font-size: 14px; color: var(--faint); }
 
 /* Layout helpers */
 .two-col { display: grid; grid-template-columns: 1.45fr 1fr; gap: 32px; align-items: start; }

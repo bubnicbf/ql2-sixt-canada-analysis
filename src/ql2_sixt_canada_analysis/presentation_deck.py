@@ -62,9 +62,12 @@ __all__ = [
     "DECK_SOURCE_DIR",
     "DeckError",
     "DeckValidationError",
+    "ObservationWindow",
     "build_deck",
     "deck_results",
     "main",
+    "observation_window",
+    "opening_conclusion",
     "render_deck_html",
     "validate_deck",
     "verify_traces",
@@ -184,9 +187,71 @@ def _plural(count: int, singular: str, plural: str | None = None) -> str:
 
 
 def _period(value: str) -> dt.datetime:
-    from ql2_sixt_canada_analysis.price_change_events import parse_scheduled_period
+    from ql2_sixt_canada_analysis.price_change_events import PriceChangeContractError, parse_scheduled_period
 
-    return parse_scheduled_period(value)
+    try:
+        return parse_scheduled_period(value)
+    except PriceChangeContractError as error:
+        raise DeckError(f"invalid scheduled capture period in the observation window: {error}") from None
+
+
+_NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+                 "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+                 "twenty")
+
+
+def _number_word(count: int) -> str:
+    """``count`` as an English word up to twenty, otherwise as digits with thousands separators."""
+    return _NUMBER_WORDS[count] if 0 <= count < len(_NUMBER_WORDS) else f"{count:,}"
+
+
+@dataclass(frozen=True)
+class ObservationWindow:
+    """The observation window of the scheduled captures and its rounded, spoken duration.
+
+    ``elapsed_hours`` is the time from the first to the last scheduled capture
+    period. The endpoints are capture instants, so neither endpoint adds an
+    hour (exclusive of any time after the last capture); ``capture_periods``
+    counts the distinct scheduled periods, both endpoints included. The
+    duration phrase uses whole days, rounded half up (``floor(hours / 24 +
+    0.5)``), prefixed "Approximately" unless the elapsed time is an exact
+    number of days. Windows shorter than 36 hours are stated in exact hours.
+    """
+
+    first: dt.datetime
+    last: dt.datetime
+    elapsed_hours: float
+    capture_periods: int
+    rounded_days: int | None
+    phrase: str
+
+
+def observation_window(periods: Sequence[str] | Any) -> ObservationWindow:
+    """The observation window of scheduled capture periods (``YYYYMMDDTHHMMSSZ``; fails closed).
+
+    Raises:
+        DeckError: No period, an invalid period, or a single instant (no duration).
+    """
+    instants = sorted({_period(p) for p in periods})
+    if not instants:
+        raise DeckError("the observation window is empty: the assortment timeline has no scheduled capture")
+    first, last = instants[0], instants[-1]
+    elapsed = (last - first).total_seconds() / 3600
+    if elapsed <= 0:
+        raise DeckError("the observation window cannot support a duration: it holds a single capture period")
+    if elapsed < 36:
+        hours = round(elapsed)
+        approx = "" if hours == elapsed else "Approximately "
+        word = _number_word(hours)
+        phrase = f"{approx}{word} {_plural(hours, 'hour')} of hourly observations"
+        days = None
+    else:
+        days = int(elapsed / 24 + 0.5)
+        approx = "" if days * 24 == elapsed else "Approximately "
+        word = _number_word(days)
+        phrase = f"{approx}{word} {_plural(days, 'day')} of hourly observations"
+    phrase = phrase[0].upper() + phrase[1:]
+    return ObservationWindow(first, last, elapsed, len(instants), days, phrase)
 
 
 def _require_completed(result: object):  # type: ignore[no-untyped-def]
@@ -198,6 +263,19 @@ def _require_completed(result: object):  # type: ignore[no-untyped-def]
         codes = ", ".join(b.value for b in result.blockers) or "unavailable"
         raise DeckError(f"the deck needs a completed final report (blocked: {codes}); no deck is built")
     return result
+
+
+def opening_conclusion(controls_clean: bool) -> str:
+    """The opening slide's conclusion: decision-ready for monitoring only when no control triggered or went unassessed.
+
+    The deck is built only from a completed (pricing-ready) report, so the one
+    remaining condition is the monitoring outcome; a triggered or not-assessable
+    control narrows the conclusion instead of keeping the decision-ready wording.
+    """
+    if controls_clean:
+        return ("Decision-ready for descriptive monitoring; more history and operational evidence are needed "
+                "before using it for pricing decisions.")
+    return "Not yet decision-ready: contract-based controls flag defects to resolve before monitoring or pricing use."
 
 
 def _city_name(city: str) -> str:
@@ -232,10 +310,8 @@ def deck_results(result: object) -> dict[str, Any]:
             "assortment location summary: scheduled_captures (maximum over locations)")
     v.count("governed_excluded_captures", int(summary["excluded_captures"].sum()),
             "assortment location summary: excluded_captures (sum over locations)")
-    periods = sorted({_period(p) for p in r.assortment.tables.assortment_timeline[_CAPTURE]})
-    if not periods:
-        raise DeckError("the assortment timeline has no scheduled capture")
-    first, last = periods[0], periods[-1]
+    window = observation_window(r.assortment.tables.assortment_timeline[_CAPTURE])
+    first, last = window.first, window.last
     v.add("window_start", f"{first:%Y%m%dT%H%M%SZ}", f"{first.day} {first:%b %Y, %H:%M} UTC", "date",
           "assortment timeline: first scheduled capture period")
     v.add("window_end", f"{last:%Y%m%dT%H%M%SZ}", f"{last.day} {last:%b %Y, %H:%M} UTC", "date",
@@ -244,7 +320,30 @@ def deck_results(result: object) -> dict[str, Any]:
     label = (f"{first.day}–{last.day} {last:%b %Y}" if same_month
              else f"{first.day} {first:%b %Y} – {last.day} {last:%b %Y}")
     v.text("window_label", label, "assortment timeline: first and last scheduled capture dates (UTC)")
+    elapsed = window.elapsed_hours
+    v.add("observation_hours", elapsed, f"{elapsed:,.0f}" if elapsed == int(elapsed) else f"{elapsed:,.1f}",
+          "duration", "assortment timeline: hours from the first to the last scheduled capture period "
+          "(endpoints are capture instants; no hour added)")
+    v.count("observation_periods", window.capture_periods,
+            "assortment timeline: distinct scheduled capture periods, both endpoints included")
+    v.add("scope_duration", window.rounded_days if window.rounded_days is not None else elapsed, window.phrase,
+          "scope", "observation_window(): elapsed hours rounded half up to whole days (exact hours under 36)")
+
+    # Slide 1 scope facts: each display is generated from a report field, never typed in the template.
+    city_word = _number_word(len(cities))
+    v.add("scope_markets", len(cities),
+          f"{city_word[0].upper()}{city_word[1:]} Canadian {_plural(len(cities), 'market')}", "scope",
+          "matched report: approved cities (each approved city is one Canadian market)")
     pc = r.price_changes.analysis.report
+    roles = {str(location.role).lower() for location in pc.locations}
+    if roles == {"airport", "downtown"}:
+        roles_phrase = "Airport and downtown locations"
+    elif roles and roles <= {"airport", "downtown"}:
+        roles_phrase = f"{sorted(roles)[0].title()} locations only"
+    else:
+        raise DeckError("the approved locations have no airport or downtown role")
+    v.add("scope_locations", sorted(roles), roles_phrase, "scope",
+          "price-change report: authority roles of the approved canonical locations")
     v.count("interval_count", pc.intervals, "price-change report: eligible one-hour location intervals",
             f"over {fr._n(pc.intervals, 'eligible one-hour location interval')}")
     controls = r.monitoring.report
@@ -403,9 +502,7 @@ def deck_results(result: object) -> dict[str, Any]:
            "No contract-based control triggered; the open risks need evidence the extract does not hold"
            if clean else "Contract-based controls flag defects to raise with the collection owner",
            "derived: triggered and not-assessable control counts")
-    v.text("answer_line",
-           "Yes for descriptive analysis of this window — not yet for pricing decisions." if clean
-           else "Only after the triggered controls are resolved — and not yet for pricing decisions.",
+    v.text("conclusion", opening_conclusion(clean),
            "derived: readiness status and triggered or not-assessable controls")
     v.text("candidate_phrase", f"{counts[ControlStatus.CANDIDATE_ONLY]:,} candidate "
            + _plural(counts[ControlStatus.CANDIDATE_ONLY], "rule"), "monitoring: candidate-only controls")

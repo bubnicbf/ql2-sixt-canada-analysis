@@ -21,5 +21,16 @@ Rules for editing the template (enforced by `tests/test_presentation_deck.py`):
   placeholder so the deck cannot drift from the analysis.
 - Reference assets only by relative paths inside the built deck directory.
 
+Slide 1 leads with the conclusion rather than the method: title, subtitle, the
+conclusion (`conclusion`, from `opening_conclusion`) and exactly three scope
+facts (`scope_markets`, `scope_locations`, `scope_duration`). The authority
+record, canonical locations, the Vancouver alias, the exact window and the
+supplier and source-mode limits are in its speaker notes. `scope_duration`
+comes from `observation_window`: the elapsed time from the first to the last
+scheduled capture period (endpoints are capture instants, so no hour is added),
+rounded half up to whole days and prefixed "Approximately" unless exact;
+windows under 36 hours are stated in hours. The exact hours, period count and
+first and last periods stay in `deck_results.json`.
+
 To update reveal.js, replace the four files and `LICENSE` from the new npm
 package (`npm pack reveal.js@<version>`), update the version above and rebuild.

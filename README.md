@@ -235,6 +235,12 @@ How it works (`ql2_sixt_canada_analysis.presentation_deck`):
   the page equals the template rendered from the stored results, that the
   stored results equal a fresh computation, that each span matches, and the
   slide structure, speaker notes, assets, figures and labels.
+- Slide 1 states its scope in words generated from the results: the market
+  count from the approved cities, the airport and downtown roles from the
+  location authority, and the duration from `observation_window` (hours from
+  the first to the last scheduled capture, rounded half up to whole days; see
+  `presentation/README.md`). Its speaker notes carry the authority record,
+  alias handling, exact window and scope limits.
 - Rounding: counts are exact (thousands separators); price differences are
   rounded to cents per rental day; percentages of the downtown price to one
   decimal (as in the figure); shares to whole percent and pooled retention to
