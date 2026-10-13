@@ -225,8 +225,13 @@ SCOPE_KEYS = ("scope_markets", "scope_locations", "scope_duration")
 
 def _opening(directory: Path) -> tuple[str, str, str]:
     """``(slide 1 HTML, its visible text, its speaker-notes text)`` of a built deck."""
+    return _slide(directory, "question")
+
+
+def _slide(directory: Path, slide_id: str) -> tuple[str, str, str]:
+    """``(visible HTML, visible text, speaker-notes text)`` of one primary slide of a built deck."""
     page = (directory / "index.html").read_text(encoding="utf-8")
-    start = page.index('<section id="question"')
+    start = page.index(f'<section id="{slide_id}"')
     section = page[start:page.index("</section>", start)]
     notes = section[section.index('<aside class="notes">'):]
     visible = section[:section.index('<aside class="notes">')]
@@ -372,6 +377,105 @@ def test_a_tampered_opening_value_is_detected(deck_copy: Path) -> None:
     display = _results(deck_copy)["values"]["scope_markets"]["display"]
     page.write_text(page.read_text(encoding="utf-8").replace(display, "Four Canadian markets", 1), encoding="utf-8")
     with pytest.raises(pd_.DeckValidationError, match="span scope_markets"):
+        pd_.validate_deck(deck_copy)
+
+
+# ============================================================================ slide 2: analytical judgment
+
+METHOD_TITLE = "How I made the comparisons defensible"
+OLD_METHOD_TITLE = "Every finding rests on one gated pipeline run"
+FLOW_STAGES = ("Raw captures", "Validate coverage", "Resolve location identity", "Match identical offers",
+               "Analyze prices and changes")
+JUDGMENT_CALLS = (
+    ("Compare like with like", "Same city, collection event, rental period, vehicle, currency, and price basis."),
+    ("Exclude incomplete evidence", "Do not impute or silently repair incomplete captures."),
+    ("Separate observation from explanation",
+     "Report synchronized movements as investigation candidates, not proof of repricing or collection failure."),
+)
+PRIORITY = "My priority was to reduce false conclusions, even when that meant excluding data."
+GATES = ("stream contract", "schedule coverage", "job linkage", "reconciliation", "trusted join", "city integrity",
+         "timestamp", "rental-date", "attribute stability", "location authority")
+
+
+def _flat(fragment: str) -> str:
+    return re.sub(r"\s+", " ", html_module.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
+
+
+def test_methodology_slide_shows_the_flow_judgment_calls_and_priority(deck_dir: Path) -> None:
+    visible, text, notes = _slide(deck_dir, "approach")
+    parsed = pd_._parse((deck_dir / "index.html").read_text(encoding="utf-8"))
+    assert parsed.slides[1]["id"] == "approach"
+    assert [h.strip() for h in parsed.slides[1]["headings"]] == [METHOD_TITLE]
+    assert f'<h2 id="approach-title">{METHOD_TITLE}</h2>' in visible and 'aria-labelledby="approach-title"' in visible
+    assert OLD_METHOD_TITLE not in (deck_dir / "index.html").read_text(encoding="utf-8")
+
+    flow = re.search(r'<ol class="flow" aria-label="([^"]+)">(.*?)</ol>', visible, re.DOTALL)
+    assert flow and "flow" in flow.group(1).lower(), "an ordered list with a descriptive accessible label"
+    stages = [_flat(li) for li in re.findall(r"<li>(.*?)</li>", flow.group(2), re.DOTALL)]
+    assert stages == list(FLOW_STAGES)
+    assert not re.search(r"[→➜➔>»›]", _flat(flow.group(2))), "connectors are decorative CSS, not text"
+    css = (deck_dir / "deck.css").read_text(encoding="utf-8")
+    assert re.search(r'#approach \.flow li:not\(:last-child\)::after \{\s*content: "";', css)
+
+    group = re.search(r'<ul class="judgments" aria-label="([^"]+)">(.*?)</ul>', visible, re.DOTALL)
+    assert group and "judgment" in group.group(1).lower()
+    cards = re.findall(r"<li>(.*?)</li>", group.group(2), re.DOTALL)
+    assert len(cards) == len(JUDGMENT_CALLS) == 3
+    for card, (heading, support) in zip(cards, JUDGMENT_CALLS, strict=True):
+        assert re.search(r"<h3>" + re.escape(heading) + "</h3>", card)
+        assert _flat(card) == f"{heading} {support}"
+        assert text.count(heading) == 1, heading
+
+    assert re.search(r'<p class="priority">' + re.escape(PRIORITY) + "</p>", visible)
+    assert text.endswith(PRIORITY) and PRIORITY not in notes, "the priority is visible content, not a note"
+    order = [text.index(t) for t in (METHOD_TITLE, FLOW_STAGES[0], JUDGMENT_CALLS[0][0], PRIORITY)]
+    assert order == sorted(order), "title, flow, judgment calls, then the priority"
+
+
+def test_methodology_slide_keeps_internal_controls_in_the_notes(deck_dir: Path) -> None:
+    visible, text, notes = _slide(deck_dir, "approach")
+    values = _results(deck_dir)["values"]
+    lowered = text.lower()
+    for term in GATES + ("gate", "readiness", "authority", "blocker", "candidate group", "match rate",
+                         "assumption", "eligible", "monitoring control"):
+        assert term not in lowered, term
+    assert values["authority_record"]["display"] not in text
+    assert "data-value" not in visible and not re.search(r"\d", text), "no quantity on the visible slide"
+    assert "<code>" not in visible and 'class="pill' not in visible and "<table" not in visible
+
+    for term in GATES:
+        assert term in notes.lower(), term
+    for kept in (values["authority_record"]["display"], "decision record", "audit", "imput",
+                 "investigation candidate", "not proof of repricing, supplier behaviour or a collection failure",
+                 "not actual supplier availability", "repeated measurements",
+                 "one supplier and one apparent source mode",
+                 "name, type, transmission, seats and bags", "similarity matching", "Transition."):
+        assert kept in notes, kept
+    note_html = _slide_html(deck_dir, "approach").split('<aside class="notes">')[1]
+    note_spans = re.findall(r'data-value="([a-z0-9_]+)"', note_html)
+    for key in ("matched_pairs", "candidate_groups", "match_rate", "governed_excluded_captures", "interval_count",
+                "control_count", "readiness_status", "authority_record"):
+        assert key in note_spans, key
+        assert values[key]["display"] in notes, key
+    assert len(notes.split()) >= 300
+
+
+def _slide_html(directory: Path, slide_id: str) -> str:
+    page = (directory / "index.html").read_text(encoding="utf-8")
+    start = page.index(f'<section id="{slide_id}"')
+    return page[start:page.index("</section>", start)]
+
+
+def test_a_tampered_methodology_note_value_is_detected(deck_copy: Path) -> None:
+    page = deck_copy / "index.html"
+    display = _results(deck_copy)["values"]["matched_pairs"]["display"]
+    text = page.read_text(encoding="utf-8")
+    start = text.index('<section id="approach"')
+    span = f'data-value="matched_pairs">{display}<'
+    position = text.index(span, start)
+    page.write_text(text[:position] + span.replace(display, display + "0") + text[position + len(span):],
+                    encoding="utf-8")
+    with pytest.raises(pd_.DeckValidationError, match="span matched_pairs"):
         pd_.validate_deck(deck_copy)
 
 

@@ -58,54 +58,66 @@
       </aside>
     </section>
 
-    <!-- Slide: data, scope, assumptions and approach -->
+    <!-- Slide: analysis flow, judgment calls and analytical priority -->
     <section id="approach" aria-labelledby="approach-title">
-      <h2 id="approach-title">Every finding rests on one gated pipeline run</h2>
-      <div class="two-col">
-        <ol class="steps" aria-label="Analytical approach">
-          <li><h3>Gate the extract</h3>
-            <p>Stream contract, schedule coverage, job linkage, reconciliation, trusted join, city, timestamp and
-              rental-date rules, attribute stability and location authority.
-              Status <strong>{{readiness_status}}</strong> under <code>{{authority_record}}</code>.</p></li>
-          <li><h3>Keep the eligible population</h3>
-            <p>Only pricing-eligible offers enter a conclusion. Governed exclusion:
-              <strong>{{governed_excluded_captures}}</strong> Calgary location-captures from one incomplete parent
-              capture.</p></li>
-          <li><h3>Compare like with like</h3>
-            <p>A matched pair is the same city, collection job, rental period, exact product, currency and price
-              basis, with one airport and one downtown offer: <strong>{{matched_pairs}}</strong> pairs from
-              {{candidate_groups}} candidate groups (match rate {{match_rate}}).</p></li>
-          <li><h3>Track change, then monitor</h3>
-            <p>Price and assortment changes over <strong>{{interval_count}}</strong> consecutive eligible one-hour
-              location intervals; <strong>{{control_count}}</strong> monitoring controls evaluated on the same
-              run.</p></li>
-        </ol>
-        <div class="panel">
-          <h3>Assumptions</h3>
-          <ul class="compact">
-            <li>Listed prices as returned (exact cents, currency and price basis) — not total customer cost.</li>
-            <li>Products match on exact identity: name, type, transmission, seats, bags. No similarity matching.</li>
-            <li>Hourly captures of one product are repeated measurements, so results are associational.</li>
-            <li>Visible assortment is what the collection returned, not supplier availability.</li>
-          </ul>
-        </div>
-      </div>
+      <h2 id="approach-title">How I made the comparisons defensible</h2>
+      <ol class="flow" aria-label="Analysis flow, in order from raw captures to analysis">
+        <li>Raw captures</li>
+        <li>Validate coverage</li>
+        <li>Resolve location identity</li>
+        <li>Match identical offers</li>
+        <li>Analyze prices and changes</li>
+      </ol>
+      <ul class="judgments" aria-label="Three judgment calls">
+        <li>
+          <h3>Compare like with like</h3>
+          <p>Same city, collection event, rental period, vehicle, currency, and price basis.</p>
+        </li>
+        <li>
+          <h3>Exclude incomplete evidence</h3>
+          <p>Do not impute or silently repair incomplete captures.</p>
+        </li>
+        <li>
+          <h3>Separate observation from explanation</h3>
+          <p>Report synchronized movements as investigation candidates, not proof of repricing or collection
+            failure.</p>
+        </li>
+      </ul>
+      <p class="priority">My priority was to reduce false conclusions, even when that meant excluding data.</p>
       <aside class="notes">
-        <p><strong>Purpose.</strong> Establish why the numbers that follow can be trusted, and exactly what each one
-          counts.</p>
-        <p><strong>Say.</strong> Nothing is analysed until every foundational gate passes. In this run the readiness
-          status is {{readiness_status}} under the approved decision record {{authority_record}}. Then we keep only
-          the pricing-eligible population. The one governed exclusion is an incomplete Calgary parent capture, which
-          removes {{governed_excluded_captures}} location-captures — both Calgary streams for that hour — from
-          pricing, while staying in the audit population.</p>
-        <p><strong>Numbers.</strong> {{matched_pairs}} matched pairs out of {{candidate_groups}} candidate groups,
-          a match rate of {{match_rate}}. Unmatched or ambiguous groups are excluded rather than guessed. Change
-          analysis uses {{interval_count}} consecutive eligible one-hour intervals across locations, and the
-          {{control_count}} monitoring controls run on the same single pipeline result, so no section mixes
-          evidence from different runs.</p>
-        <p><strong>Caveat.</strong> Because the same product is captured every hour, observations are not
-          independent; we describe differences and do not make causal claims.</p>
-        <p><strong>Transition.</strong> First result: how airport and downtown prices compare for the same car.</p>
+        <p><strong>Purpose.</strong> Show how I approached an ambiguous dataset before showing any result: every
+          number that follows is only as good as the decisions that made the comparisons fair.</p>
+        <p><strong>Say.</strong> I started from the raw captures exactly as returned. I then checked
+          coverage — whether each scheduled collection returned the expected locations at the expected hourly
+          cadence. Next I resolved location identity, so that each feed maps to one approved canonical location.
+          Only then did I match identical offers, and only matched or eligible evidence went into the price and
+          change analysis.</p>
+        <p><strong>Why exact matching.</strong> A matched pair shares the city, the collection event (the same
+          collection job), the rental period, the exact vehicle identity — name, type, transmission, seats and bags
+          — the currency and the price basis, with one airport and one downtown offer. I avoided similarity
+          matching by vehicle class or near-identical names because it would mix product differences into the
+          price gap. That gives {{matched_pairs}} pairs from {{candidate_groups}} candidate groups, a match rate of
+          {{match_rate}}; unmatched or ambiguous groups are excluded rather than guessed.</p>
+        <p><strong>Why exclude rather than impute.</strong> One Calgary parent capture was incomplete, so its
+          {{governed_excluded_captures}} location-captures are excluded from pricing instead of being filled in.
+          Imputing would manufacture prices and changes that were never observed. The exclusion stays in the raw
+          and audit populations, so it is counted and traceable even though it does not enter a pricing
+          conclusion.</p>
+        <p><strong>Observation versus explanation.</strong> When several products at one location move together,
+          I report an investigation candidate, not proof of repricing, supplier behaviour or a collection failure;
+          telling those apart needs collection logs or source snapshots. Likewise, visible assortment is what the
+          collection returned, not actual supplier availability. Hourly observations of the same products are
+          repeated measurements, so the results are descriptive, not independent causal evidence. And with one
+          supplier and one apparent source mode, nothing here speaks to competitors or channels.</p>
+        <p><strong>For questions: the gates behind the flow.</strong> Before any analysis the extract passed the
+          stream contract, schedule coverage, job linkage, job-to-detail reconciliation, the trusted join, city
+          integrity, timestamp authority, rental-date rules, vehicle-attribute stability and the location
+          authority. Readiness is {{readiness_status}} under the approved decision record {{authority_record}}.
+          Change analysis uses {{interval_count}} consecutive eligible one-hour location intervals, and
+          {{control_count}} monitoring controls run on the same single pipeline result. Prices are compared as
+          listed — exact cents, currency and price basis — not as total customer cost.</p>
+        <p><strong>Transition.</strong> With like-for-like pairs in place, the first result: how airport and
+          downtown prices compare for the same car.</p>
       </aside>
     </section>
 

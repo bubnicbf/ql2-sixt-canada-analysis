@@ -32,5 +32,12 @@ rounded half up to whole days and prefixed "Approximately" unless exact;
 windows under 36 hours are stated in hours. The exact hours, period count and
 first and last periods stay in `deck_results.json`.
 
+Slide 2 explains the analytical judgment rather than the control system: a
+five-stage flow (an ordered list with CSS-only connectors), three judgment
+calls and the closing priority statement. It shows no quantities; the
+individual readiness gates, the decision record and the matched-pair,
+exclusion, interval and control counts are in its speaker notes, as
+placeholders. Its styles are scoped to `#approach`.
+
 To update reveal.js, replace the four files and `LICENSE` from the new npm
 package (`npm pack reveal.js@<version>`), update the version above and rebuild.
