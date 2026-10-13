@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sixt Canada Rate-Feed Review</title>
+  <meta name="description" content="From hourly rate feeds to defensible pricing signals: whether Sixt Canada data can support pricing analysis and ongoing monitoring, with matched airport-versus-downtown pricing, price and assortment changes, monitoring and recommendations from one gated pipeline run.">
+  <link rel="stylesheet" href="vendor/reveal.js/reset.css">
+  <link rel="stylesheet" href="vendor/reveal.js/reveal.css">
+  <link rel="stylesheet" href="deck.css">
+</head>
+<body>
+<div class="reveal">
+  <div class="slides">
+
+    <!-- Slide: title, conclusion and scope -->
+    <section id="question" class="slide-title" aria-labelledby="question-title" aria-describedby="question-conclusion">
+      <p class="kicker">QL2 · Sixt Canada rate-feed analysis</p>
+      <h1 id="question-title">From hourly rate feeds to defensible pricing signals</h1>
+      <p class="subtitle">Assessing whether Sixt Canada data can support pricing analysis and ongoing monitoring</p>
+      <div class="conclusion" id="question-conclusion" role="note" aria-label="Conclusion">
+        <p class="conclusion-label">Conclusion</p>
+        <p class="conclusion-text">{{conclusion}}</p>
+      </div>
+      <ul class="scope" aria-label="Scope of the analysis">
+        <li>{{scope_markets}}</li>
+        <li>{{scope_locations}}</li>
+        <li>{{scope_duration}}</li>
+      </ul>
+      <p class="footer-note">Confidential: derived from proprietary QL2 data.</p>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Open with the answer, so the audience knows from the first minute what the
+          analysis supports and what it does not, before any method or chart.</p>
+        <p><strong>Say.</strong> QL2 collects hourly rate feeds; the business question was whether this Sixt Canada
+          feed is complete and consistent enough to use, and which pricing and visible-assortment signals still hold
+          once coverage, timestamps, locations and product identity are controlled. My conclusion: {{conclusion}}</p>
+        <p><strong>Why monitoring is supported.</strong> Every foundational readiness gate passed under the approved
+          decision record {{authority_record}}, and {{controls_passed}} of the {{control_count}} monitoring controls
+          passed with {{controls_triggered}} triggered. The feed is internally consistent enough to describe this
+          window and to monitor future extracts with the same contract-based checks.</p>
+        <p><strong>Why pricing needs more evidence.</strong> The window is short, the premiums are associational,
+          {{censored}} end-of-window price changes are still unconfirmed, and without collection logs or source
+          snapshots a synchronized move cannot be classified as repricing or as a collection defect. I treated
+          incomplete evidence as a reason to narrow the conclusion rather than fill the gap with assumptions.</p>
+        <p><strong>Exact window.</strong> Scheduled captures run from {{window_start}} to {{window_end}}:
+          {{observation_hours}} hours from the first to the last capture, rounded to whole days on the slide, with
+          {{hours_per_location}} scheduled hourly captures per location.</p>
+        <p><strong>Locations.</strong> The analysis covers {{city_count}} cities and {{location_count}} canonical
+          locations, one airport and one downtown branch per city. A canonical location is the approved location
+          identity after alias handling: Vancouver Thurlow is combined into Vancouver Downtown under the same
+          decision record.</p>
+        <p><strong>Limits of the evidence.</strong> The files hold one supplier and one apparent source mode, so
+          competitor, channel and win/meet/loss conclusions are outside the available evidence. Visible assortment
+          means the products the collection returned, not actual supplier availability. I separated what the feed
+          can describe from the commercial decisions it cannot yet support.</p>
+        <p><strong>Transition.</strong> Next, how the data was gated and what each number in the deck refers
+          to.</p>
+      </aside>
+    </section>
+
+    <!-- Slide: analysis flow, judgment calls and analytical priority -->
+    <section id="approach" aria-labelledby="approach-title">
+      <h2 id="approach-title">How I made the comparisons defensible</h2>
+      <ol class="flow" aria-label="Analysis flow, in order from raw captures to analysis">
+        <li>Raw captures</li>
+        <li>Validate coverage</li>
+        <li>Resolve location identity</li>
+        <li>Match identical offers</li>
+        <li>Analyze prices and changes</li>
+      </ol>
+      <ul class="judgments" aria-label="Three judgment calls">
+        <li>
+          <h3>Compare like with like</h3>
+          <p>Same city, collection event, rental period, vehicle, currency, and price basis.</p>
+        </li>
+        <li>
+          <h3>Exclude incomplete evidence</h3>
+          <p>Do not impute or silently repair incomplete captures.</p>
+        </li>
+        <li>
+          <h3>Separate observation from explanation</h3>
+          <p>Report synchronized movements as investigation candidates, not proof of repricing or collection
+            failure.</p>
+        </li>
+      </ul>
+      <p class="priority">My priority was to reduce false conclusions, even when that meant excluding data.</p>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Show how I approached an ambiguous dataset before showing any result: every
+          number that follows is only as good as the decisions that made the comparisons fair.</p>
+        <p><strong>Say.</strong> I started from the raw captures exactly as returned. I then checked
+          coverage — whether each scheduled collection returned the expected locations at the expected hourly
+          cadence. Next I resolved location identity, so that each feed maps to one approved canonical location.
+          Only then did I match identical offers, and only matched or eligible evidence went into the price and
+          change analysis.</p>
+        <p><strong>Why exact matching.</strong> A matched pair shares the city, the collection event (the same
+          collection job), the rental period, the exact vehicle identity — name, type, transmission, seats and bags
+          — the currency and the price basis, with one airport and one downtown offer. I avoided similarity
+          matching by vehicle class or near-identical names because it would mix product differences into the
+          price gap. That gives {{matched_pairs}} pairs from {{candidate_groups}} candidate groups, a match rate of
+          {{match_rate}}; unmatched or ambiguous groups are excluded rather than guessed.</p>
+        <p><strong>Why exclude rather than impute.</strong> One Calgary parent capture was incomplete, so its
+          {{governed_excluded_captures}} location-captures are excluded from pricing instead of being filled in.
+          Imputing would manufacture prices and changes that were never observed. The exclusion stays in the raw
+          and audit populations, so it is counted and traceable even though it does not enter a pricing
+          conclusion.</p>
+        <p><strong>Observation versus explanation.</strong> When several products at one location move together,
+          I report an investigation candidate, not proof of repricing, supplier behaviour or a collection failure;
+          telling those apart needs collection logs or source snapshots. Likewise, visible assortment is what the
+          collection returned, not actual supplier availability. Hourly observations of the same products are
+          repeated measurements, so the results are descriptive, not independent causal evidence. And with one
+          supplier and one apparent source mode, nothing here speaks to competitors or channels.</p>
+        <p><strong>For questions: the gates behind the flow.</strong> Before any analysis the extract passed the
+          stream contract, schedule coverage, job linkage, job-to-detail reconciliation, the trusted join, city
+          integrity, timestamp authority, rental-date rules, vehicle-attribute stability and the location
+          authority. Readiness is {{readiness_status}} under the approved decision record {{authority_record}}.
+          Change analysis uses {{interval_count}} consecutive eligible one-hour location intervals, and
+          {{control_count}} monitoring controls run on the same single pipeline result. Prices are compared as
+          listed — exact cents, currency and price basis — not as total customer cost.</p>
+        <p><strong>Transition.</strong> With like-for-like pairs in place, the first result: how airport and
+          downtown prices compare for the same car.</p>
+      </aside>
+    </section>
+
+    <!-- Slide: first major result — matched airport versus downtown pricing -->
+    <section id="pricing" aria-labelledby="pricing-title">
+      <h2 id="pricing-title">{{matched_headline}}</h2>
+      <figure class="figure-wide">
+        <img src="figures/matched_premiums.png" alt="{{=matched_alt}}" width="{{=matched_premiums_width}}" height="{{=matched_premiums_height}}">
+        <figcaption>Premium = airport minus downtown listed price, same product, collection job and rental period;
+          percentage of the downtown price. Source: matched-location pricing, {{=authority_record}}.</figcaption>
+      </figure>
+      <ul class="cards" aria-label="Median premium by city">
+        {{>city_cards}}
+      </ul>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Answer the pricing-structure question with the cleanest comparison the data
+          allows.</p>
+        <p><strong>Say.</strong> Each point is one matched pair: the same car, same collection job and same rental
+          dates, listed at the airport and downtown. Airport listings are {{premium_sign_phrase}} at the median. The widest gap is
+          {{top_city_name}}: a median premium of {{top_city_median}}, or {{top_city_median_pct}} of the downtown
+          price. Across all {{matched_pairs}} pairs, the airport is higher in {{overall_positive_share}} of them,
+          with an overall median of {{overall_median}}.</p>
+        <p><strong>Worth noticing.</strong> In {{top_city_name}}, half of all pairs sit between
+          {{top_city_pct_iqr}} of the downtown price: {{top_city_spread_note}}. That is a lead for revenue
+          management, not a conclusion.</p>
+        <p><strong>Definitions and rounding.</strong> Dollar values are rounded to cents per rental day and
+          percentages to one decimal, matching the figure annotations; the interquartile range in these notes uses
+          two decimals so its narrow width is visible.</p>
+        <p><strong>Caveat.</strong> These are associational differences in listed prices over one short window, not
+          causal effects or total customer cost.</p>
+        <p><strong>Transition.</strong> Levels are one thing; next, how prices and assortment moved hour to hour.</p>
+      </aside>
+    </section>
+
+    <!-- Slide: price-change heatmap and three summary findings -->
+    <section id="changes" aria-labelledby="changes-title">
+      <h2 id="changes-title">Price changes were concentrated, while visible assortment remained stable</h2>
+      <figure class="figure-wide">
+        <img src="figures/price_change_heatmap.png" alt="{{=heatmap_alt}}" width="{{=price_change_heatmap_width}}" height="{{=price_change_heatmap_height}}">
+        <figcaption>Rows are locations and columns are hourly comparisons. Darker cells indicate more observed price
+          moves; hatched cells have no comparable prior capture.</figcaption>
+      </figure>
+      <ul class="summary" aria-label="Summary of price changes and visible assortment">
+        <li>
+          <p class="value">{{pc_total}}</p>
+          <p class="label">Observed price changes</p>
+          <p class="detail">{{pc_direction_label}} · {{pc_increases}} up, {{pc_decreases}} down</p>
+        </li>
+        <li>
+          <p class="value">{{sync_intervals}}</p>
+          <p class="label">Intervals with coordinated price moves</p>
+          <p class="detail">of {{interval_count}} hourly location comparisons</p>
+        </li>
+        <li>
+          <p class="value">{{retained_share}}</p>
+          <p class="label">Products retained hour to hour</p>
+          <p class="detail">pooled across consecutive comparable hours</p>
+        </li>
+      </ul>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Show how prices and the visible product range moved hour to hour, in three
+          findings the panel can take away, while keeping the detailed classifications ready for questions.</p>
+        <p><strong>Say.</strong> Each offer is compared with the same location's previous comparable capture, one
+          hour earlier. I observed {{pc_total}} price changes — {{pc_increases}} increases and {{pc_decreases}}
+          decreases, so {{pc_direction_phrase}}; the direction is simply whichever count is larger, and "evenly
+          split" if they are equal. Technically these are observed price-change candidates: real differences in
+          listed prices, not causally explained or commercially confirmed events. They sit in
+          {{changed_intervals}} of the {{interval_count}} eligible one-hour location intervals, which is why I call
+          them concentrated ({{pc_spread_phrase}}). There were also {{assortment_events}} products appearing or
+          disappearing.</p>
+        <p><strong>Coordinated moves.</strong> An interval has coordinated price moves when at least two products at
+          the same location moved in the same direction during the same eligible hourly interval; that happened in
+          {{sync_intervals}} intervals. "Coordinated" describes co-movement only. It does not imply intentional
+          coordination, deliberate repricing or a collection defect; each one is an investigation candidate, and
+          telling those explanations apart needs collection logs or source snapshots.</p>
+        <p><strong>What happened next (for questions).</strong> Of the {{with_following}} changes that have a
+          comparable following hour, {{held}} held — the new price stayed the same an hour later; {{continued}}
+          continued — the price kept moving in the same direction; and {{reverted}} reverted — the price moved back.
+          Another {{censored}} changes are awaiting the next capture: they happened at the last capture in the
+          window, so there is no following hour to check yet. Technically they are right-censored at the final
+          capture, and I excluded them from persistence conclusions rather than guess their outcome.</p>
+        <p><strong>Assortment.</strong> Products retained hour to hour is the pooled share of products seen in one
+          comparable hour that were still returned in the next: {{retained_products}} retained out of
+          {{previous_products}}, which is {{retained_share}} (the pooled retention ratio is {{retention}}). It is an
+          interval-level measure across {{assessed_intervals}} assessed intervals, not the share of unique products
+          kept over the whole window. There were {{additions}} additions and {{removals}} removals, and
+          {{drop_intervals_phrase}} with an abrupt drop, {{drop_sharing_phrase}}; {{coincident_intervals}} intervals
+          had a price change at the same location as an assortment change. With the unusual-drop policy
+          {{policy_status}}, drops remain review candidates.</p>
+        <p><strong>Caveat.</strong> Visible assortment is what the collection returned, not confirmed supplier
+          availability. The data identifies patterns; it does not establish their cause.</p>
+        <p><strong>Transition.</strong> So what should QL2 trust, what should it investigate, and what should it not
+          conclude yet?</p>
+      </aside>
+    </section>
+
+    <!-- Slide: decision boundaries (use now, investigate, cannot conclude yet) -->
+    <section id="limits" aria-labelledby="limits-title">
+      <h2 id="limits-title">What I would trust today—and what I would not</h2>
+      <p class="framing">I separated what the evidence supports today from the questions that still need more
+        data.</p>
+      <div class="boundaries" role="group" aria-label="Decision boundaries">
+        <div class="boundary boundary-use" role="group" aria-labelledby="boundary-use">
+          <h3 id="boundary-use">Use now</h3>
+          <ul>
+            <li>Feed coverage and contract monitoring.</li>
+            <li>Descriptive airport-versus-downtown benchmarks.</li>
+            <li>Identification of patterns requiring investigation.</li>
+          </ul>
+        </div>
+        <div class="boundary boundary-investigate" role="group" aria-labelledby="boundary-investigate">
+          <h3 id="boundary-investigate">Investigate</h3>
+          <ul>
+            <li>The largest market premium.</li>
+            <li>Synchronized price movements.</li>
+            <li>Abrupt assortment drops.</li>
+          </ul>
+        </div>
+        <div class="boundary boundary-open" role="group" aria-labelledby="boundary-open">
+          <h3 id="boundary-open">Cannot conclude yet</h3>
+          <ul>
+            <li>Why a price changed.</li>
+            <li>Whether a pattern is normal over time.</li>
+            <li>Competitive position or win/meet/loss.</li>
+            <li>Total customer cost.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="boundary-note">Use the feed to monitor and prioritize investigations—not to set prices or explain why
+        they changed.</p>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Translate the control framework into decision boundaries: what QL2 can use
+          now, what deserves investigation, and which conclusions would go beyond the evidence. I separated what the
+          evidence can support today from the questions that still need more data.</p>
+        <p><strong>Say.</strong> Use now: coverage and contract monitoring are reliable enough to operationalize
+          because they test fixed, approved expectations — the expected locations, job-to-detail counts, aliasing,
+          timestamp offsets and product attributes — and do not need a threshold calibrated on history. The
+          airport-versus-downtown comparisons are descriptive benchmarks of listed prices for identical offers;
+          they are associational, not causal pricing guidance. Identifying patterns is useful before any alert
+          threshold is approved, because it tells us where to look first.</p>
+        <p><strong>Say: investigate.</strong> The largest premium, {{top_city_name}} at {{top_city_median}}, is an
+          investigation lead, not a pricing recommendation: one supplier's listed prices over a short window cannot
+          explain it. Synchronized price movements are not evidence of intentional repricing; they could also come from
+          how a capture was collected. Abrupt assortment drops do not show that supplier availability fell:
+          visible assortment is only what the collection returned. Telling commercial changes from collection
+          behaviour needs collection logs or source snapshots.</p>
+        <p><strong>Say: cannot conclude yet.</strong> These are questions the extract cannot answer, not failed
+          analyses. About {{observation_hours}} hours of captures cannot establish normal variation or seasonality.
+          One supplier and one apparent source mode cannot support competitive-position or win/meet/loss
+          conclusions. Listed prices are not total customer cost, which also includes taxes, fees and insurance. And
+          {{censored}} right-censored changes at the end of the window need the subsequent captures before their
+          persistence is known.</p>
+        <p><strong>For questions: the monitoring controls.</strong> {{monitoring_headline}}. Of the
+          {{control_count}} controls, {{controls_passed}} passed, {{controls_triggered}} triggered,
+          {{controls_candidate_only}} are candidate-only, {{controls_confirmation}} confirmation-required and
+          {{controls_not_assessable}} not assessable. Candidate-only means the rule has no approved method or
+          threshold, so it lists review candidates, never alerts. Confirmation-required means an observation at the
+          end of the window needs the next eligible collection. Not assessable is never treated as a pass. The full
+          table, generated from this run:</p>
+        {{>monitoring_notes_table}}
+        <p><strong>Transition.</strong> Those boundaries set the order of what I would do next.</p>
+      </aside>
+    </section>
+
+    <!-- Slide: prioritized next steps, one-week plan and closing statement -->
+    <section id="conclusions" aria-labelledby="conclusions-title">
+      <h2 id="conclusions-title">Use the feed for descriptive monitoring now; earn trust for pricing decisions next</h2>
+      <div class="plan">
+        <div class="next-steps">
+          <h3 id="next-title">What I would do next</h3>
+          <ol class="priorities" role="list" aria-labelledby="next-title">
+            <li>
+              <h4>Productionize the reliable checks</h4>
+              <p>Run coverage, reconciliation, timestamp, location, and product-identity checks on every
+                delivery.</p>
+            </li>
+            <li>
+              <h4>Investigate the largest commercial signal</h4>
+              <p>Review the largest airport/downtown premium with revenue management.
+                <span class="lead">Largest median premium: {{top_city_name}}, {{top_city_median}}.</span></p>
+            </li>
+            <li>
+              <h4>Close the evidence gaps</h4>
+              <p>Request longer history, subsequent captures, collection logs, competitor prices, and total-cost
+                components.</p>
+            </li>
+            <li>
+              <h4>Calibrate monitoring thresholds</h4>
+              <p>Establish normal variation before converting candidates into alerts.</p>
+            </li>
+          </ol>
+        </div>
+        <div class="one-week" role="group" aria-labelledby="week-title">
+          <h3 id="week-title">With one more week, I would…</h3>
+          <ul>
+            <li><span class="when">Start now</span> Build a longer-window baseline that extends with each new
+              delivery.</li>
+            <li><span class="when">Once history arrives</span> Backtest candidate alert thresholds against it.</li>
+            <li><span class="when">With partners</span> Investigate the {{top_city_name}} premium with commercial and
+              operational context.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="closing">The feed is reliable enough to tell us where to look, but not yet complete enough to tell us
+        what commercial action to take.</p>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Close on a decision and a plan: what the analysis supports today, what I would
+          do first, and where the boundary sits between investigation and commercial action.</p>
+        <p><strong>Say.</strong> The decision is unchanged from the opening: the feed supports descriptive
+          monitoring now. Every foundational gate passed under {{authority_record}} and {{controls_passed}} of the
+          {{control_count}} controls passed with {{controls_triggered}} triggered. The airport listing is higher in
+          {{overall_positive_share}} of the {{matched_pairs}} matched pairs, widest in {{top_city_name}} at
+          {{top_city_median}} ({{top_city_median_pct}}), {{top_city_spread_phrase}}. I observed {{pc_total}}
+          price-change candidates, {{pc_direction_phrase}}, with {{sync_intervals}} synchronized intervals and
+          assortment retention of {{retention}}. None of that is yet a reason to change a price.</p>
+        <p><strong>Why this order.</strong> I ranked the actions by what the evidence already supports. The
+          contract-based checks come first because they passed on this extract, need no new data or threshold, and
+          protect every later use of the feed. The premium investigation is second because it is the largest
+          commercial signal, but it is a lead: listed prices from one supplier over a short window cannot say whether
+          the gap is a deliberate strategy, a fee structure or a capture artefact. I would bring revenue management
+          and the pricing analysts for the commercial context, and the collection owner for how those captures were
+          produced.</p>
+        <p><strong>Why each evidence gap matters.</strong> Longer history is needed to establish normal variation
+          and seasonality; a few days cannot define normal. Subsequent captures resolve the {{censored}}
+          right-censored changes at the end of the window. Collection logs separate market behaviour from collection
+          behaviour, such as retries or partial captures. Competitor prices are required for any competitive-position
+          or win/meet/loss conclusion, because this extract holds one supplier. Total-cost components — taxes, fees
+          and insurance — are needed before a comparison is customer-relevant rather than listed-price only.</p>
+        <p><strong>Why thresholds come last.</strong> {{candidate_phrase}} are candidate-only and
+          {{confirmation_phrase}} waits for the next collection. Turning candidates into alerts before thresholds are
+          calibrated and backtested on enough history would produce alerts nobody can trust, so they stay review
+          candidates until then.</p>
+        <p><strong>With one more week.</strong> I would start immediately on a longer-window baseline that grows
+          with each delivery, using the same gates. Once more history arrives, I would backtest candidate thresholds
+          against labelled normal periods and known incidents. If revenue management and the collection owner are
+          available, I would review the {{top_city_name}} premium with them. Longer history and operational evidence
+          depend on others providing them; I would not assume they already exist.</p>
+        <p><strong>Close.</strong> The feed is reliable enough to tell us where to look, but not yet complete enough
+          to tell us what commercial action to take.</p>
+        <p><strong>Transition.</strong> I am happy to go deeper on any gate, the matching rules or the premium
+          investigation — what would you like to explore?</p>
+      </aside>
+    </section>
+
+  </div>
+</div>
+<script src="vendor/reveal.js/reveal.js"></script>
+<script src="vendor/reveal.js/plugin/notes/notes.js"></script>
+<script src="deck.js"></script>
+</body>
+</html>

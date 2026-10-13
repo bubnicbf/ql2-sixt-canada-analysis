@@ -1,0 +1,173 @@
+/* Sixt Canada rate-feed review deck.
+ * Colours follow the analysis figures: blue increases / first city, orange decreases / second city,
+ * green third city; ink and muted greys from the plotting modules. System fonts only (no downloads). */
+
+:root {
+  --ink: #0b0b0b;
+  --muted: #52514e;
+  --faint: #8a8984;
+  --rule: #e4e3df;
+  --paper: #ffffff;
+  --panel: #f7f6f3;
+  --blue: #2a78d6;
+  --orange: #eb6834;
+  --green: #1baf7a;
+  --pass: #1a7f55;
+  --pass-bg: #e3f4ec;
+  --warn: #9a5b00;
+  --warn-bg: #fdf0dc;
+  --info: #1f5fae;
+  --info-bg: #e6effa;
+  --fail: #b3261e;
+  --fail-bg: #fbe6e4;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html, body { background: var(--paper); }
+
+.reveal {
+  font-family: var(--font);
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--ink);
+  line-height: 1.35;
+}
+
+.reveal .slides { text-align: left; }
+
+.reveal .slides > section {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 34px 50px 26px;
+  overflow: hidden;
+}
+
+.reveal h1, .reveal h2, .reveal h3 {
+  font-family: var(--font);
+  color: var(--ink);
+  margin: 0;
+  text-transform: none;
+  letter-spacing: -0.01em;
+}
+
+.reveal h1 { font-size: 58px; line-height: 1.1; font-weight: 700; max-width: 1000px; }
+.reveal h2 { font-size: 31px; line-height: 1.2; font-weight: 700; margin-bottom: 18px; max-width: 1120px; }
+.reveal h3 { font-size: 21px; font-weight: 650; margin-bottom: 6px; }
+.reveal p { margin: 0 0 8px; }
+.reveal code { white-space: nowrap; font-family: var(--mono); font-size: 0.86em; background: var(--panel); padding: 1px 6px; border-radius: 4px; }
+.reveal strong { font-weight: 650; }
+.reveal ul, .reveal ol { margin: 0; padding: 0; }
+.reveal .v { font-variant-numeric: tabular-nums; }
+
+/* Title slide: kicker, title, subtitle, conclusion (the primary takeaway), three scope facts, footer */
+.slide-title { display: flex; flex-direction: column; justify-content: center; }
+.kicker { color: var(--blue); font-weight: 650; font-size: 18px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 16px !important; }
+.slide-title h1 { max-width: 900px; text-wrap: balance; }
+.subtitle { font-size: 25px; color: var(--muted); max-width: 1120px; margin: 16px 0 30px !important; }
+.conclusion { border-left: 8px solid var(--blue); background: var(--info-bg); padding: 18px 26px 20px; border-radius: 0 12px 12px 0; max-width: 1080px; margin-bottom: 26px; }
+.conclusion-label { font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--info); margin-bottom: 6px !important; }
+.conclusion-text { font-size: 30px; line-height: 1.3; font-weight: 700; color: var(--ink); margin: 0 !important; }
+.scope { list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 0; font-size: 19px; color: var(--muted); }
+.scope li { padding: 0 18px; border-left: 1px solid var(--rule); }
+.scope li:first-child { padding-left: 0; border-left: 0; }
+.footer-note { position: absolute; bottom: 26px; left: 50px; right: 50px; font-size: 14px; color: var(--faint); }
+
+/* Slide 2 (#approach): analysis flow, three judgment calls, priority callout. Scoped to this slide only. */
+#approach .flow { list-style: none; display: grid; grid-template-columns: repeat(5, 1fr); gap: 36px; margin: 14px 0 40px !important; }
+#approach .flow li {
+  position: relative; display: flex; align-items: center; justify-content: center; min-height: 92px;
+  padding: 12px 14px; background: var(--info-bg); border: 1px solid #c3d6f0; border-radius: 10px;
+  font-size: 21px; font-weight: 650; line-height: 1.25; text-align: center; color: var(--ink);
+}
+/* Decorative chevron between stages: empty generated content, so nothing is announced. */
+#approach .flow li:not(:last-child)::after {
+  content: ""; position: absolute; right: -24px; top: 50%; width: 11px; height: 11px;
+  border-top: 3px solid var(--blue); border-right: 3px solid var(--blue); transform: translateY(-50%) rotate(45deg);
+}
+#approach .judgments { list-style: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 40px !important; }
+#approach .judgments li { background: var(--panel); border: 1px solid var(--rule); border-top: 5px solid var(--blue); border-radius: 10px; padding: 20px 24px 22px; }
+#approach .judgments h3 { font-size: 24px; margin-bottom: 10px; }
+#approach .judgments p { font-size: 20px; color: var(--muted); margin: 0 !important; }
+#approach .priority { border-left: 6px solid var(--ink); padding: 10px 0 10px 22px; font-size: 26px; font-weight: 600; color: var(--ink); max-width: 1180px; margin: 0 !important; }
+
+/* Figures */
+.figure-wide { margin: 0; }
+.figure-wide img { display: block; width: auto; max-width: 100%; height: auto; max-height: 470px; object-fit: contain; object-position: left top; margin: 0; }
+#changes .figure-wide img { max-height: 478px; }
+#pricing .figure-wide img { max-height: 440px; }
+.reveal figcaption { font-size: 14px; color: var(--muted); margin-top: 4px; }
+
+/* City cards and stat tiles */
+.cards { list-style: none; display: grid; gap: 14px; margin-top: 10px !important; }
+.cards { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.city-card { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 10px 16px; }
+.city-card { border-top: 5px solid var(--blue); }
+.city-card:nth-child(2) { border-top-color: var(--orange); }
+.city-card:nth-child(3) { border-top-color: var(--green); }
+.city-card h3 { font-size: 16px; color: var(--muted); margin-bottom: 0; }
+.city-card .cc-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.city-card .big { font-size: 24px; white-space: nowrap; }
+.city-card p { font-size: 14.5px; }
+.city-card p { font-size: 15.5px; margin: 0 !important; color: var(--muted); }
+.reveal .big { font-size: 28px; font-weight: 700; color: var(--ink); line-height: 1.2; }
+.muted { color: var(--faint) !important; }
+
+/* Slide 4 (#changes): heatmap, caption and three equal summary tiles. Scoped to this slide. */
+#changes h2 { font-size: 28px; margin-bottom: 12px; }
+#changes figcaption { font-size: 15px; margin-top: 2px; }
+#changes .summary { list-style: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 10px !important; }
+#changes .summary li { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 8px 18px 10px; }
+#changes .summary p { margin: 0 !important; }
+#changes .summary .value { font-size: 32px; font-weight: 700; line-height: 1.15; color: var(--ink); }
+#changes .summary .label { font-size: 18px; font-weight: 650; color: var(--ink); }
+#changes .summary .detail { font-size: 15px; color: var(--muted); }
+
+/* Slide 5 (#limits): three decision-boundary columns. Scoped; the control table lives in the speaker notes. */
+#limits .framing { font-size: 22px; color: var(--muted); margin: -4px 0 26px !important; max-width: 1100px; }
+#limits .boundaries { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; align-items: stretch; }
+#limits .boundary { border: 1px solid var(--rule); border-top: 6px solid var(--faint); border-radius: 10px; padding: 18px 22px 20px; background: var(--panel); }
+#limits .boundary h3 { font-size: 25px; margin-bottom: 12px; }
+#limits .boundary ul { list-style: none; display: grid; gap: 12px; }
+#limits .boundary li { position: relative; padding-left: 20px; font-size: 21px; line-height: 1.3; color: var(--ink); }
+#limits .boundary li::before { content: ""; position: absolute; left: 0; top: 10px; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+#limits .boundary-use { border-top-color: var(--pass); background: var(--pass-bg); }
+#limits .boundary-use h3 { color: var(--pass); }
+#limits .boundary-use li::before { background: var(--pass); }
+#limits .boundary-investigate { border-top-color: var(--blue); background: var(--info-bg); }
+#limits .boundary-investigate h3 { color: var(--info); }
+#limits .boundary-investigate li::before { background: var(--blue); }
+#limits .boundary-open h3 { color: var(--muted); }
+#limits .boundary-note { margin-top: 30px !important; font-size: 24px; font-weight: 600; color: var(--ink); border-left: 6px solid var(--ink); padding: 6px 0 6px 20px; }
+
+/* Slide 6 (#conclusions): prioritized actions, one-week box, closing statement. Scoped. */
+#conclusions .plan { display: grid; grid-template-columns: 1.75fr 1fr; gap: 26px; align-items: start; margin-bottom: 18px; }
+#conclusions .next-steps h3 { font-size: 22px; margin-bottom: 10px; }
+#conclusions .priorities { list-style: none; counter-reset: priority; display: grid; gap: 10px; }
+#conclusions .priorities li { counter-increment: priority; position: relative; padding-left: 50px; min-height: 36px; }
+#conclusions .priorities li::before {
+  content: counter(priority);
+  position: absolute; left: 0; top: 0;
+  width: 34px; height: 34px; border-radius: 8px;
+  background: var(--blue); color: #fff; font-weight: 700; font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
+}
+#conclusions .priorities h4 { font-size: 19.5px; font-weight: 700; margin: 0 0 2px; color: var(--ink); text-transform: none; }
+#conclusions .priorities p { font-size: 16.5px; color: var(--muted); margin: 0 !important; line-height: 1.3; }
+#conclusions .priorities .lead { color: var(--ink); font-weight: 600; }
+#conclusions .one-week { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 18px; }
+#conclusions .one-week h3 { font-size: 17px; color: var(--muted); margin-bottom: 8px; }
+#conclusions .one-week ul { list-style: none; display: grid; gap: 8px; }
+#conclusions .one-week li { font-size: 15px; color: var(--ink); line-height: 1.3; }
+#conclusions .one-week .when { display: block; font-size: 13.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--info); }
+#conclusions .closing { background: var(--ink); color: #fff; border-radius: 10px; padding: 14px 24px; font-size: 22px; font-weight: 650; line-height: 1.3; margin: 0 !important; }
+
+/* Slide number */
+.reveal .slide-number { background: transparent; color: var(--muted); font-family: var(--font); font-size: 15px; left: 18px; right: auto; bottom: 12px; }
+.reveal .controls { color: var(--blue); }
+.reveal .progress { color: var(--blue); }
+
+/* Smaller windows: reveal.js scales the fixed canvas; keep tiles legible when the canvas is narrow. */
+@media (max-width: 760px) {
+  .reveal .slide-number { font-size: 13px; }
+}

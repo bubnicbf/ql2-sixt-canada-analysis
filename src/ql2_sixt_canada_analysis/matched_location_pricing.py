@@ -878,7 +878,7 @@ def _percent(value: float) -> str:
 
 
 def plot_matched_location_premiums(result: MatchedLocationPricingResult, *, figsize: tuple[float, float] = (12.0, 6.2),
-                                   dpi: int = 150):  # type: ignore[no-untyped-def]
+                                   dpi: int = 150, font_scale: float = 1.0):  # type: ignore[no-untyped-def]
     """The main commercial figure: dollar and percentage airport premium distributions by city.
 
     Two panels (dollars, percent), one box plot per approved city in authority
@@ -888,6 +888,9 @@ def plot_matched_location_premiums(result: MatchedLocationPricingResult, *, figs
     values are an airport premium, negative an airport discount. Uses an
     object-oriented :class:`matplotlib.figure.Figure` (no pyplot state, never
     shown); the input is not modified.
+
+    ``font_scale`` multiplies every text size (and the title padding) so the
+    same figure stays legible when it is exported for slides.
 
     Returns:
         ``(figure, (dollar_axes, percent_axes))``.
@@ -933,29 +936,31 @@ def plot_matched_location_premiums(result: MatchedLocationPricingResult, *, figs
         ax.set_xticks(positions, [c.title() for c in cities])
         ax.set_xlim(0.4, len(cities) + 0.6)
         ax.yaxis.set_major_formatter(formatter)
-        ax.set_title(title, loc="left", fontsize=12, color=_INK, pad=34)
+        ax.set_title(title, loc="left", fontsize=12 * font_scale, color=_INK, pad=34 * font_scale)
         ax.grid(axis="y", color=_GRID, linewidth=0.8)
         ax.set_axisbelow(True)
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
-        ax.tick_params(colors=_INK_SECONDARY)
+        ax.tick_params(colors=_INK_SECONDARY, labelsize=10 * font_scale)
         blend = blended_transform_factory(ax.transData, ax.transAxes)
         for values, position in zip(data, positions):
             text = f"n = {values.size:,}\nmedian {label(float(np.median(values)))}" if values.size else "n = 0"
-            ax.text(position, 1.01, text, transform=blend, ha="center", va="bottom", fontsize=9, color=_INK)
-        ax.text(1.0, 0.99, "▲ airport premium", transform=ax.transAxes, ha="right", va="top", fontsize=9,
-                color=_INK_SECONDARY)
-        ax.text(1.0, 0.01, "▼ airport discount", transform=ax.transAxes, ha="right", va="bottom", fontsize=9,
-                color=_INK_SECONDARY)
-    axes[0].set_ylabel(f"Airport minus downtown price ({symbol}/{basis})", color=_INK_SECONDARY)
-    axes[1].set_ylabel("(Airport - downtown) / downtown", color=_INK_SECONDARY)
+            ax.text(position, 1.01, text, transform=blend, ha="center", va="bottom", fontsize=9 * font_scale,
+                    color=_INK)
+        ax.text(1.0, 0.99, "▲ airport premium", transform=ax.transAxes, ha="right", va="top",
+                fontsize=9 * font_scale, color=_INK_SECONDARY)
+        ax.text(1.0, 0.01, "▼ airport discount", transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=9 * font_scale, color=_INK_SECONDARY)
+    axes[0].set_ylabel(f"Airport minus downtown price ({symbol}/{basis})", color=_INK_SECONDARY,
+                       fontsize=10 * font_scale)
+    axes[1].set_ylabel("(Airport - downtown) / downtown price (%)", color=_INK_SECONDARY, fontsize=10 * font_scale)
     fig.suptitle("Matched airport vs downtown premiums: same job, same car, same rental dates",
-                 fontsize=14, color=_INK, x=0.01, ha="left")
+                 fontsize=14 * font_scale, color=_INK, x=0.01, ha="left")
     zero = report.overall.counts.zero_denominator
     fig.supxlabel("Boxes: interquartile range with median; whiskers: full range; points: every matched pair "
              "(jittered horizontally). No axis clipping: all observations shown."
              + (f" {zero:,} zero-denominator pairs omitted from the percentage panel." if zero else ""),
-             fontsize=8, color=_INK_SECONDARY, x=0.01, ha="left")
+             fontsize=8 * font_scale, color=_INK_SECONDARY, x=0.01, ha="left")
     return fig, (axes[0], axes[1])
 
 

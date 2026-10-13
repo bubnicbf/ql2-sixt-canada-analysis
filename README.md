@@ -20,6 +20,8 @@ src/ql2_sixt_canada_analysis/   Reusable Python source package
 tests/             Automated validation (pytest)
 reports/           Generated analytical reports (ignored by default)
 reports/figures/   Generated charts and figures (ignored by default)
+presentation/      Six-slide reveal.js deck sources (template, styles, vendored
+                   reveal.js); the built deck goes to reports/presentation/
 docs/              Supporting documentation: data dictionary, assumptions and
                    open questions, investigations, decision records
 ```
@@ -122,6 +124,26 @@ print("Executed code cells:", len(result.execution_counts))
 PY
 ```
 
+To execute every notebook, in order, each from a fresh kernel (the clean-kernel
+verification used for the presentation; nothing is written to the repository):
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from ql2_sixt_canada_analysis.notebook_validation import execute_notebook_copy
+
+for notebook in sorted(Path("notebooks").glob("0*.ipynb")):
+    with TemporaryDirectory() as workdir:
+        result = execute_notebook_copy(notebook, workdir=workdir, timeout_seconds=900)
+    print(notebook.name, "executed code cells:", len(result.execution_counts))
+PY
+```
+
+It prints one line per notebook (`01_data_ingestion.ipynb` to
+`06_final_report.ipynb`) and stops with `NotebookExecutionError` if a cell
+raises. Each notebook takes a few seconds on the supplied exports.
+
 Prefix the command with `QL2_SIXT_RAW_DATA_DIR=<synthetic directory>` to run
 the same copy against synthetic exports. `python -m pytest tests/test_notebooks.py`
 generates synthetic CSVs from the column contracts in a temporary directory and
@@ -142,6 +164,7 @@ Targeted checks during development:
 python -m pytest tests/test_final_documentation.py   # final report, docs and README contracts
 python -m pytest tests/test_notebooks.py             # notebook structure, tags and clean-kernel execution
 python -m pytest tests/test_monitoring.py tests/test_price_change_presentation.py tests/test_assortment_presentation.py
+python -m pytest tests/test_presentation_deck.py     # presentation QA: slides, notes, assets, figures, values
 ```
 
 Full suite and whitespace check before committing:
@@ -170,7 +193,76 @@ README and placeholders), executed notebook copies (`*.executed.ipynb`,
 Git-ignored because they are derived from proprietary data. Never force-add
 them.
 
-### 6. Clear notebook outputs before committing
+### 6. Build and present the slide deck (Git-ignored, confidential)
+
+The six-slide reveal.js presentation is generated from one run of the final
+report, so its numbers cannot drift from notebook 06:
+
+```bash
+python -m ql2_sixt_canada_analysis.presentation_deck build            # figures, results artifact and deck in reports/presentation/
+python -m ql2_sixt_canada_analysis.presentation_deck validate         # recompute every value from a fresh run and check the built deck
+python -m ql2_sixt_canada_analysis.presentation_deck verify-notebook  # run notebook 06 from a clean kernel; check each traced value in its output
+python -m http.server --directory reports/presentation 8000          # then open http://localhost:8000/ in a browser
+```
+
+Expected output: `Deck built: 6 slides, 2 figures, results artifact
+deck_results.json (reports/presentation/index.html).`, then `Deck valid: 6
+slides, <n> values match the current run.` and `Every traced deck value (<n>)
+appears in the executed final-report notebook output.` Stop the server with
+Ctrl+C. In the browser, the arrow keys move between slides, **S** opens the
+reveal.js speaker view (speaker notes, timer and next slide; allow the pop-up),
+**F** is full screen and **Esc** the overview. Serve the deck as shown rather
+than opening the file directly, so the speaker view and figures load the same
+way they were tested.
+
+How it works (`ql2_sixt_canada_analysis.presentation_deck`):
+
+- `build` runs `run_final_report` once and refuses to build unless every
+  section is completed (`Deck build failed: the deck needs a completed final
+  report ...`, exit status 1). No partial deck is written.
+- The figures are exported by the authoritative plotting functions
+  (`plot_matched_location_premiums`, `plot_price_change_heatmap`) at slide size
+  (`figsize` and `font_scale` in `DECK_FIGURES`), after the price-change
+  reconciliation gates. Their titles, axis labels, legends and colour-bar labels
+  are recorded and checked for explicit units.
+- `reports/presentation/deck_results.json` is the machine-readable results
+  artifact: every number on a slide or in the speaker notes, with its raw
+  value, display string, report field and, where notebook 06 prints it, the
+  exact text of that output (`trace`). The build fails if a traced value is
+  missing from the final-report interpretation text.
+- `presentation/deck.html` contains no typed quantities: each value is a
+  placeholder rendered as `<span data-value="key">`. `validate` checks that
+  the page equals the template rendered from the stored results, that the
+  stored results equal a fresh computation, that each span matches, and the
+  slide structure, speaker notes, assets, figures and labels.
+- Slide 1 states its scope in words generated from the results: the market
+  count from the approved cities, the airport and downtown roles from the
+  location authority, and the duration from `observation_window` (hours from
+  the first to the last scheduled capture, rounded half up to whole days; see
+  `presentation/README.md`). Its speaker notes carry the authority record,
+  alias handling, exact window and scope limits.
+- Rounding: counts are exact (thousands separators); price differences are
+  rounded to cents per rental day; percentages of the downtown price to one
+  decimal (as in the figure); shares to whole percent and pooled retention to
+  two decimals (as in the notebook 06 interpretation).
+
+The built deck, its figures and its results artifact are derived from the
+proprietary extract: `reports/presentation/` is Git-ignored, and sharing the
+deck shares that derived data. Never commit or publish it. Template, styles,
+initialisation and the vendored reveal.js 5.1.0 (MIT) live in `presentation/`
+(see `presentation/README.md`); no CDN or web font is used.
+
+Optional headless-browser smoke test: with Playwright and a Chromium build
+installed (`python -m pip install playwright` and `python -m playwright install
+chromium`; neither is a project dependency), `python -m pytest
+tests/test_presentation_deck.py -k browser` loads the deck at 1920×1080 and
+1024×640, fails on console errors or failed local requests, steps through all
+six slides checking the slide number, overflow, images and notes, and opens the
+speaker view. Set `QL2_SIXT_DECK_SCREENSHOT_DIR=reports/presentation_screenshots`
+to save one screenshot per slide (Git-ignored). Without Playwright these tests
+are skipped.
+
+### 7. Clear notebook outputs before committing
 
 ```bash
 python -m ql2_sixt_canada_analysis.notebook_validation --clear notebooks/*.ipynb
@@ -183,7 +275,7 @@ widget state. Edit ▸ Clear Outputs of All Cells in JupyterLab also works; eith
 way, the tests fail if a committed notebook keeps outputs, execution counts,
 widget state, execution timing or local paths.
 
-### 7. Troubleshooting
+### 8. Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
@@ -191,7 +283,8 @@ widget state, execution timing or local paths.
 | `ERROR: Package ... requires a different Python` or `ImportError: cannot import name 'StrEnum'` | The environment uses Python older than 3.11. Recreate `.venv` with Python 3.11+ and reinstall with `pip install -e ".[dev]"`. |
 | `No such kernel named python3` | Run JupyterLab and the tests from the activated environment; if needed register it with `python -m ipykernel install --sys-prefix`. |
 | Every section prints `blocked` | A readiness gate failed. Read the blocker categories, run notebook 01 for the gate-by-gate status, and see the decision records under `docs/decisions/`; this is fail-closed behaviour, not a bug. |
-| `tests/test_notebooks.py` fails on outputs, execution counts or metadata | A notebook was saved after running. Clear it (step 6) and commit again; never commit executed notebooks. |
+| `Deck build failed: the deck needs a completed final report` | A readiness gate or analysis is blocked for this run; the deck is never built from blocked evidence. Run notebook 06 to see the blocker categories. |
+| `tests/test_notebooks.py` fails on outputs, execution counts or metadata | A notebook was saved after running. Clear it (step 7) and commit again; never commit executed notebooks. |
 
 ## Raw data ingestion
 
@@ -2117,7 +2210,9 @@ two-panel matplotlib `Figure` (dollar and percentage premium by city): box
 plots with every matched pair as a deterministic jittered point (no axis
 clipping), a zero-premium reference line, authority city order, per-city
 valid match count and median, airport premium/discount labels and an
-accessible palette. It never uses pyplot state or calls `plt.show`.
+accessible palette. It never uses pyplot state or calls `plt.show`. Both y
+axes carry units (currency per rental day; percent of the downtown price), and
+the optional `font_scale` argument enlarges every text for the slide deck.
 
 **Run.** Generate the local deliverables after every gate passes (exit code
 2 and blocker categories only when blocked; nothing is written then):
@@ -2547,7 +2642,9 @@ panels, so the directions never cancel, for every approved location and
 scheduled period. Cells without an eligible interval (hard breaks, or
 outside the schedule) are hatched grey, never zero. The figure uses
 canonical UTC capture labels and object-oriented Matplotlib with no pyplot
-state. `write_price_change_analysis_outputs(result, output_dir)` writes
+state; the optional `figsize` and `font_scale` arguments resize it for the
+slide deck, and `wording="audience"` switches to the plain-language labels of
+`HEATMAP_LABELS`, without changing its content. `write_price_change_analysis_outputs(result, output_dir)` writes
 `price_change_event_table.csv` and `price_change_event_heatmap.png`
 atomically, and only into an explicitly supplied directory. Analysis
 functions write nothing.
