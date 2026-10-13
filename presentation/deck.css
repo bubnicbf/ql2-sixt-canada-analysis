@@ -1,0 +1,160 @@
+/* Sixt Canada rate-feed review deck.
+ * Colours follow the analysis figures: blue increases / first city, orange decreases / second city,
+ * green third city; ink and muted greys from the plotting modules. System fonts only (no downloads). */
+
+:root {
+  --ink: #0b0b0b;
+  --muted: #52514e;
+  --faint: #8a8984;
+  --rule: #e4e3df;
+  --paper: #ffffff;
+  --panel: #f7f6f3;
+  --blue: #2a78d6;
+  --orange: #eb6834;
+  --green: #1baf7a;
+  --pass: #1a7f55;
+  --pass-bg: #e3f4ec;
+  --warn: #9a5b00;
+  --warn-bg: #fdf0dc;
+  --info: #1f5fae;
+  --info-bg: #e6effa;
+  --fail: #b3261e;
+  --fail-bg: #fbe6e4;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html, body { background: var(--paper); }
+
+.reveal {
+  font-family: var(--font);
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--ink);
+  line-height: 1.35;
+}
+
+.reveal .slides { text-align: left; }
+
+.reveal .slides > section {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 34px 50px 26px;
+  overflow: hidden;
+}
+
+.reveal h1, .reveal h2, .reveal h3 {
+  font-family: var(--font);
+  color: var(--ink);
+  margin: 0;
+  text-transform: none;
+  letter-spacing: -0.01em;
+}
+
+.reveal h1 { font-size: 58px; line-height: 1.1; font-weight: 700; max-width: 1000px; }
+.reveal h2 { font-size: 31px; line-height: 1.2; font-weight: 700; margin-bottom: 18px; max-width: 1120px; }
+.reveal h3 { font-size: 21px; font-weight: 650; margin-bottom: 6px; }
+.reveal p { margin: 0 0 8px; }
+.reveal code { white-space: nowrap; font-family: var(--mono); font-size: 0.86em; background: var(--panel); padding: 1px 6px; border-radius: 4px; }
+.reveal strong { font-weight: 650; }
+.reveal ul, .reveal ol { margin: 0; padding: 0; }
+.reveal .v { font-variant-numeric: tabular-nums; }
+
+/* Title slide */
+.slide-title { display: flex; flex-direction: column; justify-content: center; }
+.kicker { color: var(--blue); font-weight: 650; font-size: 18px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 18px !important; }
+.lede { font-size: 26px; color: var(--muted); max-width: 980px; margin: 18px 0 26px !important; }
+.chips { list-style: none; display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 28px !important; }
+.chips li { background: var(--panel); border: 1px solid var(--rule); border-radius: 999px; padding: 8px 18px; font-size: 19px; color: var(--muted); }
+.chips strong { color: var(--ink); }
+.answer { border-left: 6px solid var(--blue); background: var(--info-bg); padding: 14px 22px; border-radius: 0 10px 10px 0; max-width: 980px; }
+.answer-label { font-size: 15px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em; color: var(--info); margin-bottom: 4px !important; }
+.answer-text { font-size: 26px; font-weight: 650; margin: 0 !important; }
+.footer-note { position: absolute; bottom: 26px; left: 50px; right: 50px; font-size: 15px; color: var(--faint); }
+
+/* Layout helpers */
+.two-col { display: grid; grid-template-columns: 1.45fr 1fr; gap: 32px; align-items: start; }
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 22px; }
+.compact { list-style: none; }
+.compact li { position: relative; padding-left: 18px; margin-bottom: 10px; font-size: 19px; }
+.compact li::before { content: ""; position: absolute; left: 0; top: 10px; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+
+/* Approach steps */
+.steps { list-style: none; counter-reset: step; }
+.steps li { counter-increment: step; position: relative; padding-left: 52px; margin-bottom: 16px; }
+.steps li::before {
+  content: counter(step);
+  position: absolute; left: 0; top: 0;
+  width: 34px; height: 34px; border-radius: 50%;
+  background: var(--blue); color: #fff; font-weight: 700; font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
+}
+.steps p { font-size: 18.5px; color: var(--muted); }
+.steps p strong { color: var(--ink); }
+
+/* Figures */
+.figure-wide { margin: 0; }
+.figure-wide img { display: block; width: auto; max-width: 100%; height: auto; max-height: 470px; object-fit: contain; object-position: left top; margin: 0; }
+#changes .figure-wide img { max-height: 500px; }
+#pricing .figure-wide img { max-height: 440px; }
+.reveal figcaption { font-size: 14px; color: var(--muted); margin-top: 4px; }
+
+/* City cards and stat tiles */
+.cards, .tiles { list-style: none; display: grid; gap: 14px; margin-top: 10px !important; }
+.cards { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.tiles { grid-template-columns: repeat(4, 1fr); }
+.city-card, .tiles li { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 10px 16px; }
+.city-card { border-top: 5px solid var(--blue); }
+.city-card:nth-child(2) { border-top-color: var(--orange); }
+.city-card:nth-child(3) { border-top-color: var(--green); }
+.city-card h3 { font-size: 16px; color: var(--muted); margin-bottom: 0; }
+.city-card .cc-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.city-card .big { font-size: 24px; white-space: nowrap; }
+.city-card p { font-size: 14.5px; }
+.city-card p, .tiles p { font-size: 15.5px; margin: 0 !important; color: var(--muted); }
+.reveal .big { font-size: 28px; font-weight: 700; color: var(--ink); line-height: 1.2; }
+.reveal .unit { font-size: 16px; font-weight: 600; color: var(--muted); }
+.muted { color: var(--faint) !important; }
+
+/* Monitoring table */
+.control-table { width: 100%; border-collapse: collapse; font-size: 16.5px; }
+.control-table caption { caption-side: bottom; text-align: left; font-size: 14px; color: var(--muted); padding-top: 8px; }
+.control-table th, .control-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+.control-table thead th { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--faint); font-weight: 650; }
+.control-table tbody th { font-weight: 500; }
+.pill, .sev { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 14px; font-weight: 650; white-space: nowrap; }
+.pill-passed { background: var(--pass-bg); color: var(--pass); }
+.pill-triggered { background: var(--fail-bg); color: var(--fail); }
+.pill-candidate_only { background: var(--info-bg); color: var(--info); }
+.pill-confirmation_required { background: var(--warn-bg); color: var(--warn); }
+.pill-not_assessable { background: var(--panel); color: var(--muted); border: 1px solid var(--rule); }
+.sev { background: transparent; border: 1px solid var(--rule); color: var(--muted); font-weight: 600; }
+.sev-critical { border-color: var(--fail); color: var(--fail); }
+.sev-high { border-color: var(--warn); color: var(--warn); }
+
+/* Conclusions */
+.answers { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+.answers article { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; }
+.answers h3 { font-size: 17px; color: var(--blue); }
+.answers p { font-size: 17px; }
+.rec-title { margin-bottom: 8px !important; }
+.takeaway { margin-top: 18px !important; border-left: 6px solid var(--blue); background: var(--info-bg); padding: 12px 20px; border-radius: 0 10px 10px 0; font-size: 21px; }
+.recs { list-style: none; counter-reset: rec; }
+.recs li { counter-increment: rec; position: relative; padding-left: 44px; margin-bottom: 12px; font-size: 20px; }
+.recs li::before {
+  content: counter(rec);
+  position: absolute; left: 0; top: 1px;
+  width: 30px; height: 30px; border-radius: 8px;
+  background: var(--ink); color: #fff; font-weight: 700; font-size: 16px;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Slide number */
+.reveal .slide-number { background: transparent; color: var(--muted); font-family: var(--font); font-size: 15px; left: 18px; right: auto; bottom: 12px; }
+.reveal .controls { color: var(--blue); }
+.reveal .progress { color: var(--blue); }
+
+/* Smaller windows: reveal.js scales the fixed canvas; keep tiles legible when the canvas is narrow. */
+@media (max-width: 760px) {
+  .reveal .slide-number { font-size: 13px; }
+}

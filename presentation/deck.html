@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sixt Canada Rate-Feed Review</title>
+  <meta name="description" content="Can QL2 trust the hourly Sixt Canada rate feed? Readiness, matched airport-versus-downtown pricing, price and assortment changes, monitoring and recommendations from one gated pipeline run.">
+  <link rel="stylesheet" href="vendor/reveal.js/reset.css">
+  <link rel="stylesheet" href="vendor/reveal.js/reveal.css">
+  <link rel="stylesheet" href="deck.css">
+</head>
+<body>
+<div class="reveal">
+  <div class="slides">
+
+    <!-- Slide: title, central question and context -->
+    <section id="question" class="slide-title" aria-labelledby="question-title">
+      <p class="kicker">QL2 · Sixt Canada hourly rate feed · data-quality and pricing review</p>
+      <h1 id="question-title">Can QL2 trust the hourly Sixt Canada rate feed?</h1>
+      <p class="lede">Enough to support customer decisions — and which pricing and visible-assortment signals survive
+        once coverage, timestamps, locations and product identity are controlled?</p>
+      <ul class="chips" aria-label="Scope of the extract">
+        <li><strong>{{city_count}}</strong> cities</li>
+        <li><strong>{{location_count}}</strong> canonical locations, airport and downtown</li>
+        <li><strong>{{hours_per_location}}</strong> scheduled hourly captures per location</li>
+        <li><strong>{{window_label}}</strong> (UTC)</li>
+      </ul>
+      <div class="answer" role="note">
+        <p class="answer-label">Short answer</p>
+        <p class="answer-text">{{answer_line}}</p>
+      </div>
+      <p class="footer-note">One supplier and one apparent source mode, so supplier, channel and win/meet/loss
+        questions are out of scope. Confidential: derived from proprietary QL2 data.</p>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Frame the decision. QL2 wants to know whether this hourly Sixt Canada feed is
+          trustworthy enough to put in front of customers, and what it actually says about pricing and the visible
+          product range.</p>
+        <p><strong>Say.</strong> The extract covers {{city_count}} cities and {{location_count}} canonical locations
+          — an airport and a downtown branch in each city — with {{hours_per_location}} scheduled hourly captures per
+          location between {{window_start}} and {{window_end}}. The short answer is on the slide: {{answer_line}}
+          The rest of the deck earns that answer.</p>
+        <p><strong>Definitions.</strong> A canonical location is the approved location identity after alias
+          handling; Vancouver Thurlow is combined into Vancouver Downtown under the approved authority record.</p>
+        <p><strong>Caveat.</strong> There is one supplier and one apparent source mode, so supplier, channel and
+          win/meet/loss comparisons cannot be answered from these files.</p>
+        <p><strong>Transition.</strong> Before any finding, here is how the data was gated and what each number
+          refers to.</p>
+      </aside>
+    </section>
+
+    <!-- Slide: data, scope, assumptions and approach -->
+    <section id="approach" aria-labelledby="approach-title">
+      <h2 id="approach-title">Every finding rests on one gated pipeline run</h2>
+      <div class="two-col">
+        <ol class="steps" aria-label="Analytical approach">
+          <li><h3>Gate the extract</h3>
+            <p>Stream contract, schedule coverage, job linkage, reconciliation, trusted join, city, timestamp and
+              rental-date rules, attribute stability and location authority.
+              Status <strong>{{readiness_status}}</strong> under <code>{{authority_record}}</code>.</p></li>
+          <li><h3>Keep the eligible population</h3>
+            <p>Only pricing-eligible offers enter a conclusion. Governed exclusion:
+              <strong>{{governed_excluded_captures}}</strong> Calgary location-captures from one incomplete parent
+              capture.</p></li>
+          <li><h3>Compare like with like</h3>
+            <p>A matched pair is the same city, collection job, rental period, exact product, currency and price
+              basis, with one airport and one downtown offer: <strong>{{matched_pairs}}</strong> pairs from
+              {{candidate_groups}} candidate groups (match rate {{match_rate}}).</p></li>
+          <li><h3>Track change, then monitor</h3>
+            <p>Price and assortment changes over <strong>{{interval_count}}</strong> consecutive eligible one-hour
+              location intervals; <strong>{{control_count}}</strong> monitoring controls evaluated on the same
+              run.</p></li>
+        </ol>
+        <div class="panel">
+          <h3>Assumptions</h3>
+          <ul class="compact">
+            <li>Listed prices as returned (exact cents, currency and price basis) — not total customer cost.</li>
+            <li>Products match on exact identity: name, type, transmission, seats, bags. No similarity matching.</li>
+            <li>Hourly captures of one product are repeated measurements, so results are associational.</li>
+            <li>Visible assortment is what the collection returned, not supplier availability.</li>
+          </ul>
+        </div>
+      </div>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Establish why the numbers that follow can be trusted, and exactly what each one
+          counts.</p>
+        <p><strong>Say.</strong> Nothing is analysed until every foundational gate passes. In this run the readiness
+          status is {{readiness_status}} under the approved decision record {{authority_record}}. Then we keep only
+          the pricing-eligible population. The one governed exclusion is an incomplete Calgary parent capture, which
+          removes {{governed_excluded_captures}} location-captures — both Calgary streams for that hour — from
+          pricing, while staying in the audit population.</p>
+        <p><strong>Numbers.</strong> {{matched_pairs}} matched pairs out of {{candidate_groups}} candidate groups,
+          a match rate of {{match_rate}}. Unmatched or ambiguous groups are excluded rather than guessed. Change
+          analysis uses {{interval_count}} consecutive eligible one-hour intervals across locations, and the
+          {{control_count}} monitoring controls run on the same single pipeline result, so no section mixes
+          evidence from different runs.</p>
+        <p><strong>Caveat.</strong> Because the same product is captured every hour, observations are not
+          independent; we describe differences and do not make causal claims.</p>
+        <p><strong>Transition.</strong> First result: how airport and downtown prices compare for the same car.</p>
+      </aside>
+    </section>
+
+    <!-- Slide: first major result — matched airport versus downtown pricing -->
+    <section id="pricing" aria-labelledby="pricing-title">
+      <h2 id="pricing-title">{{matched_headline}}</h2>
+      <figure class="figure-wide">
+        <img src="figures/matched_premiums.png" alt="{{=matched_alt}}" width="{{=matched_premiums_width}}" height="{{=matched_premiums_height}}">
+        <figcaption>Premium = airport minus downtown listed price, same product, collection job and rental period;
+          percentage of the downtown price. Source: matched-location pricing, {{=authority_record}}.</figcaption>
+      </figure>
+      <ul class="cards" aria-label="Median premium by city">
+        {{>city_cards}}
+      </ul>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Answer the pricing-structure question with the cleanest comparison the data
+          allows.</p>
+        <p><strong>Say.</strong> Each point is one matched pair: the same car, same collection job and same rental
+          dates, listed at the airport and downtown. Airport listings are {{premium_sign_phrase}} at the median. The widest gap is
+          {{top_city_name}}: a median premium of {{top_city_median}}, or {{top_city_median_pct}} of the downtown
+          price. Across all {{matched_pairs}} pairs, the airport is higher in {{overall_positive_share}} of them,
+          with an overall median of {{overall_median}}.</p>
+        <p><strong>Worth noticing.</strong> In {{top_city_name}}, half of all pairs sit between
+          {{top_city_pct_iqr}} of the downtown price: {{top_city_spread_note}}. That is a lead for revenue
+          management, not a conclusion.</p>
+        <p><strong>Definitions and rounding.</strong> Dollar values are rounded to cents per rental day and
+          percentages to one decimal, matching the figure annotations; the interquartile range in these notes uses
+          two decimals so its narrow width is visible.</p>
+        <p><strong>Caveat.</strong> These are associational differences in listed prices over one short window, not
+          causal effects or total customer cost.</p>
+        <p><strong>Transition.</strong> Levels are one thing; next, how prices and assortment moved hour to hour.</p>
+      </aside>
+    </section>
+
+    <!-- Slide: second major result — price changes and visible assortment -->
+    <section id="changes" aria-labelledby="changes-title">
+      <h2 id="changes-title">{{change_headline}}</h2>
+      <figure class="figure-wide">
+        <img src="figures/price_change_heatmap.png" alt="{{=heatmap_alt}}" width="{{=price_change_heatmap_width}}" height="{{=price_change_heatmap_height}}">
+      </figure>
+      <ul class="tiles" aria-label="Change and assortment summary">
+        <li><p class="big">{{pc_total}}</p><p>price-change candidates: {{pc_increases}} up, {{pc_decreases}} down</p></li>
+        <li><p class="big">{{sync_intervals}}</p><p>direction-synchronized location intervals</p></li>
+        <li><p class="big">{{held}} <span class="unit">held</span></p><p>{{continued}} continued, {{reverted}} reverted
+          of {{with_following}}; {{censored}} right-censored</p></li>
+        <li><p class="big">{{retention}} <span class="unit">retention</span></p><p>{{additions}} added,
+          {{removals}} removed; {{drop_phrase}}, {{drop_sharing_phrase}}</p></li>
+      </ul>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Answer the change-and-anomaly question: are movements isolated, synchronized
+          and persistent?</p>
+        <p><strong>Say.</strong> Each offer is compared with the immediately preceding eligible capture of the same
+          location one hour earlier. There are {{pc_total}} price-change candidates — {{pc_increases}} increases and
+          {{pc_decreases}} decreases, so {{pc_direction_phrase}} — across {{interval_count}} eligible location
+          intervals, plus {{assortment_events}} appearance or disappearance events. The heatmap shows they bunch
+          into {{changed_intervals}} of the {{interval_count}} intervals ({{pc_spread_phrase}}): {{sync_intervals}} intervals are direction-synchronized, meaning at least two
+          products at one location moved the same way in the same hour.</p>
+        <p><strong>Persistence.</strong> Of the {{with_following}} changes that have a following eligible interval,
+          {{held}} held, {{continued}} continued and {{reverted}} reverted. {{not_testable}} are not testable, of
+          which {{censored}} sit at the final capture and are right-censored, so they are excluded from persistence
+          conclusions.</p>
+        <p><strong>Assortment.</strong> Pooled retention is {{retention}} (rounded to two decimals) over
+          {{assessed_intervals}} assessed intervals, with {{additions}} additions and {{removals}} removals. There
+          were {{drop_intervals_phrase}}, {{drop_sharing_phrase}}; {{coincident_intervals}} intervals had a
+          price change at the same location. With the unusual-drop policy {{policy_status}}, drops are review
+          candidates only.</p>
+        <p><strong>Caveat.</strong> Synchronized movements are candidates, not evidence of deliberate repricing or of
+          an extraction error. Telling those apart needs collection logs or source snapshots.</p>
+        <p><strong>Transition.</strong> So what can we rely on today, and what remains unknown?</p>
+      </aside>
+    </section>
+
+    <!-- Slide: interpretation, monitoring and limitations -->
+    <section id="limits" aria-labelledby="limits-title">
+      <h2 id="limits-title">{{monitoring_headline}}</h2>
+      <div class="two-col">
+        <div>
+          <table class="control-table">
+            <caption>Monitoring controls evaluated on this run: {{controls_passed}} passed,
+              {{controls_triggered}} triggered, {{controls_candidate_only}} candidate-only,
+              {{controls_confirmation}} confirmation-required, {{controls_not_assessable}} not assessable</caption>
+            <thead><tr><th scope="col">Control</th><th scope="col">Severity</th><th scope="col">Status</th></tr></thead>
+            <tbody>
+            {{>monitoring_rows}}
+            </tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h3>What this window cannot tell us</h3>
+          <ul class="compact">
+            <li><strong>Normal variation:</strong> {{hours_per_location}} hourly captures are descriptive — no
+              seasonality, long-run behaviour or calibrated thresholds.</li>
+            <li><strong>Cause:</strong> matched premiums are associational, not causal, and are listed prices, not
+              total cost.</li>
+            <li><strong>Repricing or defect:</strong> without collection logs or source snapshots, synchronized moves
+              and drops cannot be classified either way.</li>
+            <li><strong>End of window:</strong> {{censored}} right-censored changes need the next eligible
+              collection.</li>
+            <li><strong>Competition:</strong> one supplier and one source mode, so no win/meet/loss reading.</li>
+          </ul>
+        </div>
+      </div>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Interpret the results honestly: separate what the feed has demonstrated from
+          what this extract cannot show.</p>
+        <p><strong>Say.</strong> Of the {{control_count}} monitoring controls, {{controls_passed}} passed and
+          {{controls_triggered}} triggered. The contract-based controls — missing locations, job-detail count
+          mismatches, duplicate or aliased feeds, timestamp offsets and product-attribute changes — can run on future
+          extracts today. {{controls_candidate_only}} are candidate-only: the abrupt-assortment and
+          synchronized-movement rules have no approved threshold, so they list review candidates, not alerts.
+          {{controls_confirmation}} is confirmation-required because the final-window observations need the next
+          eligible collection. Not assessable is never treated as a pass; here {{controls_not_assessable}} are not
+          assessable.</p>
+        <p><strong>Limitations.</strong> The window is roughly {{hours_per_location}} hours, so we can describe it
+          but not generalise. Premiums are associational. We cannot tell market repricing from collection defects
+          without operational evidence. There is no competitor or channel data.</p>
+        <p><strong>Transition.</strong> That leads directly to what we recommend.</p>
+      </aside>
+    </section>
+
+    <!-- Slide: conclusions, recommendations and key takeaways -->
+    <section id="conclusions" aria-labelledby="conclusions-title">
+      <h2 id="conclusions-title">Use the feed for descriptive monitoring now; earn trust for pricing decisions next</h2>
+      <div class="answers" aria-label="Answers to the four analytical questions">
+        <article><h3>Coverage and reliability</h3>
+          <p>Ready under <code>{{authority_record}}</code>; {{controls_passed}} of {{control_count}} controls passed,
+            {{controls_triggered}} triggered.</p></article>
+        <article><h3>Pricing structure</h3>
+          <p>Airport higher in {{overall_positive_share}} of {{matched_pairs}} matched pairs; widest gap
+            {{top_city_name}} at {{top_city_median}}.</p></article>
+        <article><h3>Change and anomalies</h3>
+          <p>{{pc_total}} candidates, {{pc_direction_phrase}}; {{sync_intervals}} synchronized intervals; assortment
+            retention {{retention}}.</p></article>
+        <article><h3>Actionability</h3>
+          <p>{{candidate_phrase}} need approved thresholds; {{confirmation_phrase}} needs the next
+            collection.</p></article>
+      </div>
+      <h3 class="rec-title">Recommendations</h3>
+      <ol class="recs">
+        <li><strong>Run the contract-based controls</strong> on every new extract before it reaches a customer.</li>
+        <li><strong>Investigate the {{top_city_name}} airport gap</strong> with revenue management: median
+          {{top_city_median}} ({{top_city_median_pct}}), {{top_city_spread_phrase}}.</li>
+        <li><strong>Request longer history, the next collections and collection logs</strong>, then approve
+          thresholds for the candidate rules.</li>
+      </ol>
+      <p class="takeaway"><strong>Key takeaway:</strong> the feed is consistent enough to monitor and describe today;
+        pricing decisions need longer history and operational evidence first.</p>
+      <aside class="notes">
+        <p><strong>Purpose.</strong> Close with one answer per analytical question and concrete next steps.</p>
+        <p><strong>Say.</strong> Coverage and reliability: the extract passed every foundational gate under
+          {{authority_record}}, and {{controls_passed}} of the {{control_count}} controls passed, so this window can
+          support descriptive analysis. Pricing structure: the airport is higher in {{overall_positive_share}} of
+          the {{matched_pairs}} matched pairs, widest in {{top_city_name}} at {{top_city_median}}. Change and
+          anomalies: {{pc_total}} price-change candidates, {{pc_direction_phrase}}, with {{sync_intervals}}
+          synchronized intervals and stable assortment at a pooled retention of {{retention}}. Actionability:
+          {{candidate_phrase}} still need an approved method and threshold, and {{confirmation_phrase}} waits for
+          the next eligible collection.</p>
+        <p><strong>Recommendations.</strong> First, run the contract-based controls on every extract. Second, take
+          the {{top_city_name}} premium to revenue management as an investigation lead — it is the largest gap,
+          {{top_city_spread_phrase}} — but not as a pricing decision. Third, request a longer history, the collections after this
+          window and collection logs; only then calibrate thresholds for the candidate rules.</p>
+        <p><strong>Caveat.</strong> Every finding describes this window and the pricing-eligible population only.
+          Use them to set investigation priorities, not prices.</p>
+      </aside>
+    </section>
+
+  </div>
+</div>
+<script src="vendor/reveal.js/reveal.js"></script>
+<script src="vendor/reveal.js/plugin/notes/notes.js"></script>
+<script src="deck.js"></script>
+</body>
+</html>
