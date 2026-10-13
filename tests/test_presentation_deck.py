@@ -479,6 +479,129 @@ def test_a_tampered_methodology_note_value_is_detected(deck_copy: Path) -> None:
         pd_.validate_deck(deck_copy)
 
 
+# ============================================================================ slide 6: prioritized next steps
+
+NEXT_HEADING = "What I would do next"
+PRIORITIES = (
+    ("Productionize the reliable checks",
+     "Run coverage, reconciliation, timestamp, location, and product-identity checks on every delivery."),
+    ("Investigate the largest commercial signal",
+     "Review the largest airport/downtown premium with revenue management."),
+    ("Close the evidence gaps",
+     "Request longer history, subsequent captures, collection logs, competitor prices, and total-cost components."),
+    ("Calibrate monitoring thresholds", "Establish normal variation before converting candidates into alerts."),
+)
+WEEK_HEADING = "With one more week, I would…"
+CLOSING = ("The feed is reliable enough to tell us where to look, but not yet complete enough to tell us what "
+           "commercial action to take.")
+
+
+def _inline(fragment: str) -> str:
+    """Flattened text with inline value spans joined to their neighbours (no space before punctuation)."""
+    return _flat(re.sub(r"</?span[^>]*>", "", fragment))
+
+
+def _leading_market_changed(report: fr.FinalReportResult) -> fr.FinalReportResult:
+    """The same run with the last approved city's dollar premiums shifted up, so it leads the ranking."""
+    matched = report.matched
+    cities = list(matched.report.cities)
+    dollars = cities[-1].dollars
+    shifted = {f.name: getattr(dollars, f.name) + 1000.0 for f in dataclasses.fields(dollars)
+               if f.name in ("mean", "median", "q25", "q75", "minimum", "maximum")}
+    cities[-1] = dataclasses.replace(cities[-1], dollars=dataclasses.replace(dollars, **shifted))
+    matched = dataclasses.replace(matched, report=dataclasses.replace(matched.report, cities=tuple(cities)))
+    return dataclasses.replace(report, matched=matched)
+
+
+def test_final_slide_presents_a_prioritized_plan(deck_dir: Path) -> None:
+    visible, text, notes = _slide(deck_dir, "conclusions")
+    parsed = pd_._parse((deck_dir / "index.html").read_text(encoding="utf-8"))
+    assert parsed.slides[-1]["id"] == "conclusions" and len(parsed.slides) == 6
+    assert re.search(r'<h3 id="next-title">' + re.escape(NEXT_HEADING) + "</h3>", visible)
+    assert "Recommendations" not in text
+
+    plan = re.search(r'<ol class="priorities"[^>]*aria-labelledby="next-title"[^>]*>(.*?)</ol>', visible, re.DOTALL)
+    assert plan, "the priorities are a semantic ordered list labelled by the section heading"
+    items = re.findall(r"<li>(.*?)</li>", plan.group(1), re.DOTALL)
+    assert len(items) == len(PRIORITIES) == 4
+    for item, (heading, support) in zip(items, PRIORITIES, strict=True):
+        assert re.search(r"<h4>" + re.escape(heading) + "</h4>", item), heading
+        assert _flat(item).startswith(f"{heading} {support}"), heading
+        assert text.count(heading) == 1, heading
+    assert PRIORITIES[0][0] in _flat(items[0]) and PRIORITIES[-1][0] in _flat(items[-1])
+
+    values = _results(deck_dir)["values"]
+    lead = _inline(items[1])
+    assert lead.endswith(f"Largest median premium: {values['top_city_name']['display']}, "
+                         f"{values['top_city_median']['display']}.")
+    assert 'data-value="top_city_name"' in items[1] and 'data-value="top_city_median"' in items[1]
+
+    week = re.search(r'<div class="one-week" role="group" aria-labelledby="week-title">(.*?)</div>', visible,
+                     re.DOTALL)
+    assert week and f'<h3 id="week-title">{WEEK_HEADING}</h3>' in week.group(1)
+    week_text = _inline(week.group(1))
+    for idea in ("longer-window baseline", "Backtest candidate alert thresholds",
+                 f"Investigate the {values['top_city_name']['display']} premium with commercial and operational"):
+        assert idea in week_text, idea
+    assert "Start now" in week_text and "Once history arrives" in week_text, "now versus data-dependent work"
+
+    assert text.count(CLOSING) == 1 and text.endswith(CLOSING), "the closing statement is the final visible element"
+    assert re.search(r'<p class="closing">' + re.escape(CLOSING).replace(r"\ ", r"\s+") + "</p>", visible)
+    order = [text.index(t) for t in (NEXT_HEADING, PRIORITIES[0][0], PRIORITIES[-1][0], WEEK_HEADING, CLOSING)]
+    assert order == sorted(order)
+    assert "not alerts" in text and not re.search(r"\b(confirmed|production|triggered) alerts?\b", text + notes)
+
+
+def test_final_slide_template_names_no_market_or_premium(deck_dir: Path) -> None:
+    template = TEMPLATE.read_text(encoding="utf-8")
+    start = template.index('<section id="conclusions"')
+    slide = template[start:template.index("</section>", start)]
+    for city in _results(deck_dir)["cities"]:
+        assert city["city"] not in slide, city["city"]
+    assert "{{top_city_name}}" in slide and "{{top_city_median}}" in slide
+    assert not re.search(r"\$|\d", _flat(re.sub(r"\{\{.*?\}\}", "", slide)).replace("QL2", "QL"))
+
+
+def test_a_different_leading_market_changes_the_final_slide(ready_report, deck_dir: Path) -> None:
+    original = _results(deck_dir)["values"]["top_city_name"]["display"]
+    changed = _leading_market_changed(ready_report)
+    results = pd_.deck_results(changed)
+    leader = results["values"]["top_city_name"]["display"]
+    assert leader == results["cities"][-1]["city"] != original
+    page = pd_.render_deck_html(TEMPLATE.read_text(encoding="utf-8"),
+                                {**results, "figures": _results(deck_dir)["figures"]})
+    start = page.index('<section id="conclusions"')
+    slide = _inline(page[start:page.index("</section>", start)].split('<aside class="notes">')[0])
+    assert f"Largest median premium: {leader}, {results['values']['top_city_median']['display']}." in slide
+    assert f"Investigate the {leader} premium" in slide and original not in slide
+    with pytest.raises(pd_.DeckValidationError, match="stale for this run: .*top_city_name"):
+        pd_.validate_deck(deck_dir, changed)                     # the built deck no longer matches this run
+
+
+def test_final_slide_notes_explain_the_order_and_the_evidence_gaps(deck_dir: Path) -> None:
+    _, _, notes = _slide(deck_dir, "conclusions")
+    for kept in ("Why this order", "need no new data or threshold", "it is a lead", "revenue management",
+                 "collection owner", "normal variation and seasonality", "right-censored",
+                 "market behaviour from collection behaviour", "win/meet/loss", "Total-cost components",
+                 "customer-relevant", "calibrated and backtested", "With one more week", "depend on others",
+                 CLOSING, "what would you like to explore"):
+        assert kept in notes, kept
+    assert len(notes.split()) >= 400
+
+
+def test_a_tampered_final_slide_value_is_detected(deck_copy: Path) -> None:
+    page = deck_copy / "index.html"
+    text = page.read_text(encoding="utf-8")
+    display = _results(deck_copy)["values"]["top_city_name"]["display"]
+    start = text.index('<section id="conclusions"')
+    span = f'data-value="top_city_name">{display}<'
+    position = text.index(span, start)
+    page.write_text(text[:position] + span.replace(display, "Elsewhere") + text[position + len(span):],
+                    encoding="utf-8")
+    with pytest.raises(pd_.DeckValidationError, match="span top_city_name"):
+        pd_.validate_deck(deck_copy)
+
+
 # ============================================================================ figures, labels and units
 
 

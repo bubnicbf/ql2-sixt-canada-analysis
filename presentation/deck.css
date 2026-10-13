@@ -138,22 +138,31 @@ html, body { background: var(--paper); }
 .sev-critical { border-color: var(--fail); color: var(--fail); }
 .sev-high { border-color: var(--warn); color: var(--warn); }
 
-/* Conclusions */
-.answers { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
-.answers article { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; }
-.answers h3 { font-size: 17px; color: var(--blue); }
-.answers p { font-size: 17px; }
-.rec-title { margin-bottom: 8px !important; }
-.takeaway { margin-top: 18px !important; border-left: 6px solid var(--blue); background: var(--info-bg); padding: 12px 20px; border-radius: 0 10px 10px 0; font-size: 21px; }
-.recs { list-style: none; counter-reset: rec; }
-.recs li { counter-increment: rec; position: relative; padding-left: 44px; margin-bottom: 12px; font-size: 20px; }
-.recs li::before {
-  content: counter(rec);
-  position: absolute; left: 0; top: 1px;
-  width: 30px; height: 30px; border-radius: 8px;
-  background: var(--ink); color: #fff; font-weight: 700; font-size: 16px;
+/* Slide 6 (#conclusions): evidence strip, prioritized actions, one-week box, closing statement. Scoped. */
+#conclusions .evidence { list-style: none; display: flex; flex-wrap: nowrap; gap: 0; margin: 0 0 20px !important; font-size: 16px; color: var(--muted); white-space: nowrap; }
+#conclusions .evidence li { padding: 0 14px; border-left: 1px solid var(--rule); }
+#conclusions .evidence li:first-child { padding-left: 0; border-left: 0; }
+#conclusions .evidence strong { color: var(--ink); }
+#conclusions .plan { display: grid; grid-template-columns: 1.75fr 1fr; gap: 26px; align-items: start; margin-bottom: 18px; }
+#conclusions .next-steps h3 { font-size: 22px; margin-bottom: 10px; }
+#conclusions .priorities { list-style: none; counter-reset: priority; display: grid; gap: 10px; }
+#conclusions .priorities li { counter-increment: priority; position: relative; padding-left: 50px; min-height: 36px; }
+#conclusions .priorities li::before {
+  content: counter(priority);
+  position: absolute; left: 0; top: 0;
+  width: 34px; height: 34px; border-radius: 8px;
+  background: var(--blue); color: #fff; font-weight: 700; font-size: 18px;
   display: flex; align-items: center; justify-content: center;
 }
+#conclusions .priorities h4 { font-size: 19.5px; font-weight: 700; margin: 0 0 2px; color: var(--ink); text-transform: none; }
+#conclusions .priorities p { font-size: 16.5px; color: var(--muted); margin: 0 !important; line-height: 1.3; }
+#conclusions .priorities .lead { color: var(--ink); font-weight: 600; }
+#conclusions .one-week { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 18px; }
+#conclusions .one-week h3 { font-size: 17px; color: var(--muted); margin-bottom: 8px; }
+#conclusions .one-week ul { list-style: none; display: grid; gap: 8px; }
+#conclusions .one-week li { font-size: 15px; color: var(--ink); line-height: 1.3; }
+#conclusions .one-week .when { display: block; font-size: 13.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--info); }
+#conclusions .closing { background: var(--ink); color: #fff; border-radius: 10px; padding: 14px 24px; font-size: 22px; font-weight: 650; line-height: 1.3; margin: 0 !important; }
 
 /* Slide number */
 .reveal .slide-number { background: transparent; color: var(--muted); font-family: var(--font); font-size: 15px; left: 18px; right: auto; bottom: 12px; }

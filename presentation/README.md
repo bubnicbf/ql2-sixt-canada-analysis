@@ -39,5 +39,14 @@ individual readiness gates, the decision record and the matched-pair,
 exclusion, interval and control counts are in its speaker notes, as
 placeholders. Its styles are scoped to `#approach`.
 
+Slide 6 closes with a decision plan rather than a results recap: a short
+evidence strip, four prioritized actions in a semantic ordered list ("What I
+would do next"), a compact one-week follow-on plan that separates work that can
+start now from work that needs more data, and the closing statement that marks
+the boundary between investigation and commercial action. The leading market
+and its premium come from `top_city_name` and `top_city_median`; the per-question
+recap and the rationale for each evidence gap are in its speaker notes. Its
+styles are scoped to `#conclusions`.
+
 To update reveal.js, replace the four files and `LICENSE` from the new npm
 package (`npm pack reveal.js@<version>`), update the version above and rebuild.

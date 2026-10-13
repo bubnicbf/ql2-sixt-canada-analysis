@@ -238,49 +238,89 @@
       </aside>
     </section>
 
-    <!-- Slide: conclusions, recommendations and key takeaways -->
+    <!-- Slide: evidence recap, prioritized next steps, one-week plan and closing statement -->
     <section id="conclusions" aria-labelledby="conclusions-title">
       <h2 id="conclusions-title">Use the feed for descriptive monitoring now; earn trust for pricing decisions next</h2>
-      <div class="answers" aria-label="Answers to the four analytical questions">
-        <article><h3>Coverage and reliability</h3>
-          <p>Ready under <code>{{authority_record}}</code>; {{controls_passed}} of {{control_count}} controls passed,
-            {{controls_triggered}} triggered.</p></article>
-        <article><h3>Pricing structure</h3>
-          <p>Airport higher in {{overall_positive_share}} of {{matched_pairs}} matched pairs; widest gap
-            {{top_city_name}} at {{top_city_median}}.</p></article>
-        <article><h3>Change and anomalies</h3>
-          <p>{{pc_total}} candidates, {{pc_direction_phrase}}; {{sync_intervals}} synchronized intervals; assortment
-            retention {{retention}}.</p></article>
-        <article><h3>Actionability</h3>
-          <p>{{candidate_phrase}} need approved thresholds; {{confirmation_phrase}} needs the next
-            collection.</p></article>
+      <ul class="evidence" aria-label="What the evidence supports">
+        <li><strong>Reliable checks:</strong> {{controls_passed}} of {{control_count}} passed,
+          {{controls_triggered}} triggered</li>
+        <li><strong>Pricing signal:</strong> airport higher in {{overall_positive_share}} of pairs</li>
+        <li><strong>Changes:</strong> {{pc_total}} candidates to investigate, not alerts</li>
+      </ul>
+      <div class="plan">
+        <div class="next-steps">
+          <h3 id="next-title">What I would do next</h3>
+          <ol class="priorities" role="list" aria-labelledby="next-title">
+            <li>
+              <h4>Productionize the reliable checks</h4>
+              <p>Run coverage, reconciliation, timestamp, location, and product-identity checks on every
+                delivery.</p>
+            </li>
+            <li>
+              <h4>Investigate the largest commercial signal</h4>
+              <p>Review the largest airport/downtown premium with revenue management.
+                <span class="lead">Largest median premium: {{top_city_name}}, {{top_city_median}}.</span></p>
+            </li>
+            <li>
+              <h4>Close the evidence gaps</h4>
+              <p>Request longer history, subsequent captures, collection logs, competitor prices, and total-cost
+                components.</p>
+            </li>
+            <li>
+              <h4>Calibrate monitoring thresholds</h4>
+              <p>Establish normal variation before converting candidates into alerts.</p>
+            </li>
+          </ol>
+        </div>
+        <div class="one-week" role="group" aria-labelledby="week-title">
+          <h3 id="week-title">With one more week, I would…</h3>
+          <ul>
+            <li><span class="when">Start now</span> Build a longer-window baseline that extends with each new
+              delivery.</li>
+            <li><span class="when">Once history arrives</span> Backtest candidate alert thresholds against it.</li>
+            <li><span class="when">With partners</span> Investigate the {{top_city_name}} premium with commercial and
+              operational context.</li>
+          </ul>
+        </div>
       </div>
-      <h3 class="rec-title">Recommendations</h3>
-      <ol class="recs">
-        <li><strong>Run the contract-based controls</strong> on every new extract before it reaches a customer.</li>
-        <li><strong>Investigate the {{top_city_name}} airport gap</strong> with revenue management: median
-          {{top_city_median}} ({{top_city_median_pct}}), {{top_city_spread_phrase}}.</li>
-        <li><strong>Request longer history, the next collections and collection logs</strong>, then approve
-          thresholds for the candidate rules.</li>
-      </ol>
-      <p class="takeaway"><strong>Key takeaway:</strong> the feed is consistent enough to monitor and describe today;
-        pricing decisions need longer history and operational evidence first.</p>
+      <p class="closing">The feed is reliable enough to tell us where to look, but not yet complete enough to tell us
+        what commercial action to take.</p>
       <aside class="notes">
-        <p><strong>Purpose.</strong> Close with one answer per analytical question and concrete next steps.</p>
-        <p><strong>Say.</strong> Coverage and reliability: the extract passed every foundational gate under
-          {{authority_record}}, and {{controls_passed}} of the {{control_count}} controls passed, so this window can
-          support descriptive analysis. Pricing structure: the airport is higher in {{overall_positive_share}} of
-          the {{matched_pairs}} matched pairs, widest in {{top_city_name}} at {{top_city_median}}. Change and
-          anomalies: {{pc_total}} price-change candidates, {{pc_direction_phrase}}, with {{sync_intervals}}
-          synchronized intervals and stable assortment at a pooled retention of {{retention}}. Actionability:
-          {{candidate_phrase}} still need an approved method and threshold, and {{confirmation_phrase}} waits for
-          the next eligible collection.</p>
-        <p><strong>Recommendations.</strong> First, run the contract-based controls on every extract. Second, take
-          the {{top_city_name}} premium to revenue management as an investigation lead — it is the largest gap,
-          {{top_city_spread_phrase}} — but not as a pricing decision. Third, request a longer history, the collections after this
-          window and collection logs; only then calibrate thresholds for the candidate rules.</p>
-        <p><strong>Caveat.</strong> Every finding describes this window and the pricing-eligible population only.
-          Use them to set investigation priorities, not prices.</p>
+        <p><strong>Purpose.</strong> Close on a decision and a plan: what the analysis supports today, what I would
+          do first, and where the boundary sits between investigation and commercial action.</p>
+        <p><strong>Say.</strong> The decision is unchanged from the opening: the feed supports descriptive
+          monitoring now. Every foundational gate passed under {{authority_record}} and {{controls_passed}} of the
+          {{control_count}} controls passed with {{controls_triggered}} triggered. The airport listing is higher in
+          {{overall_positive_share}} of the {{matched_pairs}} matched pairs, widest in {{top_city_name}} at
+          {{top_city_median}} ({{top_city_median_pct}}), {{top_city_spread_phrase}}. I observed {{pc_total}}
+          price-change candidates, {{pc_direction_phrase}}, with {{sync_intervals}} synchronized intervals and
+          assortment retention of {{retention}}. None of that is yet a reason to change a price.</p>
+        <p><strong>Why this order.</strong> I ranked the actions by what the evidence already supports. The
+          contract-based checks come first because they passed on this extract, need no new data or threshold, and
+          protect every later use of the feed. The premium investigation is second because it is the largest
+          commercial signal, but it is a lead: listed prices from one supplier over a short window cannot say whether
+          the gap is a deliberate strategy, a fee structure or a capture artefact. I would bring revenue management
+          and the pricing analysts for the commercial context, and the collection owner for how those captures were
+          produced.</p>
+        <p><strong>Why each evidence gap matters.</strong> Longer history is needed to establish normal variation
+          and seasonality; a few days cannot define normal. Subsequent captures resolve the {{censored}}
+          right-censored changes at the end of the window. Collection logs separate market behaviour from collection
+          behaviour, such as retries or partial captures. Competitor prices are required for any competitive-position
+          or win/meet/loss conclusion, because this extract holds one supplier. Total-cost components — taxes, fees
+          and insurance — are needed before a comparison is customer-relevant rather than listed-price only.</p>
+        <p><strong>Why thresholds come last.</strong> {{candidate_phrase}} are candidate-only and
+          {{confirmation_phrase}} waits for the next collection. Turning candidates into alerts before thresholds are
+          calibrated and backtested on enough history would produce alerts nobody can trust, so they stay review
+          candidates until then.</p>
+        <p><strong>With one more week.</strong> I would start immediately on a longer-window baseline that grows
+          with each delivery, using the same gates. Once more history arrives, I would backtest candidate thresholds
+          against labelled normal periods and known incidents. If revenue management and the collection owner are
+          available, I would review the {{top_city_name}} premium with them. Longer history and operational evidence
+          depend on others providing them; I would not assume they already exist.</p>
+        <p><strong>Close.</strong> The feed is reliable enough to tell us where to look, but not yet complete enough
+          to tell us what commercial action to take.</p>
+        <p><strong>Transition.</strong> I am happy to go deeper on any gate, the matching rules or the premium
+          investigation — what would you like to explore?</p>
       </aside>
     </section>
 
