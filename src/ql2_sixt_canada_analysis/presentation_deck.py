@@ -315,8 +315,7 @@ def opening_conclusion(controls_clean: bool) -> str:
     control narrows the conclusion instead of keeping the decision-ready wording.
     """
     if controls_clean:
-        return ("Decision-ready for descriptive monitoring; more history and operational evidence are needed "
-                "before using it for pricing decisions.")
+        return ("Reliable for descriptive monitoring; not yet sufficient for pricing decisions.")
     return "Not yet decision-ready: contract-based controls flag defects to resolve before monitoring or pricing use."
 
 
