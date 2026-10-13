@@ -190,51 +190,71 @@
       </aside>
     </section>
 
-    <!-- Slide: interpretation, monitoring and limitations -->
+    <!-- Slide: decision boundaries (use now, investigate, cannot conclude yet) -->
     <section id="limits" aria-labelledby="limits-title">
-      <h2 id="limits-title">{{monitoring_headline}}</h2>
-      <div class="two-col">
-        <div>
-          <table class="control-table">
-            <caption>Monitoring controls evaluated on this run: {{controls_passed}} passed,
-              {{controls_triggered}} triggered, {{controls_candidate_only}} candidate-only,
-              {{controls_confirmation}} confirmation-required, {{controls_not_assessable}} not assessable</caption>
-            <thead><tr><th scope="col">Control</th><th scope="col">Severity</th><th scope="col">Status</th></tr></thead>
-            <tbody>
-            {{>monitoring_rows}}
-            </tbody>
-          </table>
+      <h2 id="limits-title">What I would trust today—and what I would not</h2>
+      <p class="framing">I separated what the evidence supports today from the questions that still need more
+        data.</p>
+      <div class="boundaries" role="group" aria-label="Decision boundaries">
+        <div class="boundary boundary-use" role="group" aria-labelledby="boundary-use">
+          <h3 id="boundary-use">Use now</h3>
+          <ul>
+            <li>Feed coverage and contract monitoring.</li>
+            <li>Descriptive airport-versus-downtown benchmarks.</li>
+            <li>Identification of patterns requiring investigation.</li>
+          </ul>
         </div>
-        <div class="panel">
-          <h3>What this window cannot tell us</h3>
-          <ul class="compact">
-            <li><strong>Normal variation:</strong> {{hours_per_location}} hourly captures are descriptive — no
-              seasonality, long-run behaviour or calibrated thresholds.</li>
-            <li><strong>Cause:</strong> matched premiums are associational, not causal, and are listed prices, not
-              total cost.</li>
-            <li><strong>Repricing or defect:</strong> without collection logs or source snapshots, synchronized moves
-              and drops cannot be classified either way.</li>
-            <li><strong>End of window:</strong> {{censored}} right-censored changes need the next eligible
-              collection.</li>
-            <li><strong>Competition:</strong> one supplier and one source mode, so no win/meet/loss reading.</li>
+        <div class="boundary boundary-investigate" role="group" aria-labelledby="boundary-investigate">
+          <h3 id="boundary-investigate">Investigate</h3>
+          <ul>
+            <li>The largest market premium.</li>
+            <li>Synchronized price movements.</li>
+            <li>Abrupt assortment drops.</li>
+          </ul>
+        </div>
+        <div class="boundary boundary-open" role="group" aria-labelledby="boundary-open">
+          <h3 id="boundary-open">Cannot conclude yet</h3>
+          <ul>
+            <li>Why a price changed.</li>
+            <li>Whether a pattern is normal over time.</li>
+            <li>Competitive position or win/meet/loss.</li>
+            <li>Total customer cost.</li>
           </ul>
         </div>
       </div>
+      <p class="boundary-note">Use the feed to monitor and prioritize investigations—not to set prices or explain why
+        they changed.</p>
       <aside class="notes">
-        <p><strong>Purpose.</strong> Interpret the results honestly: separate what the feed has demonstrated from
-          what this extract cannot show.</p>
-        <p><strong>Say.</strong> Of the {{control_count}} monitoring controls, {{controls_passed}} passed and
-          {{controls_triggered}} triggered. The contract-based controls — missing locations, job-detail count
-          mismatches, duplicate or aliased feeds, timestamp offsets and product-attribute changes — can run on future
-          extracts today. {{controls_candidate_only}} are candidate-only: the abrupt-assortment and
-          synchronized-movement rules have no approved threshold, so they list review candidates, not alerts.
-          {{controls_confirmation}} is confirmation-required because the final-window observations need the next
-          eligible collection. Not assessable is never treated as a pass; here {{controls_not_assessable}} are not
-          assessable.</p>
-        <p><strong>Limitations.</strong> The window is roughly {{hours_per_location}} hours, so we can describe it
-          but not generalise. Premiums are associational. We cannot tell market repricing from collection defects
-          without operational evidence. There is no competitor or channel data.</p>
-        <p><strong>Transition.</strong> That leads directly to what we recommend.</p>
+        <p><strong>Purpose.</strong> Translate the control framework into decision boundaries: what QL2 can use
+          now, what deserves investigation, and which conclusions would go beyond the evidence. I separated what the
+          evidence can support today from the questions that still need more data.</p>
+        <p><strong>Say.</strong> Use now: coverage and contract monitoring are reliable enough to operationalize
+          because they test fixed, approved expectations — the expected locations, job-to-detail counts, aliasing,
+          timestamp offsets and product attributes — and do not need a threshold calibrated on history. The
+          airport-versus-downtown comparisons are descriptive benchmarks of listed prices for identical offers;
+          they are associational, not causal pricing guidance. Identifying patterns is useful before any alert
+          threshold is approved, because it tells us where to look first.</p>
+        <p><strong>Say: investigate.</strong> The largest premium, {{top_city_name}} at {{top_city_median}}, is an
+          investigation lead, not a pricing recommendation: one supplier's listed prices over a short window cannot
+          explain it. Synchronized price movements are not evidence of intentional repricing; they could also come from
+          how a capture was collected. Abrupt assortment drops do not show that supplier availability fell:
+          visible assortment is only what the collection returned. Telling commercial changes from collection
+          behaviour needs collection logs or source snapshots.</p>
+        <p><strong>Say: cannot conclude yet.</strong> These are questions the extract cannot answer, not failed
+          analyses. About {{observation_hours}} hours of captures cannot establish normal variation or seasonality.
+          One supplier and one apparent source mode cannot support competitive-position or win/meet/loss
+          conclusions. Listed prices are not total customer cost, which also includes taxes, fees and insurance. And
+          {{censored}} right-censored changes at the end of the window need the subsequent captures before their
+          persistence is known.</p>
+        <p><strong>For questions: the monitoring controls.</strong> {{monitoring_headline}}. Of the
+          {{control_count}} controls, {{controls_passed}} passed, {{controls_triggered}} triggered,
+          {{controls_candidate_only}} are candidate-only, {{controls_confirmation}} confirmation-required and
+          {{controls_not_assessable}} not assessable. Candidate-only means the rule has no approved method or
+          threshold, so it lists review candidates, never alerts. Confirmation-required means an observation at the
+          end of the window needs the next eligible collection. Not assessable is never treated as a pass. The full
+          table, generated from this run:</p>
+        {{>monitoring_notes_table}}
+        <p><strong>Transition.</strong> Those boundaries set the order of what I would do next.</p>
       </aside>
     </section>
 

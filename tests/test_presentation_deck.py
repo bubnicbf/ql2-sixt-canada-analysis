@@ -479,6 +479,133 @@ def test_a_tampered_methodology_note_value_is_detected(deck_copy: Path) -> None:
         pd_.validate_deck(deck_copy)
 
 
+# ============================================================================ slide 5: decision boundaries
+
+BOUNDARY_TITLE = "What I would trust today—and what I would not"
+BOUNDARIES = (
+    ("Use now", ("Feed coverage and contract monitoring.", "Descriptive airport-versus-downtown benchmarks.",
+                 "Identification of patterns requiring investigation.")),
+    ("Investigate", ("The largest market premium.", "Synchronized price movements.", "Abrupt assortment drops.")),
+    ("Cannot conclude yet", ("Why a price changed.", "Whether a pattern is normal over time.",
+                             "Competitive position or win/meet/loss.", "Total customer cost.")),
+)
+INTERNAL_TERMS = ("candidate-only", "candidate only", "confirmation-required", "confirmation required",
+                  "not assessable", "not-assessable", "severity", "calibration", "critical", "high", "medium",
+                  "low", "passed", "triggered", "control_id", "contract_based")
+
+
+def _notes_table_rows(directory: Path) -> list[tuple[str, list[str]]]:
+    """``(control id, [name, severity, status, calibration])`` of every row of the slide 5 notes table."""
+    notes = _slide_html(directory, "limits").split('<aside class="notes">')[1]
+    table = re.search(r'<table class="notes-controls"[^>]*>(.*?)</table>', notes, re.DOTALL)
+    assert table, "the control table is in the speaker notes"
+    rows = re.findall(r'<tr data-control-id="([a-z_]+)">(.*?)</tr>', table.group(1), re.DOTALL)
+    return [(cid, [_flat(c) for c in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", cells, re.DOTALL)])
+            for cid, cells in rows]
+
+
+def test_decision_boundary_slide_shows_three_audience_sections(deck_dir: Path) -> None:
+    visible, text, _ = _slide(deck_dir, "limits")
+    parsed = pd_._parse((deck_dir / "index.html").read_text(encoding="utf-8"))
+    assert [s["id"] for s in parsed.slides].index("limits") == 4
+    assert [h.strip() for h in parsed.slides[4]["headings"]] == [BOUNDARY_TITLE]
+    assert f'<h2 id="limits-title">{BOUNDARY_TITLE}</h2>' in visible
+    assert _results(deck_dir)["values"]["monitoring_headline"]["display"] not in text
+
+    assert re.search(r'<div class="boundaries" role="group" aria-label="[^"]+">', visible)
+    groups = re.findall(r'<div class="boundary [^"]+" role="group" aria-labelledby="([^"]+)">\s*'
+                        r'<h3 id="([^"]+)">(.*?)</h3>\s*<ul>(.*?)</ul>', visible, re.DOTALL)
+    assert len(groups) == len(BOUNDARIES) == 3
+    for (labelled_by, heading_id, heading, items), (expected, expected_items) in zip(groups, BOUNDARIES,
+                                                                                      strict=True):
+        assert labelled_by == heading_id and heading == expected
+        assert tuple(_flat(li) for li in re.findall(r"<li>(.*?)</li>", items, re.DOTALL)) == expected_items
+    assert [text.index(h) for h, _ in BOUNDARIES] == sorted(text.index(h) for h, _ in BOUNDARIES)
+    note = "Use the feed to monitor and prioritize investigations—not to set prices or explain why they changed."
+    assert text.count(note) == 1 and text.endswith(note), "the boundary statement closes the projected slide"
+
+
+def test_decision_boundary_slide_hides_the_control_framework(deck_dir: Path) -> None:
+    visible, text, notes = _slide(deck_dir, "limits")
+    assert "<table" not in visible and 'class="pill' not in visible and 'class="sev' not in visible
+    for term in INTERNAL_TERMS:
+        assert not re.search(r"\b" + re.escape(term) + r"\b", text, re.IGNORECASE), term
+    assert "data-value" not in visible and not re.search(r"\d", text), "no counts on the projected slide"
+    for row in _results(deck_dir)["monitoring_controls"]:
+        assert row["name"] not in text and row["control_id"] not in text
+    assert "not assessable" in notes.lower(), "the internal terms are expected in the notes"
+
+
+def test_speaker_notes_hold_the_complete_generated_control_table(deck_dir: Path, ready_report) -> None:
+    from ql2_sixt_canada_analysis.monitoring import monitoring_control
+
+    rows = _notes_table_rows(deck_dir)
+    overview = fr.monitoring_overview_table(ready_report)
+    assert [cid for cid, _ in rows] == list(overview["control_id"]), "every control once, in authoritative order"
+    for (cid, cells), record in zip(rows, overview.to_dict("records"), strict=True):
+        assert cells == [monitoring_control(cid).name, record["effective_severity"].replace("_", " "),
+                         record["evaluation_status"].replace("_", " "),
+                         record["calibration_status"].replace("_", " ")]
+    values = _results(deck_dir)["values"]
+    statuses = [cells[2] for _, cells in rows]
+    for key, status in (("controls_passed", "passed"), ("controls_triggered", "triggered"),
+                        ("controls_candidate_only", "candidate only"),
+                        ("controls_confirmation", "confirmation required"),
+                        ("controls_not_assessable", "not assessable")):
+        assert values[key]["value"] == statuses.count(status), key
+    assert values["control_count"]["value"] == len(rows)
+    template = TEMPLATE.read_text(encoding="utf-8")
+    start = template.index('<section id="limits"')
+    slide = template[start:template.index("</section>", start)]
+    assert "{{>monitoring_notes_table}}" in slide and "<table" not in slide and "<tr" not in slide
+    for record in overview.to_dict("records"):
+        assert monitoring_control(record["control_id"]).name not in slide
+
+
+def test_a_changed_control_status_changes_the_notes_table(deck_dir: Path, ready_report) -> None:
+    results = pd_.deck_results(ready_report)
+    results["figures"] = _results(deck_dir)["figures"]
+    first = results["monitoring_controls"][0]
+    original = first["status"]
+    first["status"] = "triggered" if original != "triggered" else "passed"
+    page = pd_.render_deck_html(TEMPLATE.read_text(encoding="utf-8"), results)
+    start = page.index('<section id="limits"')
+    notes = page[start:page.index("</section>", start)].split('<aside class="notes">')[1]
+    row = re.search(rf'<tr data-control-id="{first["control_id"]}">(.*?)</tr>', notes, re.DOTALL).group(1)
+    assert first["status"].replace("_", " ") in _flat(row) and original.replace("_", " ") not in _flat(row)
+
+
+def test_a_stale_or_tampered_control_table_is_detected(deck_copy: Path, ready_report) -> None:
+    results = _results(deck_copy)
+    results["monitoring_controls"][0]["status"] = "not_assessable"
+    (deck_copy / pd_.DECK_RESULTS_FILENAME).write_text(json.dumps(results), encoding="utf-8")
+    (deck_copy / "index.html").write_text(pd_.render_deck_html(TEMPLATE.read_text(encoding="utf-8"), results),
+                                          encoding="utf-8")
+    pd_.validate_deck(deck_copy)                                   # internally consistent ...
+    with pytest.raises(pd_.DeckValidationError, match="stale for this run: monitoring_controls"):
+        pd_.validate_deck(deck_copy, ready_report)                 # ... but not this run's monitoring result
+    page = deck_copy / "index.html"
+    page.write_text(page.read_text(encoding="utf-8").replace("not assessable</td>", "passed</td>", 1),
+                    encoding="utf-8")
+    with pytest.raises(pd_.DeckValidationError, match="stale"):
+        pd_.validate_deck(deck_copy)                               # an edited page no longer renders from results
+
+
+def test_decision_boundary_notes_explain_the_framework_and_its_limits(deck_dir: Path) -> None:
+    _, _, notes = _slide(deck_dir, "limits")
+    values = _results(deck_dir)["values"]
+    for kept in ("I separated what the evidence can support today", "operationalize", "descriptive benchmarks",
+                 "associational, not causal", "before any alert threshold is approved", "investigation lead, not a "
+                 "pricing recommendation", "not evidence of intentional repricing",
+                 "do not show that supplier availability fell", "collection logs or source snapshots",
+                 "normal variation or seasonality",
+                 "win/meet/loss", "not total customer cost", "right-censored", "subsequent captures",
+                 "never alerts", "Not assessable is never treated as a pass", "not failed analyses",
+                 values["monitoring_headline"]["display"], values["top_city_name"]["display"], "Transition."):
+        assert kept in notes, kept
+    assert len(notes.split()) >= 400
+
+
 # ============================================================================ slide 6: prioritized next steps
 
 NEXT_HEADING = "What I would do next"

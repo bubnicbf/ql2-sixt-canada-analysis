@@ -73,13 +73,6 @@ html, body { background: var(--paper); }
 .scope li:first-child { padding-left: 0; border-left: 0; }
 .footer-note { position: absolute; bottom: 26px; left: 50px; right: 50px; font-size: 14px; color: var(--faint); }
 
-/* Layout helpers */
-.two-col { display: grid; grid-template-columns: 1.45fr 1fr; gap: 32px; align-items: start; }
-.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 22px; }
-.compact { list-style: none; }
-.compact li { position: relative; padding-left: 18px; margin-bottom: 10px; font-size: 19px; }
-.compact li::before { content: ""; position: absolute; left: 0; top: 10px; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
-
 /* Slide 2 (#approach): analysis flow, three judgment calls, priority callout. Scoped to this slide only. */
 #approach .flow { list-style: none; display: grid; grid-template-columns: repeat(5, 1fr); gap: 36px; margin: 14px 0 40px !important; }
 #approach .flow li {
@@ -122,21 +115,22 @@ html, body { background: var(--paper); }
 .reveal .unit { font-size: 16px; font-weight: 600; color: var(--muted); }
 .muted { color: var(--faint) !important; }
 
-/* Monitoring table */
-.control-table { width: 100%; border-collapse: collapse; font-size: 16.5px; }
-.control-table caption { caption-side: bottom; text-align: left; font-size: 14px; color: var(--muted); padding-top: 8px; }
-.control-table th, .control-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
-.control-table thead th { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--faint); font-weight: 650; }
-.control-table tbody th { font-weight: 500; }
-.pill, .sev { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 14px; font-weight: 650; white-space: nowrap; }
-.pill-passed { background: var(--pass-bg); color: var(--pass); }
-.pill-triggered { background: var(--fail-bg); color: var(--fail); }
-.pill-candidate_only { background: var(--info-bg); color: var(--info); }
-.pill-confirmation_required { background: var(--warn-bg); color: var(--warn); }
-.pill-not_assessable { background: var(--panel); color: var(--muted); border: 1px solid var(--rule); }
-.sev { background: transparent; border: 1px solid var(--rule); color: var(--muted); font-weight: 600; }
-.sev-critical { border-color: var(--fail); color: var(--fail); }
-.sev-high { border-color: var(--warn); color: var(--warn); }
+/* Slide 5 (#limits): three decision-boundary columns. Scoped; the control table lives in the speaker notes. */
+#limits .framing { font-size: 22px; color: var(--muted); margin: -4px 0 26px !important; max-width: 1100px; }
+#limits .boundaries { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; align-items: stretch; }
+#limits .boundary { border: 1px solid var(--rule); border-top: 6px solid var(--faint); border-radius: 10px; padding: 18px 22px 20px; background: var(--panel); }
+#limits .boundary h3 { font-size: 25px; margin-bottom: 12px; }
+#limits .boundary ul { list-style: none; display: grid; gap: 12px; }
+#limits .boundary li { position: relative; padding-left: 20px; font-size: 21px; line-height: 1.3; color: var(--ink); }
+#limits .boundary li::before { content: ""; position: absolute; left: 0; top: 10px; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+#limits .boundary-use { border-top-color: var(--pass); background: var(--pass-bg); }
+#limits .boundary-use h3 { color: var(--pass); }
+#limits .boundary-use li::before { background: var(--pass); }
+#limits .boundary-investigate { border-top-color: var(--blue); background: var(--info-bg); }
+#limits .boundary-investigate h3 { color: var(--info); }
+#limits .boundary-investigate li::before { background: var(--blue); }
+#limits .boundary-open h3 { color: var(--muted); }
+#limits .boundary-note { margin-top: 30px !important; font-size: 24px; font-weight: 600; color: var(--ink); border-left: 6px solid var(--ink); padding: 6px 0 6px 20px; }
 
 /* Slide 6 (#conclusions): evidence strip, prioritized actions, one-week box, closing statement. Scoped. */
 #conclusions .evidence { list-style: none; display: flex; flex-wrap: nowrap; gap: 0; margin: 0 0 20px !important; font-size: 16px; color: var(--muted); white-space: nowrap; }

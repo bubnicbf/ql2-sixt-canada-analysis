@@ -681,15 +681,33 @@ def _fragments(results: Mapping[str, Any]) -> dict[str, str]:
             f'<div class="cc-head"><h3>{s(p + "_name")}</h3><p class="big">{s(p + "_median")}</p></div>'
             f'<p>median premium, {s(p + "_median_pct")} of downtown; airport higher in '
             f'{s(p + "_higher_share")} of {s(p + "_pairs")} pairs</p></li>')
+    return {"city_cards": "\n".join(cards), "monitoring_notes_table": _monitoring_notes_table(results)}
+
+
+#: Inline styles for the speaker-notes control table: the speaker view does not load deck.css.
+_NOTES_TABLE_STYLE = ("border-collapse: collapse; width: 100%; table-layout: auto; font-size: 0.8em; "
+                      "margin: 0.4em 0 0.8em;")
+_NOTES_CELL_STYLE = ("text-align: left; vertical-align: top; padding: 0.2em 0.5em 0.2em 0; "
+                     "border-bottom: 1px solid #ccc; overflow-wrap: break-word;")
+
+
+def _words(code: str) -> str:
+    return code.replace("_", " ")
+
+
+def _monitoring_notes_table(results: Mapping[str, Any]) -> str:
+    """The complete monitoring-control table for the speaker notes, in authoritative order (one row per control)."""
+    head = "".join(f'<th scope="col" style="{_NOTES_CELL_STYLE}">{label}</th>'
+                   for label in ("Control", "Effective severity", "Evaluation status", "Calibration status"))
     rows = []
     for row in results["monitoring_controls"]:
-        status = row["status"]
-        rows.append(f'<tr><th scope="row">{html.escape(row["name"])}</th>'
-                    f'<td><span class="sev sev-{html.escape(row["severity"])}">'
-                    f'{html.escape(row["severity"])}</span></td>'
-                    f'<td><span class="pill pill-{html.escape(status)}">{html.escape(status.replace("_", " "))}</span>'
-                    "</td></tr>")
-    return {"city_cards": "\n".join(cards), "monitoring_rows": "\n".join(rows)}
+        cells = "".join(f'<td style="{_NOTES_CELL_STYLE}">{html.escape(_words(row[k]))}</td>'
+                        for k in ("severity", "status", "calibration"))
+        rows.append(f'<tr data-control-id="{html.escape(row["control_id"])}">'
+                    f'<th scope="row" style="{_NOTES_CELL_STYLE}">{html.escape(row["name"])}</th>{cells}</tr>')
+    return (f'<table class="notes-controls" style="{_NOTES_TABLE_STYLE}">'
+            f"<caption>Monitoring controls evaluated on this run</caption>"
+            f"<thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>")
 
 
 def render_deck_html(template: str, results: Mapping[str, Any]) -> str:
@@ -926,6 +944,8 @@ def validate_deck(output_dir: str | Path = DECK_OUTPUT_DIR, result: object = Non
         if json.loads(json.dumps(fresh)) != stored:
             changed = sorted(k for k in set(fresh["values"]) | set(stored.get("values", {}))
                              if json.loads(json.dumps(fresh["values"].get(k))) != stored.get("values", {}).get(k))
+            changed += sorted(k for k in set(fresh) | set(stored)
+                              if k != "values" and json.loads(json.dumps(fresh.get(k))) != stored.get(k))
             problems.append("the stored results are stale for this run: " + (", ".join(changed) or "structure"))
 
     parsed = _parse(page)
